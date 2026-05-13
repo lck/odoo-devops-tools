@@ -15,16 +15,16 @@ The main entry point is **`odt-env`**, a CLI that provisions an Odoo workspace f
 
 ## Installation
 
-Using `pip`:
+Using `uv`:
 
 ```bash
-pip install odoo-devops-tools
+uv tool install odoo-devops-tools
 ```
 
-Or using `uv`:
+Verify:
 
 ```bash
-uv tool install --reinstall odoo-devops-tools
+odt-env --help
 ```
 
 ---
@@ -67,7 +67,7 @@ After provisioning, the workspace has the following structure:
 ```text
 ROOT/
 ├── odoo-project.ini      # project definition
-├── odoo/                 # Odoo source repository
+├── odoo/                 # Git-managed Odoo source repository; not required when [odoo].path is used
 ├── odoo-addons/          # addon repositories from [addons.<name>] sections; unused in this minimal example
 ├── odoo-backups/         # backups created by helper scripts
 ├── odoo-configs/         # generated configuration, including odoo-server.conf
@@ -220,6 +220,20 @@ Then start Odoo:
 ./odoo-scripts/run.sh
 ```
 
+#### 2.6. Optional: Use an existing local Odoo checkout
+
+If you already maintain the Odoo source code locally, point `[odoo]` to that directory with `path`.
+
+```ini
+[odoo]
+version = 18.0
+path = ../odoo
+```
+
+Relative paths are resolved relative to `ROOT/`. When `path` is set, `odt-env` uses that directory as the Odoo source for dependency collection, editable installation, generated helper scripts, and generated `addons_path`. Git sync for Odoo is skipped, including when `--sync-odoo` or `--sync-all` is used.
+
+Use `path` only with `version`; do not combine it with `repo`, `branch`, `commit`, or `shallow`.
+
 ---
 
 ### 3. Using system Python instead of managed Python
@@ -369,7 +383,7 @@ This is useful for simple deployments where Python dependencies are prepared on 
 
 ### Repository sync
 
-- `--sync-odoo` — sync only `ROOT/odoo`
+- `--sync-odoo` — sync only the Git-managed Odoo source; when `[odoo].path` is used, the local path is reused and Git sync is skipped
 - `--sync-addons` — sync only `ROOT/odoo-addons/*`
 - `--sync-all` — sync both Odoo and addons
 
@@ -469,12 +483,18 @@ requirements_ignore =
 This section is required.
 
 - `version` — Odoo version in `X.0` format, for example `18.0`. Required.
+- `path` — local Odoo source directory. Relative paths are resolved relative to `ROOT/`.
 - `repo` — Git repository URL for Odoo. Default: the official Odoo repository.
 - `branch` — Git branch to check out. Default: the same value as `version`.
 - `commit` — optional Git commit to check out after fetching the selected branch. When set, the repository is pinned to that exact revision.
 - `shallow` — whether to use a shallow clone. Default: `true`. Ignored when `commit` is set.
 
-Example:
+Odoo must use exactly one of these source modes:
+
+- local Odoo source: `version` + `path`
+- Git-managed Odoo source: `version` + optional `repo`, `branch`, `commit`, and `shallow`
+
+Git-managed example:
 
 ```ini
 [odoo]
@@ -483,6 +503,14 @@ repo = https://github.com/odoo/odoo.git
 branch = 18.0
 commit = e6ec487
 shallow = true
+```
+
+Local source example:
+
+```ini
+[odoo]
+version = 18.0
+path = ../odoo
 ```
 
 ### `[addons.<name>]`

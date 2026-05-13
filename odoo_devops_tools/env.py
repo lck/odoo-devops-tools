@@ -59,7 +59,12 @@ class OdooSpec:
     repo: str
     branch: str
     commit: Optional[str] = None
+    path: Optional[str] = None
     shallow: bool = True
+
+    @property
+    def is_local(self) -> bool:
+        return bool((self.path or "").strip())
 
 
 @dataclass(frozen=True)
@@ -366,17 +371,42 @@ def load_project_config(
         managed_python=_get_bool("virtualenv", "managed_python", default=True),
     )
 
-    odoo_repo = cp.get("odoo", "repo", fallback="").strip() or _DEFAULT_ODOO_REPO
-    odoo_branch = cp.get("odoo", "branch", fallback="").strip() or odoo_version
-    odoo_commit = cp.get("odoo", "commit", fallback="").strip() or None
+    has_odoo_path = cp.has_option("odoo", "path")
+    has_odoo_repo = cp.has_option("odoo", "repo")
+    has_odoo_branch = cp.has_option("odoo", "branch")
+    has_odoo_commit = cp.has_option("odoo", "commit")
+    has_odoo_shallow = cp.has_option("odoo", "shallow")
 
-    odoo = OdooSpec(
-        repo=odoo_repo,
-        branch=odoo_branch,
-        commit=odoo_commit,
-        version=odoo_version,
-        shallow=_get_bool("odoo", "shallow", default=True),
-    )
+    odoo_path = cp.get("odoo", "path", fallback="").strip() if has_odoo_path else ""
+    if has_odoo_path:
+        if not odoo_path:
+            raise Exception(
+                "Invalid option 'path' in section [odoo] (expected non-empty string)."
+            )
+        if has_odoo_repo or has_odoo_branch or has_odoo_commit or has_odoo_shallow:
+            raise Exception(
+                "Invalid Odoo source in section [odoo]: "
+                "use either 'path' only for a local Odoo source, or Git settings "
+                "('repo', 'branch', optional 'commit' and 'shallow') for a Git Odoo source."
+            )
+        odoo = OdooSpec(
+            repo=_DEFAULT_ODOO_REPO,
+            branch=odoo_version,
+            version=odoo_version,
+            path=odoo_path,
+        )
+    else:
+        odoo_repo = cp.get("odoo", "repo", fallback="").strip() or _DEFAULT_ODOO_REPO
+        odoo_branch = cp.get("odoo", "branch", fallback="").strip() or odoo_version
+        odoo_commit = cp.get("odoo", "commit", fallback="").strip() or None
+
+        odoo = OdooSpec(
+            repo=odoo_repo,
+            branch=odoo_branch,
+            commit=odoo_commit,
+            version=odoo_version,
+            shallow=_get_bool("odoo", "shallow", default=True),
+        )
 
     # Addons are optional. If there are no [addons.<name>] sections, keep addons empty.
     addons: Dict[str, AddonSpec] = {}
@@ -1122,6 +1152,34 @@ def _format_conf_value(value: Any) -> str:
     return str(value)
 
 
+def _resolve_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
+    if spec.is_local:
+        odoo_path = Path((spec.path or "").strip()).expanduser()
+        if not odoo_path.is_absolute():
+            odoo_path = layout.root / odoo_path
+        try:
+            return odoo_path.resolve()
+        except Exception:
+            return odoo_path.absolute()
+
+    return layout.odoo_dir
+
+
+def _validate_local_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
+    """Validate a local Odoo path lazily, right before it is used."""
+    odoo_path = _resolve_odoo_path(layout, spec)
+
+    if not spec.is_local:
+        return odoo_path
+
+    if not odoo_path.exists():
+        raise Exception(f"Local Odoo path for [odoo] does not exist: {odoo_path}")
+    if not odoo_path.is_dir():
+        raise Exception(f"Local Odoo path for [odoo] is not a directory: {odoo_path}")
+
+    return odoo_path
+
+
 def _resolve_addon_path(layout: Layout, addon_name: str, spec: AddonSpec) -> Path:
     if spec.is_local:
         addon_path = Path((spec.path or "").strip()).expanduser()
@@ -1192,6 +1250,24 @@ def render_odoo_conf(cfg: Dict[str, Any], layout: Layout, addon_paths: list[Path
 # Script generation
 # -----------------------------
 
+def _script_odoo_bin_sh(layout: Layout) -> str:
+    odoo_bin = layout.odoo_dir / "odoo-bin"
+    try:
+        rel = odoo_bin.resolve().relative_to(layout.root.resolve())
+        return "${ROOT_DIR}/" + rel.as_posix()
+    except Exception:
+        return str(odoo_bin)
+
+
+def _script_odoo_bin_bat(layout: Layout) -> str:
+    odoo_bin = layout.odoo_dir / "odoo-bin"
+    try:
+        rel = odoo_bin.resolve().relative_to(layout.root.resolve())
+        return "%ROOT_DIR%\\" + "\\".join(rel.parts)
+    except Exception:
+        return str(odoo_bin)
+
+
 def write_run_sh(layout: Layout) -> None:
     content = """#!/usr/bin/env bash
 set -euo pipefail
@@ -1202,7 +1278,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VENV_DIR="${ROOT_DIR}/venv"
 PY="${VENV_DIR}/bin/python"
-ODOO_BIN="${ROOT_DIR}/odoo/odoo-bin"
+ODOO_BIN="__ODOO_BIN__"
 CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
@@ -1221,6 +1297,7 @@ fi
 echo "INFO: Starting Odoo server using config ${CONF}. Passing through any extra arguments."
 exec "${PY}" "${ODOO_BIN}" -c "${CONF}" "$@"
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("run", "sh").write_text(content, encoding="utf-8")
 
@@ -1241,7 +1318,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VENV_DIR="${ROOT_DIR}/venv"
 PY="${VENV_DIR}/bin/python"
-ODOO_BIN="${ROOT_DIR}/odoo/odoo-bin"
+ODOO_BIN="__ODOO_BIN__"
 CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
 
 LOGS_DIR="${ROOT_DIR}/odoo-logs"
@@ -1363,6 +1440,7 @@ case "${cmd}" in
     ;;
 esac
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("instance", "sh").write_text(content, encoding="utf-8")
 
@@ -1384,7 +1462,7 @@ for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
 
 set VENV_DIR=%ROOT_DIR%\venv
 set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=%ROOT_DIR%\odoo\odoo-bin
+set ODOO_BIN=__ODOO_BIN__
 set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
 
 if not exist "%VENV_DIR%" (
@@ -1405,6 +1483,7 @@ echo INFO: Starting Odoo server using config %CONF%. Passing through any extra a
 
 endlocal
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("run", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
 
@@ -1419,7 +1498,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VENV_DIR="${ROOT_DIR}/venv"
 PY="${VENV_DIR}/bin/python"
-ODOO_BIN="${ROOT_DIR}/odoo/odoo-bin"
+ODOO_BIN="__ODOO_BIN__"
 CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
@@ -1438,6 +1517,7 @@ fi
 echo "INFO: Running Odoo tests using config ${CONF}. Passing through any extra arguments."
 exec "${PY}" "${ODOO_BIN}" -c "${CONF}" --test-enable --stop-after-init "$@"
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("test", "sh").write_text(content, encoding="utf-8")
 
@@ -1459,7 +1539,7 @@ for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
 
 set VENV_DIR=%ROOT_DIR%\venv
 set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=%ROOT_DIR%\odoo\odoo-bin
+set ODOO_BIN=__ODOO_BIN__
 set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
 
 if not exist "%VENV_DIR%" (
@@ -1480,6 +1560,7 @@ echo INFO: Running Odoo tests using config %CONF%. Passing through any extra arg
 
 endlocal
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("test", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
 
@@ -1494,7 +1575,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 VENV_DIR="${ROOT_DIR}/venv"
 PY="${VENV_DIR}/bin/python"
-ODOO_BIN="${ROOT_DIR}/odoo/odoo-bin"
+ODOO_BIN="__ODOO_BIN__"
 CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
@@ -1513,6 +1594,7 @@ fi
 echo "INFO: Starting Odoo shell using config ${CONF}. Passing through any extra arguments."
 exec "${PY}" "${ODOO_BIN}" shell -c "${CONF}" "$@"
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("shell", "sh").write_text(content, encoding="utf-8")
 
@@ -1534,7 +1616,7 @@ for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
 
 set VENV_DIR=%ROOT_DIR%\venv
 set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=%ROOT_DIR%\odoo\odoo-bin
+set ODOO_BIN=__ODOO_BIN__
 set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
 
 if not exist "%VENV_DIR%" (
@@ -1555,6 +1637,7 @@ echo INFO: Starting Odoo shell using config %CONF%. Passing through any extra ar
 
 endlocal
 """
+    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
     layout.scripts_dir.mkdir(parents=True, exist_ok=True)
     layout.script("shell", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
 
@@ -1849,6 +1932,13 @@ def sync_project(
         _logger.warning(f"data_dir override via [config] section: from={layout.data_dir}, to={cfg_data_dir}")
         layout = replace(layout, data_dir=cfg_data_dir)
 
+    # A local [odoo].path replaces the default ROOT/odoo location everywhere:
+    # requirements, editable install, generated configs, helper scripts, and status output.
+    if cfg.odoo.is_local:
+        local_odoo_dir = _resolve_odoo_path(layout, cfg.odoo)
+        _logger.info("Using local Odoo source directory from [odoo].path: %s", local_odoo_dir)
+        layout = replace(layout, odoo_dir=local_odoo_dir)
+
     # We optionally create/ensure the venv early so we can use its Python for `uv pip compile` / installs.
     venv_py: Optional[Path] = None
 
@@ -1908,7 +1998,14 @@ def sync_project(
     req_files: list[Path] = []
 
     if sync_odoo:
-        if cfg.odoo.commit:
+        odoo_dest = _validate_local_odoo_path(layout, cfg.odoo)
+
+        if cfg.odoo.is_local:
+            _logger.info(
+                "Using local Odoo path for [odoo]: %s (skipping git sync)",
+                odoo_dest,
+            )
+        elif cfg.odoo.commit:
             _logger.info(
                 "Syncing Odoo repo at commit %s (branch=%s) using shallow fetch with incremental deepen fallback.",
                 cfg.odoo.commit,
@@ -1916,14 +2013,14 @@ def sync_project(
             )
             ensure_repo(
                 cfg.odoo.repo,
-                layout.odoo_dir,
+                odoo_dest,
                 branch=cfg.odoo.branch,
                 depth=1,
                 single_branch=True,
                 fetch_all=False,
             )
             checkout_commit(
-                layout.odoo_dir,
+                odoo_dest,
                 cfg.odoo.commit,
                 branch=cfg.odoo.branch,
                 fetch_all=False,
@@ -1933,33 +2030,34 @@ def sync_project(
             # Shallow + single branch (default; disable with [odoo] shallow=false).
             ensure_repo(
                 cfg.odoo.repo,
-                layout.odoo_dir,
+                odoo_dest,
                 branch=cfg.odoo.branch,
                 depth=1,
                 single_branch=True,
                 fetch_all=False,
             )
-            checkout_branch(layout.odoo_dir, cfg.odoo.branch, fetch_all=False, depth=1)
+            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=False, depth=1)
         else:
             # Full clone/fetch.
             ensure_repo(
                 cfg.odoo.repo,
-                layout.odoo_dir,
+                odoo_dest,
                 branch=cfg.odoo.branch,
                 depth=None,
                 single_branch=False,
                 fetch_all=True,
             )
-            checkout_branch(layout.odoo_dir, cfg.odoo.branch, fetch_all=True, depth=None)
+            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=True, depth=None)
 
-        odoo_req = layout.odoo_dir / "requirements.txt"
+        odoo_req = odoo_dest / "requirements.txt"
         if not odoo_req.exists():
             raise Exception(f"Odoo requirements file not found: {odoo_req}")
         req_files.append(odoo_req)
     else:
         # If we're provisioning python but not syncing repos, use whatever is already present in the workspace.
         if venv_py is not None:
-            odoo_req = layout.odoo_dir / "requirements.txt"
+            odoo_dest = _validate_local_odoo_path(layout, cfg.odoo)
+            odoo_req = odoo_dest / "requirements.txt"
             if odoo_req.exists():
                 req_files.append(odoo_req)
 
@@ -2035,11 +2133,18 @@ def sync_project(
     # Compile and install a single lock file from all synced repos + base requirements.
     # In --create-venv-from-wheelhouse mode we skip compilation + wheel build and only install offline from existing lock/wheels.
     if venv_py is not None:
-        # The generated scripts assume ROOT/odoo exists.
+        if cfg.odoo.is_local:
+            _validate_local_odoo_path(layout, cfg.odoo)
+
+        # Odoo source code must be available for requirements collection and editable installation.
         if not layout.odoo_dir.exists() or not layout.odoo_dir.is_dir():
+            missing_hint = (
+                "Check [odoo].path." if cfg.odoo.is_local
+                else "Run with --sync-odoo/--sync-all first (or ensure ROOT/odoo exists)."
+            )
             raise Exception(
                 f"Odoo directory not found: {layout.odoo_dir}. "
-                "Run with --sync-odoo/--sync-all first (or ensure ROOT/odoo exists)."
+                f"{missing_hint}"
             )
 
         lock_path = layout.wheelhouse_dir / "all-requirements.lock.txt"
@@ -2138,6 +2243,7 @@ def sync_project(
 
     # Generate config (unless disabled).
     if not no_configs:
+        _validate_local_odoo_path(layout, cfg.odoo)
         addon_paths: list[Path] = [
             _validate_local_addon_path(layout, addon_name, spec)
             for addon_name, spec in cfg.addons.items()
@@ -2151,6 +2257,7 @@ def sync_project(
 
     # Generate helper scripts (unless disabled).
     if not no_scripts:
+        _validate_local_odoo_path(layout, cfg.odoo)
         if is_windows:
             write_run_bat(layout)
             write_test_bat(layout)
