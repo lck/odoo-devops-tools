@@ -32,6 +32,10 @@ _DEFAULT_REQUIREMENTS = [
     "click-odoo-contrib",
 ]
 
+_DEFAULT_DOCKER_REQUIREMENTS = [
+    "click-odoo-contrib",
+]
+
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
 
 _ODOO_VENV_SETTINGS = {
@@ -86,6 +90,8 @@ class VirtualenvConfig:
     build_constraints: list[str]
     requirements: list[str]
     requirements_ignore: list[str]
+    explicit_requirements: list[str]
+    explicit_requirements_ignore: list[str]
     managed_python: bool = True
 
 
@@ -108,6 +114,7 @@ class Layout:
     data_dir: Path
     scripts_dir: Path
     wheelhouse_dir: Path
+    docker_dir: Path
 
     @staticmethod
     def from_root(root: Path) -> "Layout":
@@ -119,6 +126,7 @@ class Layout:
         data_dir = root / "odoo-data"
         scripts_dir = root / "odoo-scripts"
         wheelhouse_dir = root / "wheelhouse"
+        docker_dir = root / "odoo-docker"
         return Layout(
             root=root,
             odoo_dir=odoo_dir,
@@ -129,6 +137,7 @@ class Layout:
             data_dir=data_dir,
             scripts_dir=scripts_dir,
             wheelhouse_dir=wheelhouse_dir,
+            docker_dir=docker_dir,
         )
 
     def script(self, name: str, ext: str) -> Path:
@@ -357,7 +366,10 @@ def load_project_config(
         *ini_requirements,
     ]))
 
-    requirements_ignore = _get_list("virtualenv", "requirements_ignore")
+    explicit_requirements = list(ini_requirements)
+    explicit_requirements_ignore = _get_list("virtualenv", "requirements_ignore")
+
+    requirements_ignore = list(explicit_requirements_ignore)
     for spec in requirements:
         name = _extract_req_name_from_spec(spec)
         if name and name not in requirements_ignore:
@@ -368,6 +380,8 @@ def load_project_config(
         build_constraints=build_constraints,
         requirements=requirements,
         requirements_ignore=requirements_ignore,
+        explicit_requirements=explicit_requirements,
+        explicit_requirements_ignore=explicit_requirements_ignore,
         managed_python=_get_bool("virtualenv", "managed_python", default=True),
     )
 
@@ -1896,6 +1910,412 @@ endlocal
 
 
 # -----------------------------
+# Docker artifact generation
+# -----------------------------
+
+def _docker_build_constraints_path(layout: Layout) -> Path:
+    return layout.docker_dir / "build-constraints.txt"
+
+
+def _docker_requirements_input_path(layout: Layout) -> Path:
+    return layout.docker_dir / "addons-requirements.in.txt"
+
+
+def _docker_requirements_lock_path(layout: Layout) -> Path:
+    return layout.docker_dir / "addons-requirements.lock.txt"
+
+
+def _dockerfile_path(layout: Layout) -> Path:
+    return layout.docker_dir / "Dockerfile"
+
+
+def _dockerignore_path(layout: Layout) -> Path:
+    return layout.docker_dir / ".dockerignore"
+
+
+def _docker_addons_dir(layout: Layout) -> Path:
+    return layout.docker_dir / "addons"
+
+
+def _docker_odoo_conf_path(layout: Layout) -> Path:
+    return layout.docker_dir / "odoo.conf"
+
+
+def _has_active_requirements(lines: list[str]) -> bool:
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return True
+    return False
+
+
+def _docker_requirements_ignore(cfg: VirtualenvConfig) -> list[str]:
+    ignore = list(cfg.explicit_requirements_ignore)
+    for spec in cfg.explicit_requirements:
+        name = _extract_req_name_from_spec(spec)
+        if name and name not in ignore:
+            ignore.append(name)
+    return ignore
+
+
+def compile_docker_addons_requirements_lock(
+        python_version: str,
+        workspace_root: Path,
+        requirement_files: list[Path],
+        explicit_requirements: list[str],
+        requirements_ignore: list[str],
+        output_lock_path: Path,
+        docker_dir: Path,
+        build_constraints_path: Path,
+) -> Path:
+    """Compile an addon-only lock file for the generated Docker image.
+
+    The Docker image is based on the official Odoo image, so Odoo core requirements
+    are intentionally excluded here. The lock contains:
+      - odt-env Docker default requirements
+      - requirements.txt files from configured addon sources
+      - explicit [virtualenv].requirements entries from the project INI
+    """
+    if shutil.which("uv") is None:
+        raise Exception("Required command not found in PATH: uv")
+
+    docker_dir.mkdir(parents=True, exist_ok=True)
+    in_path = docker_dir / "addons-requirements.in.txt"
+
+    ignore_set: set[str] = set()
+    for spec in requirements_ignore or []:
+        spec = spec.strip()
+        if not spec:
+            continue
+        name = _extract_req_name_from_spec(spec)
+        if name:
+            ignore_set.add(name)
+        else:
+            ignore_set.add(_canonicalize_project_name(spec))
+
+    req_lines: list[str] = []
+    for req_path in requirement_files:
+        if not req_path.exists():
+            continue
+
+        try:
+            rel = req_path.resolve().relative_to(workspace_root.resolve())
+            rel_label = rel.as_posix()
+        except Exception:
+            rel_label = str(req_path)
+
+        req_lines.append(f"# --- from {rel_label} ---")
+        visited = {req_path.resolve()}
+        filtered_lines = _filter_requirements_file(req_path.resolve(), ignore_set, visited=visited)
+        req_lines.extend(filtered_lines)
+        req_lines.append("")
+
+    lines: list[str] = [
+        "# This file is generated by odt-env (DO NOT EDIT).",
+        "# Source: addon repository requirements plus odt-env Docker defaults and explicit [virtualenv].requirements.",
+        "# Odoo core requirements are intentionally excluded for official Odoo Docker images.",
+        "",
+    ]
+
+    if _DEFAULT_DOCKER_REQUIREMENTS:
+        lines.append("# --- odt-env Docker default requirements ---")
+        lines.extend(_DEFAULT_DOCKER_REQUIREMENTS)
+        lines.append("")
+
+    if explicit_requirements:
+        lines.append("# --- explicit requirements from [virtualenv].requirements ---")
+        lines.extend(explicit_requirements)
+        lines.append("")
+
+    lines.extend(req_lines)
+
+    input_text = "\n".join(lines).rstrip("\n") + "\n"
+    in_path.write_text(input_text, encoding="utf-8")
+
+    if not _has_active_requirements(lines):
+        output_lock_path.write_text(
+            "# This file is generated by odt-env (DO NOT EDIT).\n"
+            "# No addon Python requirements were collected.\n",
+            encoding="utf-8",
+        )
+        _logger.info("No Docker addon requirements collected; wrote empty lock marker: %s", output_lock_path)
+        return output_lock_path
+
+    _logger.info(
+        "Compiling Docker addon lock file with uv for Python %s: %s -> %s",
+        python_version,
+        in_path,
+        output_lock_path,
+    )
+    cmd = [
+        "uv", "pip", "compile",
+        "--python-version", python_version,
+        str(in_path),
+        "-o", str(output_lock_path),
+    ]
+
+    if build_constraints_path.is_file():
+        cmd.extend([
+            "--build-constraints", str(build_constraints_path),
+        ])
+
+    p = subprocess.run(
+        cmd,
+        cwd=str(workspace_root),
+        text=True,
+        capture_output=True,
+    )
+    _handle_process_output(p, err_msg=(
+        "Failed to compile Docker addon requirements lock file.\n"
+        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
+        f"Input: {in_path}\n"
+        f"Output: {output_lock_path}\n"
+        f"{p.stdout}\n{p.stderr}"
+    ))
+
+    return output_lock_path
+
+
+def _is_odoo_module_dir(path: Path) -> bool:
+    return path.is_dir() and (
+        (path / "__manifest__.py").is_file()
+        or (path / "__openerp__.py").is_file()
+    )
+
+
+def _iter_direct_odoo_modules(source_root: Path) -> list[Path]:
+    if _is_odoo_module_dir(source_root):
+        return [source_root]
+    return sorted(
+        [child for child in source_root.iterdir() if _is_odoo_module_dir(child)],
+        key=lambda p: p.name.lower(),
+    )
+
+
+def stage_docker_addons(layout: Layout, cfg: ProjectConfig) -> int:
+    """Stage concrete Odoo module directories for the Docker build context."""
+    addons_dir = _docker_addons_dir(layout)
+    if addons_dir.exists():
+        _rmtree(addons_dir)
+    addons_dir.mkdir(parents=True, exist_ok=True)
+
+    staged_modules: dict[str, Path] = {}
+
+    for addon_name, spec in cfg.addons.items():
+        source_root = _validate_local_addon_path(layout, addon_name, spec)
+        if not source_root.exists():
+            raise Exception(
+                f"Addon source for [addons.{addon_name}] does not exist: {source_root}. "
+                "Run with --sync-addons/--sync-all first, or provide an existing local path."
+            )
+        if not source_root.is_dir():
+            raise Exception(
+                f"Addon source for [addons.{addon_name}] is not a directory: {source_root}"
+            )
+
+        module_dirs = _iter_direct_odoo_modules(source_root)
+        if not module_dirs:
+            _logger.warning(
+                "No direct Odoo module directories found in addon source [%s]: %s",
+                addon_name,
+                source_root,
+            )
+            continue
+
+        for module_dir in module_dirs:
+            existing = staged_modules.get(module_dir.name)
+            if existing is not None:
+                raise Exception(
+                    "Docker addon staging collision for module "
+                    f"'{module_dir.name}': {existing} and {module_dir}. "
+                    "Rename, remove, or split conflicting addon sources before generating the Docker build context."
+                )
+
+            dest = addons_dir / module_dir.name
+            shutil.copytree(module_dir, dest, symlinks=True)
+            staged_modules[module_dir.name] = module_dir
+
+    if not staged_modules:
+        (addons_dir / ".odt-env-empty").write_text(
+            "No Odoo modules were staged for this Docker build context.\n",
+            encoding="utf-8",
+        )
+
+    _logger.info("Staged %s Odoo addon module(s) for Docker build context.", len(staged_modules))
+    return len(staged_modules)
+
+
+def write_dockerignore(layout: Layout) -> Path:
+    content = """# Generated by odt-env. Edit if your Docker build context needs different exclusions.
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+"""
+    path = _dockerignore_path(layout)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
+    """Render a Docker-runtime Odoo config from [config]."""
+    lines: list[str] = ["[options]"]
+
+    # Keep project-specific options, but force the standard Odoo Docker paths.
+    for key, value in cfg.items():
+        if key in {"addons_path", "data_dir"}:
+            continue
+        lines.append(f"{key} = {_format_conf_value(value)}")
+
+    lines.append("addons_path = /mnt/extra-addons")
+    lines.append("data_dir = /var/lib/odoo")
+
+    return "\n".join(lines) + "\n"
+
+
+def write_docker_odoo_conf(layout: Layout, cfg: ProjectConfig) -> Path:
+    path = _docker_odoo_conf_path(layout)
+    path.write_text(render_docker_odoo_conf(cfg.config), encoding="utf-8")
+    return path
+
+
+def write_dockerfile(layout: Layout, cfg: ProjectConfig, has_build_constraints: bool) -> Path:
+    build_constraints_copy = ""
+    build_constraints_install = ""
+    cleanup_constraints = ""
+    if has_build_constraints:
+        build_constraints_copy = "COPY build-constraints.txt /tmp/build-constraints.txt\n"
+        build_constraints_install = " --build-constraints /tmp/build-constraints.txt"
+        cleanup_constraints = " /tmp/build-constraints.txt"
+
+    content = f"""# Generated by odt-env.
+# Review and edit this file before building when project-specific changes are needed.
+FROM odoo:{cfg.odoo.version}
+
+USER root
+
+COPY addons/ /mnt/extra-addons/
+COPY addons-requirements.lock.txt /tmp/addons-requirements.lock.txt
+{build_constraints_copy.rstrip()}
+
+RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir uv \\
+ && if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/addons-requirements.lock.txt; then \\
+      uv pip install --system --break-system-packages --no-cache-dir{build_constraints_install} -r /tmp/addons-requirements.lock.txt; \\
+    else \\
+      echo "INFO: No addon Python requirements to install."; \\
+    fi \\
+ && rm -f /tmp/addons-requirements.lock.txt{cleanup_constraints}
+
+RUN chown -R odoo:odoo /mnt/extra-addons
+
+USER odoo
+"""
+    path = _dockerfile_path(layout)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def create_docker_artifacts(
+        layout: Layout,
+        cfg: ProjectConfig,
+        addon_requirement_files: list[Path],
+) -> dict[str, Any]:
+    """Generate a reviewable Docker build context under ROOT/odoo-docker/."""
+    layout.docker_dir.mkdir(parents=True, exist_ok=True)
+
+    build_constraints_path = _docker_build_constraints_path(layout)
+    if cfg.virtualenv.build_constraints:
+        build_constraints_path.write_text(
+            "\n".join(cfg.virtualenv.build_constraints).rstrip("\n") + "\n",
+            encoding="utf-8",
+        )
+    elif build_constraints_path.exists():
+        build_constraints_path.unlink()
+
+    lock_path = _docker_requirements_lock_path(layout)
+    compile_docker_addons_requirements_lock(
+        python_version=cfg.virtualenv.python_version,
+        workspace_root=layout.root,
+        requirement_files=addon_requirement_files,
+        explicit_requirements=cfg.virtualenv.explicit_requirements,
+        requirements_ignore=_docker_requirements_ignore(cfg.virtualenv),
+        output_lock_path=lock_path,
+        docker_dir=layout.docker_dir,
+        build_constraints_path=build_constraints_path,
+    )
+
+    staged_module_count = stage_docker_addons(layout, cfg)
+    dockerignore_path = write_dockerignore(layout)
+    docker_conf_path = write_docker_odoo_conf(layout, cfg)
+    dockerfile_path = write_dockerfile(
+        layout,
+        cfg,
+        has_build_constraints=build_constraints_path.is_file(),
+    )
+
+    _logger.info("Generated Docker build context: %s", layout.docker_dir)
+    _logger.info("Generated Dockerfile: %s", dockerfile_path)
+    _logger.info("Generated Docker Odoo config: %s", docker_conf_path)
+
+    return {
+        "docker_dir": layout.docker_dir,
+        "dockerfile": dockerfile_path,
+        "dockerignore": dockerignore_path,
+        "odoo_config": docker_conf_path,
+        "requirements_input": _docker_requirements_input_path(layout),
+        "requirements_lock": lock_path,
+        "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,
+        "staged_module_count": staged_module_count,
+    }
+
+
+def build_docker_image(layout: Layout, image_name: str) -> str:
+    """Build a Docker image from ROOT/odoo-docker/ build context."""
+    dockerfile_path = _dockerfile_path(layout)
+    lock_path = _docker_requirements_lock_path(layout)
+    addons_dir = _docker_addons_dir(layout)
+
+    if not dockerfile_path.is_file():
+        raise Exception(
+            f"Dockerfile not found: {dockerfile_path}. "
+            "Generate Docker artifacts before building the image."
+        )
+    if not lock_path.is_file():
+        raise Exception(
+            f"Docker addon requirements lock not found: {lock_path}. "
+            "Generate Docker artifacts before building the image."
+        )
+    if not addons_dir.is_dir():
+        raise Exception(
+            f"Docker addon staging directory not found: {addons_dir}. "
+            "Generate Docker artifacts before building the image."
+        )
+    if shutil.which("docker") is None:
+        raise Exception("Required command not found in PATH: docker")
+
+    cmd = [
+        "docker", "build",
+        "-f", str(dockerfile_path),
+        "-t", image_name,
+        str(layout.docker_dir),
+    ]
+    _logger.info("Building Docker image: %s", image_name)
+    p = subprocess.run(
+        cmd,
+        cwd=str(layout.root),
+        text=True,
+        capture_output=True,
+    )
+    _handle_process_output(p, err_msg=(
+        "Failed to build Docker image.\n"
+        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
+        f"{p.stdout}\n{p.stderr}"
+    ))
+    return image_name
+
+
+# -----------------------------
 # Main logic
 # -----------------------------
 
@@ -1910,6 +2330,7 @@ def sync_project(
         no_configs: bool = False,
         no_scripts: bool = False,
         no_data_dir: bool = False,
+        build_docker_image_name: Optional[str] = None,
         vars_overrides: Optional[Dict[str, str]] = None,
 ) -> None:
     root = (root_override or ini_path.parent).resolve()
@@ -1938,6 +2359,8 @@ def sync_project(
         local_odoo_dir = _resolve_odoo_path(layout, cfg.odoo)
         _logger.info("Using local Odoo source directory from [odoo].path: %s", local_odoo_dir)
         layout = replace(layout, odoo_dir=local_odoo_dir)
+
+    docker_requested = build_docker_image_name is not None
 
     # We optionally create/ensure the venv early so we can use its Python for `uv pip compile` / installs.
     venv_py: Optional[Path] = None
@@ -1983,9 +2406,14 @@ def sync_project(
                 "skipping venv/wheelhouse. Use --create-venv to enable."
             )
         else:
-            _logger.info(
-                "No sync target selected; regenerating config and helper scripts only (skipping venv/repo operations)."
-            )
+            if docker_requested:
+                _logger.info(
+                    "No repository sync target selected; Docker artifacts will use already available addon sources."
+                )
+            else:
+                _logger.info(
+                    "No sync target selected; regenerating config and helper scripts only (skipping venv/repo operations)."
+                )
 
     layout.configs_dir.mkdir(parents=True, exist_ok=True)
     layout.addons_root.mkdir(parents=True, exist_ok=True)
@@ -1996,6 +2424,7 @@ def sync_project(
 
     # Sync repositories first, collect all requirements, then compile + install once.
     req_files: list[Path] = []
+    addon_req_files: list[Path] = []
 
     if sync_odoo:
         odoo_dest = _validate_local_odoo_path(layout, cfg.odoo)
@@ -2121,14 +2550,17 @@ def sync_project(
             addon_req = dest / "requirements.txt"
             if addon_req.exists():
                 req_files.append(addon_req)
+                addon_req_files.append(addon_req)
     else:
-        # If we're provisioning python but not syncing repos, use existing addon requirements (if present).
-        if venv_py is not None and cfg.addons:
+        # If we're provisioning Python or generating Docker artifacts, use existing addon requirements (if present).
+        if (venv_py is not None or docker_requested) and cfg.addons:
             for addon_name, spec in cfg.addons.items():
                 dest = _validate_local_addon_path(layout, addon_name, spec)
                 addon_req = dest / "requirements.txt"
                 if addon_req.exists():
-                    req_files.append(addon_req)
+                    if venv_py is not None:
+                        req_files.append(addon_req)
+                    addon_req_files.append(addon_req)
 
     # Compile and install a single lock file from all synced repos + base requirements.
     # In --create-venv-from-wheelhouse mode we skip compilation + wheel build and only install offline from existing lock/wheels.
@@ -2136,15 +2568,11 @@ def sync_project(
         if cfg.odoo.is_local:
             _validate_local_odoo_path(layout, cfg.odoo)
 
-        # Odoo source code must be available for requirements collection and editable installation.
+        # The generated scripts assume the resolved Odoo source directory exists.
         if not layout.odoo_dir.exists() or not layout.odoo_dir.is_dir():
-            missing_hint = (
-                "Check [odoo].path." if cfg.odoo.is_local
-                else "Run with --sync-odoo/--sync-all first (or ensure ROOT/odoo exists)."
-            )
             raise Exception(
                 f"Odoo directory not found: {layout.odoo_dir}. "
-                f"{missing_hint}"
+                "Run with --sync-odoo/--sync-all first (or ensure ROOT/odoo exists)."
             )
 
         lock_path = layout.wheelhouse_dir / "all-requirements.lock.txt"
@@ -2241,9 +2669,26 @@ def sync_project(
                 f"{p.stdout}\n{p.stderr}"
             ))
 
+    docker_artifacts: Optional[dict[str, Any]] = None
+    docker_image_built: Optional[str] = None
+
+    if build_docker_image_name is not None:
+        _logger.info("Generating Docker artifacts before building the image.")
+        docker_artifacts = create_docker_artifacts(
+            layout=layout,
+            cfg=cfg,
+            addon_requirement_files=addon_req_files,
+        )
+
+        image_name = build_docker_image_name.strip()
+        if not image_name:
+            raise Exception(
+                "Invalid --build-docker-image value (expected non-empty IMAGE_NAME)."
+            )
+        docker_image_built = build_docker_image(layout, image_name)
+
     # Generate config (unless disabled).
     if not no_configs:
-        _validate_local_odoo_path(layout, cfg.odoo)
         addon_paths: list[Path] = [
             _validate_local_addon_path(layout, addon_name, spec)
             for addon_name, spec in cfg.addons.items()
@@ -2257,7 +2702,6 @@ def sync_project(
 
     # Generate helper scripts (unless disabled).
     if not no_scripts:
-        _validate_local_odoo_path(layout, cfg.odoo)
         if is_windows:
             write_run_bat(layout)
             write_test_bat(layout)
@@ -2332,6 +2776,21 @@ def sync_project(
             if bc.exists():
                 print(f"  Build Constraints:  {bc}")
 
+    if docker_artifacts is not None or build_docker_image_name is not None:
+        print(f"  Docker Context:     {layout.docker_dir}")
+        print(f"  Dockerfile:         {_dockerfile_path(layout)}")
+        docker_conf_path = _docker_odoo_conf_path(layout)
+        if docker_conf_path.exists():
+            print(f"  Docker Config:      {docker_conf_path}")
+        docker_lock_path = _docker_requirements_lock_path(layout)
+        if docker_lock_path.exists():
+            print(f"  Docker Requirements: {docker_lock_path}")
+        if docker_artifacts is not None:
+            staged_modules = docker_artifacts.get("staged_module_count", 0)
+            print(f"  Docker Addons:      {staged_modules} staged module(s)")
+        if docker_image_built is not None:
+            print(f"  Docker Image:       {docker_image_built}")
+
     if no_scripts:
         print("  Scripts:            SKIPPED (--no-scripts)")
     else:
@@ -2367,6 +2826,7 @@ Examples:
   odt-env /path/to/odoo-project.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /path/to/workspace-root
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
+  odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image my-odoo:18.0
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
 """
 
@@ -2440,6 +2900,14 @@ Examples:
     )
 
     parser.add_argument(
+        "--build-docker-image",
+        metavar="IMAGE_NAME",
+        help=(
+            "Build a Docker image by extending the standard odoo Docker image."
+        ),
+    )
+
+    parser.add_argument(
         "--no-configs",
         action="store_true",
         help="Do not (re)generate config files (e.g. ROOT/odoo-configs/odoo-server.conf).",
@@ -2509,6 +2977,7 @@ def main() -> None:
     no_configs = bool(getattr(args, 'no_configs', False))
     no_scripts = bool(getattr(args, 'no_scripts', False))
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
+    build_docker_image_name = getattr(args, 'build_docker_image', None)
 
     try:
         vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
@@ -2554,6 +3023,7 @@ def main() -> None:
             no_configs=no_configs,
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
+            build_docker_image_name=build_docker_image_name,
             vars_overrides=vars_overrides,
         )
     except Exception as e:

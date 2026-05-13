@@ -72,6 +72,7 @@ ROOT/
 ├── odoo-backups/         # backups created by helper scripts
 ├── odoo-configs/         # generated configuration, including odoo-server.conf
 ├── odoo-data/            # Odoo data directory
+├── odoo-docker/          # generated Docker build context
 ├── odoo-logs/            # runtime logs
 ├── odoo-scripts/         # generated helper scripts
 │   ├── run.sh            # start Odoo in the foreground
@@ -371,6 +372,84 @@ This is useful for simple deployments where Python dependencies are prepared on 
 
 ---
 
+### 6. Building custom Docker image
+
+`odt-env` builds a custom image by extending the standard [`odoo Docker`](https://hub.docker.com/_/odoo/) image with project-specific content:
+
+* addon modules staged into `/mnt/extra-addons`
+* addon Python requirements installed when present
+
+The resulting image remains compatible with the usual Odoo Docker workflows for `docker run`, compose, databases, volumes, and container lifecycle management.
+
+#### 6.1. Create a project file
+
+Create a sample project file named `odoo-project.ini` with the `OCA/helpdesk` addons.
+
+```ini
+[odoo]
+version = 18.0
+
+[addons.oca-helpdesk]
+repo = https://github.com/OCA/helpdesk.git
+branch = ${odoo:version}
+
+[config]
+db_host = db
+db_name = odoo
+db_user = odoo
+db_password = odoo
+```
+
+#### 6.2. Build the image
+
+Run `odt-env` against the project file:
+
+```bash
+odt-env odoo-project.ini --sync-addons --build-docker-image mycompany/odoo-custom:18.0
+```
+
+After the command completes, the new Docker image is available locally under the selected image name.
+
+#### 6.3. Use the image
+
+The custom image can be used in the same way as a regular Odoo container.
+For example, run it together with PostgreSQL:
+
+```bash
+docker run -d --name db -e POSTGRES_DB=postgres -e POSTGRES_PASSWORD=odoo -e POSTGRES_USER=odoo postgres:16
+```
+
+```bash
+docker run -d --name odoo-custom -p 8069:8069 --link db:db -v ./odoo-docker:/etc/odoo:ro -v odoo-custom-data:/var/lib/odoo mycompany/odoo-custom:18.0
+```
+
+Update installed modules:
+
+```bash
+docker exec -it odoo-custom click-odoo-update -c /etc/odoo/odoo.conf
+```
+
+Create a database backup inside the container:
+
+```bash
+docker exec -it odoo-custom click-odoo-backupdb -c /etc/odoo/odoo.conf --format zip odoo /tmp/odoo_backup.zip
+```
+
+Copy the backup to the host machine:
+
+```bash
+docker cp odoo-custom:/tmp/odoo_backup.zip ./odoo_backup.zip
+```
+
+Restore a database from a backup archive copied into the container:
+
+```bash
+docker cp ./odoo_backup.zip odoo-custom:/tmp/odoo_backup.zip
+docker exec -it odoo-custom click-odoo-restoredb -c /etc/odoo/odoo.conf --copy --neutralize odoo /tmp/odoo_backup.zip
+```
+
+---
+
 ## Command-line reference
 
 ### Paths and outputs
@@ -396,6 +475,10 @@ This is useful for simple deployments where Python dependencies are prepared on 
 - `--create-venv` — recreate `ROOT/venv` and refresh the wheelhouse; if `ROOT/venv` already exists, it is deleted and created again
 - `--create-venv-from-wheelhouse` — recreate `ROOT/venv` from an existing `ROOT/wheelhouse/` and `all-requirements.lock.txt`, install strictly offline, and skip lock compilation and wheelhouse build
 - `--clear-pip-wheel-cache` — remove all items from pip's wheel cache
+
+### Docker image generation
+
+- `--build-docker-image [IMAGE_NAME]` — generate `ROOT/odoo-docker/` and build an image that extends the standard [`odoo Docker`](https://hub.docker.com/_/odoo/) image
 
 ---
 
