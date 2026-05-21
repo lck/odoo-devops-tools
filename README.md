@@ -62,11 +62,14 @@ Run `odt-env` against the project file:
 odt-env odoo-project.ini --sync-all --create-venv
 ```
 
-> **Note**
-> Instead of passing a local file, the `INI` argument can point to a file stored inside a Git repository:
-> ```bash
-> odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini --sync-all --create-venv
-> ```
+##### 1.2.1. Optional: Load the project file from Git
+
+Instead of passing a local file, the `INI` argument can point to a file stored inside a Git repository:
+
+```bash
+odt-env --sync-all --create-venv \
+  git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini
+```
 
 After provisioning, the workspace has the following structure:
 
