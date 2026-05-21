@@ -62,9 +62,9 @@ Run `odt-env` against the project file:
 odt-env odoo-project.ini --sync-all --create-venv
 ```
 
-##### 1.2.1. Optional: Load the project file from Git
+#### 1.3. Optional: Load the project file from Git
 
-Instead of passing a local file, the `INI` argument can point to a file stored inside a Git repository:
+Instead of passing a local file, the `INI` argument can point to a file stored in a Git repository:
 
 ```bash
 odt-env --sync-all --create-venv \
@@ -95,7 +95,7 @@ ROOT/
 └── wheelhouse/           # wheelhouse for offline installs
 ```
 
-#### 1.3. Start Odoo
+#### 1.4. Start Odoo
 
 When the workspace is ready, start Odoo:
 
