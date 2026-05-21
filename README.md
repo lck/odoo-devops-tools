@@ -63,10 +63,9 @@ odt-env odoo-project.ini --sync-all --create-venv
 ```
 
 > **Note**
-> The project file can also be loaded directly from Git:
->
+> Instead of passing a local file, the `INI` argument can point to a file stored inside a Git repository:
 > ```bash
-> odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
+> odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini --sync-all --create-venv
 > ```
 
 After provisioning, the workspace has the following structure:
@@ -484,9 +483,31 @@ docker compose up -d --force-recreate odoo
 
 ## Command-line reference
 
+### Syntax
+
+```text
+odt-env [OPTIONS] INI
+```
+
+If no options are specified, `odt-env` only regenerates configuration files and helper scripts.
+
+### Positional arguments
+
+- `INI` — required project file. This can be either:
+  - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
+  - a Git-backed INI source, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main`
+
+Git-backed INI sources use this syntax:
+
+```text
+git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
+```
+
+The `?ref=REF` part is optional and can point to a branch, tag, or commit.
+
 ### Paths and outputs
 
-- `--root` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git INI. When `--root` is provided explicitly, it is created automatically if it does not exist.
+- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git-backed INI.
 - `-e KEY=VALUE`, `--extra-var KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
 - `--no-configs` — do not generate config files
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`
@@ -510,7 +531,11 @@ docker compose up -d --force-recreate odoo
 
 ### Docker image generation
 
-- `--build-docker-image [IMAGE_NAME]` — generate `ROOT/odoo-docker/` and build an image that extends the standard [`odoo Docker`](https://hub.docker.com/_/odoo/) image
+- `--build-docker-image IMAGE_NAME` — generate `ROOT/odoo-docker/` and build an image that extends the standard [`odoo Docker`](https://hub.docker.com/_/odoo/) image
+
+### Other options
+
+- `--version` — show the installed `odt-env` version and exit
 
 ---
 
