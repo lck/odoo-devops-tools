@@ -354,7 +354,7 @@ def load_project_config(
     #   [virtualenv] (optional)
     #   [odoo]
     #   [addons.<name>] for each addon (optional)
-    #   [config]
+    #   [config] (optional)
 
     odoo_version = _require_option("odoo", "version").strip()
     default_python_version, default_build_constraints, default_requirements = _get_default_virtualenv_settings(
@@ -467,10 +467,9 @@ def load_project_config(
                 shallow=_get_bool(sec, "shallow", default=True),
             )
 
-    if not cp.has_section("config"):
-        raise Exception("Missing INI section: [config]")
     config: Dict[str, Any] = {}
-    # Only include keys explicitly defined in [config] (exclude DEFAULT values).
+    # [config] is optional. Only include keys explicitly defined in [config]
+    # (exclude DEFAULT values).
     for key in cp._sections.get("config", {}).keys():
         if key == "addons_path":
             raise Exception(
@@ -2182,7 +2181,7 @@ requirements/addons-requirements.in.txt
 
 
 def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
-    """Render a Docker-runtime Odoo config from [config]."""
+    """Render a Docker-runtime Odoo config from optional project config values."""
     lines: list[str] = ["[options]"]
 
     # Keep project-specific options, but force the standard Odoo Docker paths.
@@ -2743,7 +2742,7 @@ def sync_project(
         db_name = cfg.config.get("db_name")
         if not isinstance(db_name, str) or not db_name.strip():
             _logger.warning(
-                "Missing or invalid 'db_name' in [config] (expected non-empty string)."
+                "Missing or invalid '[config].db_name' (expected non-empty string). "
                 "Database scripts (backup/restore/restore-force) will NOT be generated."
             )
         else:

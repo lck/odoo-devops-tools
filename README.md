@@ -546,10 +546,9 @@ The `?ref=REF` part is optional and can point to a branch, tag, or commit.
 
 The `odt-env` project file is an INI file that describes the Odoo workspace to create.
 
-At minimum, the project file must contain these sections:
+At minimum, the project file must contain this section:
 
 - `[odoo]`
-- `[config]`
 
 The following sections are supported:
 
@@ -557,7 +556,7 @@ The following sections are supported:
 - `[virtualenv]` — optional Python and dependency settings
 - `[odoo]` — required Odoo source settings
 - `[addons.<name>]` — optional addon sources
-- `[config]` — required Odoo server configuration values
+- `[config]` — optional Odoo server configuration values
 
 ### General rules
 
@@ -689,9 +688,10 @@ commit = abcdef1
 
 ### `[config]`
 
-This section is required.
+This section is optional.
 
-It contains Odoo server configuration values written into `ROOT/odoo-configs/odoo-server.conf`.
+When present, it contains Odoo server configuration values written into `ROOT/odoo-configs/odoo-server.conf`.
+When omitted, `odt-env` still generates a valid config file with generated values such as `addons_path` and `data_dir`.
 
 You can define standard Odoo configuration options here.
 
