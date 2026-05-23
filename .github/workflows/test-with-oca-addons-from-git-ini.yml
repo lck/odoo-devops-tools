@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  odoo-with-oca-addons-git-ini:
+  odoo-with-oca-addons-from-git-ini:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -58,8 +58,10 @@ jobs:
 
       - name: Provision Odoo workspace in workspace root folder
         working-directory: ./odoo-workspace
+        env:
+          ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-helpdesk.ini?ref=main \
+          uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons.ini?ref=${ODT_REF}" \
             --sync-all \
             --create-venv
 

@@ -76,6 +76,7 @@ After provisioning, the workspace has the following structure:
 ```text
 ROOT/
 ├── odoo-project.ini      # project definition
+├── compose.yml           # generated sample Docker Compose file when --build-docker-image is used
 ├── odoo/                 # Git-managed Odoo source repository; not required when [odoo].path is used
 ├── odoo-addons/          # addon repositories from [addons.<name>] sections; unused in this minimal example
 ├── odoo-backups/         # backups created by helper scripts
@@ -393,6 +394,16 @@ Create a sample project file that demonstrates how to extend the [`Odoo Docker`]
 [odoo]
 version = 18.0
 
+[docker]
+target_image = mycompany/odoo:${odoo:version}
+
+# Optional: publish Odoo on custom host ports in the generated compose.yml.
+# These values are used as host-side Docker Compose ports only; Odoo inside
+# the container keeps the standard Odoo Docker ports 8069 and 8072.
+[config]
+http_port = 18169
+gevent_port = 18172
+
 [addons.oca-web]
 repo = https://github.com/OCA/web.git
 branch = ${odoo:version}
@@ -407,17 +418,16 @@ branch = ${odoo:version}
 Run `odt-env` against the project file:
 
 ```bash
-odt-env odoo-project.ini --sync-addons --build-docker-image mycompany/odoo-custom:18.0
+odt-env odoo-project.ini --sync-addons --build-docker-image
 ```
 
-After the command completes, the new Docker image is available under the selected image name.
+After the command completes, the new Docker image is available under the name configured by `[docker].target_image`.
 
-#### 6.3. Use the image with Docker Compose
-
-The custom image can be used in the same way as a regular Odoo image.
-For example, create a `compose.yml` file next to the generated `odoo-docker/` directory:
+`odt-env` also generates a sample `ROOT/compose.yml` file:
 
 ```yaml
+name: mycompany-odoo-18.0
+
 services:
   db:
     image: postgres:16
@@ -430,12 +440,13 @@ services:
       - odoo-db-data:/var/lib/postgresql/data
 
   odoo:
-    image: mycompany/odoo-custom:18.0
+    image: mycompany/odoo:18.0
     restart: unless-stopped
     depends_on:
       - db
     ports:
-      - "8069:8069"
+      - "18169:8069"
+      - "18172:8072"
     environment:
       HOST: db
       PORT: 5432
@@ -443,12 +454,16 @@ services:
       PASSWORD: odoo
     volumes:
       - ./odoo-docker/configs:/etc/odoo:ro
-      - odoo-custom-data:/var/lib/odoo
+      - odoo-data:/var/lib/odoo
 
 volumes:
   odoo-db-data:
-  odoo-custom-data:
+  odoo-data:
 ```
+
+#### 6.3. Use the image with Docker Compose
+
+The custom image can be used in the same way as a regular Odoo image.
 
 Start the PostgreSQL service first:
 
@@ -456,7 +471,8 @@ Start the PostgreSQL service first:
 docker compose up -d db
 ```
 
-Initialize the Odoo database and install the initial modules. This step uses the standard Odoo CLI and should be run before starting the long-running Odoo service for the first time:
+Initialize the Odoo database and install the initial modules.
+This step uses the standard Odoo CLI and should be run before starting the long-running Odoo service for the first time:
 
 ```bash
 docker compose run --rm odoo \
@@ -468,7 +484,7 @@ docker compose run --rm odoo \
   --stop-after-init
 ```
 
-Replace `base,web` with the modules that should be installed during the initial database bootstrap.
+Replace `helpdesk_mgmt,web` with the modules that should be installed during the initial database bootstrap.
 
 After the database has been initialized, start the Odoo service:
 
@@ -534,7 +550,7 @@ The `?ref=REF` part is optional and can point to a branch, tag, or commit.
 
 ### Docker image generation
 
-- `--build-docker-image IMAGE_NAME` — generate `ROOT/odoo-docker/` and build an image that extends the standard [`odoo Docker`](https://hub.docker.com/_/odoo/) image
+- `--build-docker-image` — generate `ROOT/odoo-docker/`, generate and overwrite `ROOT/compose.yml`, and build the image configured by `[docker].target_image` by extending `[docker].base_image` (default: `odoo:${odoo:version}`)
 
 ### Other options
 
@@ -556,6 +572,7 @@ The following sections are supported:
 - `[virtualenv]` — optional Python and dependency settings
 - `[odoo]` — required Odoo source settings
 - `[addons.<name>]` — optional addon sources
+- `[docker]` — optional Docker image and Compose generation settings
 - `[config]` — optional Odoo server configuration values
 
 ### General rules
@@ -684,6 +701,30 @@ path = odoo-addons/my-custom-addons
 repo = https://github.com/OCA/web.git
 branch = ${odoo:version}
 commit = abcdef1
+```
+
+### `[docker]`
+
+This section is optional.
+
+It controls values used when `odt-env` builds a Docker image and generates `ROOT/compose.yml` together with `--build-docker-image`.
+
+- `target_image` — Docker image name/tag to build and write into the generated Compose file. Required when `--build-docker-image` is used.
+- `base_image` — Docker image name/tag used as the `FROM` image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
+- `compose_project_name` — optional top-level Docker Compose project name. If omitted, Docker Compose uses its normal project name resolution, usually the directory name.
+- `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
+- `db_service` — Docker Compose service name for PostgreSQL. Default: `db`.
+
+In most cases, set `target_image` and optionally customize `compose_project_name`; keep the service names at their defaults. Docker Compose uses the project name to namespace resources such as containers, networks, and named volumes, while short service names keep commands and internal hostnames simple.
+
+Example:
+
+```ini
+[odoo]
+version = 18.0
+
+[docker]
+target_image = mycompany/odoo:${odoo:version}
 ```
 
 ### `[config]`

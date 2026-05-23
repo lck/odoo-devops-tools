@@ -40,6 +40,13 @@ _DEFAULT_DOCKER_REQUIREMENTS = [
     "click-odoo-contrib",
 ]
 
+_DEFAULT_DOCKER_DB_SERVICE = "db"
+_DEFAULT_DOCKER_ODOO_SERVICE = "odoo"
+_DEFAULT_DOCKER_COMPOSE_PROJECT_NAME = None
+_DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
+_DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
+_DOCKER_HOST_PORT_CONFIG_KEYS = {"http_port", "gevent_port", "longpolling_port"}
+
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
 
 _ODOO_VENV_SETTINGS = {
@@ -107,11 +114,21 @@ class VirtualenvConfig:
 
 
 @dataclass(frozen=True)
+class DockerConfig:
+    target_image: Optional[str] = None
+    base_image: Optional[str] = None
+    compose_project_name: Optional[str] = _DEFAULT_DOCKER_COMPOSE_PROJECT_NAME
+    db_service: str = _DEFAULT_DOCKER_DB_SERVICE
+    odoo_service: str = _DEFAULT_DOCKER_ODOO_SERVICE
+
+
+@dataclass(frozen=True)
 class ProjectConfig:
     virtualenv: VirtualenvConfig
     odoo: OdooSpec
     addons: Dict[str, AddonSpec]
     config: Dict[str, Any]
+    docker: DockerConfig
 
 
 @dataclass(frozen=True)
@@ -301,6 +318,49 @@ def _parse_odoo_version(odoo_version: str) -> int:
     return int(match.group(1))
 
 
+def _validate_docker_service_name(value: str, option: str) -> str:
+    service_name = (value or "").strip()
+    if not service_name:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected non-empty Docker Compose service name)."
+        )
+
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", service_name):
+        raise Exception(
+            f"Invalid option '{option}' in section [docker]: '{service_name}'. "
+            "Use only letters, digits, dots, underscores, or hyphens, and start with a letter or digit."
+        )
+
+    return service_name
+
+
+def _validate_docker_compose_project_name(value: Optional[str], option: str) -> Optional[str]:
+    compose_project_name = (value or "").strip()
+    if not compose_project_name:
+        return None
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", compose_project_name):
+        raise Exception(
+            f"Invalid option '{option}' in section [docker]: '{compose_project_name}'. "
+            "Use only lowercase letters, digits, underscores, or hyphens, "
+            "and start with a lowercase letter or digit."
+        )
+
+    return compose_project_name
+
+
+def _validate_docker_image(value: str, option: str) -> str:
+    image = (value or "").strip()
+    if not image:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected non-empty Docker image name/tag)."
+        )
+
+    return image
+
+
 def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str], list[str]]:
     odoo_major_version = _parse_odoo_version(odoo_version)
 
@@ -354,6 +414,7 @@ def load_project_config(
     #   [virtualenv] (optional)
     #   [odoo]
     #   [addons.<name>] for each addon (optional)
+    #   [docker] (optional)
     #   [config] (optional)
 
     odoo_version = _require_option("odoo", "version").strip()
@@ -467,6 +528,52 @@ def load_project_config(
                 shallow=_get_bool(sec, "shallow", default=True),
             )
 
+    docker = DockerConfig(base_image=f"odoo:{odoo_version}")
+    if cp.has_section("docker"):
+        supported_docker_options = {"target_image", "base_image", "compose_project_name", "db_service", "odoo_service"}
+        for key in cp._sections.get("docker", {}).keys():
+            if key not in supported_docker_options:
+                raise Exception(
+                    f"Unsupported option '{key}' in section [docker]. "
+                    "Supported options: target_image, base_image, compose_project_name, db_service, odoo_service."
+                )
+
+        target_image = (
+            _validate_docker_image(cp.get("docker", "target_image"), "target_image")
+            if cp.has_option("docker", "target_image")
+            else None
+        )
+        base_image = (
+            _validate_docker_image(cp.get("docker", "base_image"), "base_image")
+            if cp.has_option("docker", "base_image")
+            else f"odoo:{odoo_version}"
+        )
+        compose_project_name = _validate_docker_compose_project_name(
+            cp.get("docker", "compose_project_name", fallback=""),
+            "compose_project_name",
+        )
+        db_service = _validate_docker_service_name(
+            cp.get("docker", "db_service", fallback=_DEFAULT_DOCKER_DB_SERVICE),
+            "db_service",
+        )
+        odoo_service = _validate_docker_service_name(
+            cp.get("docker", "odoo_service", fallback=_DEFAULT_DOCKER_ODOO_SERVICE),
+            "odoo_service",
+        )
+
+        if db_service == odoo_service:
+            raise Exception(
+                "Invalid [docker] section: db_service and odoo_service must be different."
+            )
+
+        docker = DockerConfig(
+            target_image=target_image,
+            base_image=base_image,
+            compose_project_name=compose_project_name,
+            db_service=db_service,
+            odoo_service=odoo_service,
+        )
+
     config: Dict[str, Any] = {}
     # [config] is optional. Only include keys explicitly defined in [config]
     # (exclude DEFAULT values).
@@ -478,7 +585,7 @@ def load_project_config(
             )
         config[key] = cp.get("config", key)
 
-    return ProjectConfig(virtualenv=venv, odoo=odoo, addons=addons, config=config)
+    return ProjectConfig(virtualenv=venv, odoo=odoo, addons=addons, config=config, docker=docker)
 
 
 def require_venv(
@@ -1959,6 +2066,10 @@ def _docker_odoo_conf_path(layout: Layout) -> Path:
     return _docker_configs_dir(layout) / "odoo.conf"
 
 
+def _docker_compose_path(layout: Layout) -> Path:
+    return layout.root / "compose.yml"
+
+
 def _has_active_requirements(lines: list[str]) -> bool:
     for line in lines:
         stripped = line.strip()
@@ -2180,13 +2291,70 @@ requirements/addons-requirements.in.txt
     return path
 
 
+def _get_optional_docker_host_port(cfg: Dict[str, Any], key: str) -> Optional[int]:
+    raw = cfg.get(key)
+    if raw is None or str(raw).strip() == "":
+        return None
+
+    try:
+        port = int(str(raw).strip())
+    except ValueError as e:
+        raise Exception(
+            f"Invalid option '{key}' in section [config] (expected TCP port number)."
+        ) from e
+
+    if not 1 <= port <= 65535:
+        raise Exception(
+            f"Invalid option '{key}' in section [config] (expected TCP port number between 1 and 65535)."
+        )
+
+    return port
+
+
+def _render_docker_compose_ports(cfg: Dict[str, Any]) -> str:
+    """Render host-side port publishing for the generated sample Docker Compose file.
+
+    [config].http_port, [config].gevent_port and [config].longpolling_port are
+    interpreted as host ports for Docker Compose only. The container keeps the
+    standard Odoo Docker ports so the generated Docker Odoo config intentionally
+    does not include these options.
+    """
+    host_http_port = (
+        _get_optional_docker_host_port(cfg, "http_port")
+        or _DEFAULT_DOCKER_HTTP_CONTAINER_PORT
+    )
+    ports = [
+        f'      - "{host_http_port}:{_DEFAULT_DOCKER_HTTP_CONTAINER_PORT}"',
+    ]
+
+    host_gevent_port = _get_optional_docker_host_port(cfg, "gevent_port")
+    host_longpolling_port = _get_optional_docker_host_port(cfg, "longpolling_port")
+
+    if host_gevent_port is not None and host_longpolling_port is not None and host_gevent_port != host_longpolling_port:
+        raise Exception(
+            "Invalid [config] Docker port settings: 'gevent_port' and 'longpolling_port' "
+            "both map to container port 8072 and must not have different values."
+        )
+
+    host_async_port = host_gevent_port if host_gevent_port is not None else host_longpolling_port
+    if host_async_port is not None:
+        ports.append(
+            f'      - "{host_async_port}:{_DEFAULT_DOCKER_GEVENT_CONTAINER_PORT}"'
+        )
+
+    return "\n".join(ports)
+
+
 def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
     """Render a Docker-runtime Odoo config from optional project config values."""
     lines: list[str] = ["[options]"]
 
-    # Keep project-specific options, but force the standard Odoo Docker paths.
+    # Keep project-specific options, but force the standard Odoo Docker paths and
+    # ports. Port options from [config] are used as host-side Docker Compose
+    # published ports only; Odoo inside the container keeps the official Docker
+    # image defaults (8069 and 8072).
     for key, value in cfg.items():
-        if key in {"addons_path", "data_dir"}:
+        if key in {"addons_path", "data_dir", *_DOCKER_HOST_PORT_CONFIG_KEYS}:
             continue
         lines.append(f"{key} = {_format_conf_value(value)}")
 
@@ -2203,6 +2371,64 @@ def write_docker_odoo_conf(layout: Layout, cfg: ProjectConfig) -> Path:
     return path
 
 
+def render_docker_compose(image_name: str, docker: DockerConfig, cfg: Dict[str, Any]) -> str:
+    """Render a sample Docker Compose file for the generated custom Odoo image."""
+    compose_project_name = f"name: {docker.compose_project_name}\n\n" if docker.compose_project_name else ""
+    db_service = docker.db_service
+    odoo_service = docker.odoo_service
+    ports = _render_docker_compose_ports(cfg)
+
+    return f"""# Generated by odt-env.
+{compose_project_name}services:
+  {db_service}:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: odoo
+      POSTGRES_PASSWORD: odoo
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data
+
+  {odoo_service}:
+    image: {image_name}
+    restart: unless-stopped
+    depends_on:
+      - {db_service}
+    ports:
+{ports}
+    environment:
+      HOST: {db_service}
+      PORT: 5432
+      USER: odoo
+      PASSWORD: odoo
+    volumes:
+      - ./odoo-docker/configs:/etc/odoo:ro
+      - odoo-data:/var/lib/odoo
+
+volumes:
+  odoo-db-data:
+  odoo-data:
+"""
+
+
+def write_docker_compose(
+        layout: Layout,
+        image_name: str,
+        docker: DockerConfig,
+        cfg: Dict[str, Any],
+) -> Path:
+    """Write ROOT/compose.yml, always overwriting an existing generated file."""
+    path = _docker_compose_path(layout)
+
+    if path.exists() and not path.is_file():
+        raise Exception(f"Docker Compose path exists but is not a file: {path}")
+
+    path.write_text(render_docker_compose(image_name, docker, cfg), encoding="utf-8")
+    _logger.info("Generated Docker Compose file: %s", path)
+    return path
+
+
 def write_dockerfile(layout: Layout, cfg: ProjectConfig, has_build_constraints: bool) -> Path:
     build_constraints_copy = ""
     build_constraints_install = ""
@@ -2212,9 +2438,11 @@ def write_dockerfile(layout: Layout, cfg: ProjectConfig, has_build_constraints: 
         build_constraints_install = " --build-constraints /tmp/build-constraints.txt"
         cleanup_constraints = " /tmp/build-constraints.txt"
 
+    base_image = (cfg.docker.base_image or f"odoo:{cfg.odoo.version}").strip()
+
     content = f"""# Generated by odt-env.
 # Review and edit this file before building when project-specific changes are needed.
-FROM odoo:{cfg.odoo.version}
+FROM {base_image}
 
 USER root
 
@@ -2355,7 +2583,7 @@ def sync_project(
         no_configs: bool = False,
         no_scripts: bool = False,
         no_data_dir: bool = False,
-        build_docker_image_name: Optional[str] = None,
+        build_docker_image_requested: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
 ) -> None:
     root = (root_override or ini_path.parent).resolve()
@@ -2385,7 +2613,7 @@ def sync_project(
         _logger.info("Using local Odoo source directory from [odoo].path: %s", local_odoo_dir)
         layout = replace(layout, odoo_dir=local_odoo_dir)
 
-    docker_requested = build_docker_image_name is not None
+    docker_requested = build_docker_image_requested
 
     # We optionally create/ensure the venv early so we can use its Python for `uv pip compile` / installs.
     venv_py: Optional[Path] = None
@@ -2697,20 +2925,26 @@ def sync_project(
     docker_artifacts: Optional[dict[str, Any]] = None
     docker_image_built: Optional[str] = None
 
-    if build_docker_image_name is not None:
+    if build_docker_image_requested:
+        target_image = (cfg.docker.target_image or "").strip()
+        if not target_image:
+            raise Exception(
+                "Missing Docker target image. Set option 'target_image' in section [docker]."
+            )
+
         _logger.info("Generating Docker artifacts before building the image.")
         docker_artifacts = create_docker_artifacts(
             layout=layout,
             cfg=cfg,
             addon_requirement_files=addon_req_files,
         )
-
-        image_name = build_docker_image_name.strip()
-        if not image_name:
-            raise Exception(
-                "Invalid --build-docker-image value (expected non-empty IMAGE_NAME)."
-            )
-        docker_image_built = build_docker_image(layout, image_name)
+        write_docker_compose(
+            layout=layout,
+            image_name=target_image,
+            docker=cfg.docker,
+            cfg=cfg.config,
+        )
+        docker_image_built = build_docker_image(layout, target_image)
 
     # Generate config (unless disabled).
     if not no_configs:
@@ -2801,12 +3035,15 @@ def sync_project(
             if bc.exists():
                 _logger.info(f"  Build Constraints:  {bc}")
 
-    if docker_artifacts is not None or build_docker_image_name is not None:
+    if docker_artifacts is not None or build_docker_image_requested:
         _logger.info(f"  Docker Context:     {layout.docker_dir}")
         _logger.info(f"  Dockerfile:         {_dockerfile_path(layout)}")
         docker_conf_path = _docker_odoo_conf_path(layout)
         if docker_conf_path.exists():
             _logger.info(f"  Docker Config:      {docker_conf_path}")
+        docker_compose_path = _docker_compose_path(layout)
+        if docker_compose_path.exists():
+            _logger.info(f"  Docker Compose:     {docker_compose_path}")
         docker_lock_path = _docker_requirements_lock_path(layout)
         if docker_lock_path.exists():
             _logger.info(f"  Docker Requirements: {docker_lock_path}")
@@ -3001,7 +3238,7 @@ Examples:
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /full/path/to/workspace-root
   odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
-  odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image my-odoo:18.0
+  odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
 """
 
@@ -3081,9 +3318,10 @@ Examples:
 
     parser.add_argument(
         "--build-docker-image",
-        metavar="IMAGE_NAME",
+        action="store_true",
         help=(
-            "Build a Docker image by extending the standard odoo Docker image."
+            "Build the Docker image configured by [docker].target_image by extending the configured base Docker image. "
+            "Also generates ROOT/compose.yml."
         ),
     )
 
@@ -3166,7 +3404,7 @@ def main() -> None:
     no_configs = bool(getattr(args, 'no_configs', False))
     no_scripts = bool(getattr(args, 'no_scripts', False))
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
-    build_docker_image_name = getattr(args, 'build_docker_image', None)
+    build_docker_image_requested = bool(getattr(args, 'build_docker_image', False))
 
     try:
         vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
@@ -3243,7 +3481,7 @@ def main() -> None:
             no_configs=no_configs,
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
-            build_docker_image_name=build_docker_image_name,
+            build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
         )
     except Exception as e:
