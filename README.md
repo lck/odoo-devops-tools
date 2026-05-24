@@ -479,12 +479,12 @@ docker compose run --rm odoo \
   -- \
   -c /etc/odoo/odoo.conf \
   -d odoo \
-  -i helpdesk_mgmt,web \
+  -i web_notify,helpdesk_mgmt \
   --without-demo=all \
   --stop-after-init
 ```
 
-Replace `helpdesk_mgmt,web` with the modules that should be installed during the initial database bootstrap.
+Replace `web_notify,helpdesk_mgmt` with the modules that should be installed during the initial database bootstrap.
 
 After the database has been initialized, start the Odoo service:
 
