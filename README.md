@@ -707,15 +707,13 @@ commit = abcdef1
 
 This section is optional.
 
-It controls values used when `odt-env` builds a Docker image and generates `ROOT/compose.yml` together with `--build-docker-image`.
+This section configures the Docker image built by `--build-docker-image` and the generated `ROOT/compose.yml` file.
 
-- `target_image` — Docker image name/tag to build and write into the generated Compose file. Required when `--build-docker-image` is used.
-- `base_image` — Docker image name/tag used as the `FROM` image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
-- `compose_project_name` — optional top-level Docker Compose project name. If omitted, Docker Compose uses its normal project name resolution, usually the directory name.
+- `target_image` — Docker image name/tag to build. This value is also used in the generated Compose file. Required when `--build-docker-image` is used.
+- `base_image` — Docker image used as the base image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
+- `compose_project_name` — optional top-level name written to `ROOT/compose.yml`.
 - `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
 - `db_service` — Docker Compose service name for PostgreSQL. Default: `db`.
-
-In most cases, set `target_image` and optionally customize `compose_project_name`; keep the service names at their defaults. Docker Compose uses the project name to namespace resources such as containers, networks, and named volumes, while short service names keep commands and internal hostnames simple.
 
 Example:
 
