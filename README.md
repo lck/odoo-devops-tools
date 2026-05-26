@@ -726,9 +726,7 @@ commit = abcdef1
 
 This section is optional.
 
-This section configures the Docker image built by `--build-docker-image` and the generated `ROOT/compose.yml` file.
-
-- `target_image` — Docker image name/tag to build. This value is also used in the generated Compose file. Required when `--build-docker-image` is used.
+- `target_image` — Docker image name/tag to build. Required when `--build-docker-image` is used.
 - `base_image` — Docker image used as the base image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
 - `compose_project_name` — optional top-level name written to `ROOT/compose.yml`.
 - `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
