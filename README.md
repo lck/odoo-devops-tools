@@ -2,7 +2,18 @@
 
 A small set of utilities for **local Odoo development** and **simple Odoo deployments**.
 
-The main entry point is **`odt-env`**, a CLI that provisions an Odoo workspace from a **single project file**.
+At the center of the toolkit is **`odt-env`**: a declarative CLI that turns one INI project file into a ready-to-use Odoo workspace for local development or simple deployment.
+
+Why use `odt-env`?
+
+- Keep the whole workspace definition in one project file: Odoo version, source repositories, addons, Python settings, Docker settings, and Odoo configuration.
+- Recreate the same workspace consistently across machines by syncing Odoo and addons from Git, local paths, or pinned commits.
+- Use fast shallow clones by default, with optional full-history clones when development workflows need them.
+- Let `uv` provision the right Python virtual environment and resolve Odoo plus addon dependencies into a single lock file.
+- Build a local wheelhouse once and recreate the virtual environment later using strict offline installs.
+- Generate the Odoo configuration and helper scripts for running, testing, shell access, module updates, backups, and restores.
+- Build a custom Docker image from the same project definition and generate a ready-to-review Docker Compose file.
+- Load the project file from a local path, Git repository, or HTTP(S) URL, with CLI variable overrides for reusable project templates.
 
 ---
 
