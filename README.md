@@ -421,6 +421,8 @@ version = 18.0
 
 [docker]
 target_image = mycompany/odoo:${odoo:version}
+# Optional: deploy is the default. In deploy mode, addon modules are copied into the image.
+addons_mode = deploy
 
 # Optional: publish Odoo on custom host ports in the generated compose.yml.
 # These values are used as host-side Docker Compose ports only; Odoo inside
@@ -486,7 +488,67 @@ volumes:
   odoo-data:
 ```
 
-#### 6.3. Use the image with Docker Compose
+#### 6.3. Docker dev mode with bind-mounted addons
+
+For local Docker development, set `[docker].addons_mode = dev`.
+
+In dev mode, `odt-env` still builds the configured Docker image so addon Python requirements can be installed,
+but addon source directories are not copied into the image. Instead, `ROOT/compose.yml` bind-mounts each configured
+addon source under the standard Odoo Docker addon location `/mnt/extra-addons/`,
+and `ROOT/odoo-docker/configs/odoo.conf` gets a Docker-specific `addons_path` that points to the mounted addon directories.
+
+Example:
+
+```ini
+[odoo]
+version = 18.0
+
+[docker]
+target_image = mycompany/odoo-dev:${odoo:version}
+addons_mode = dev
+
+[addons.oca-web]
+repo = https://github.com/OCA/web.git
+branch = ${odoo:version}
+
+[addons.my-custom-addons]
+path = odoo-addons/my-custom-addons
+```
+
+Generate the image and Compose file:
+
+```bash
+odt-env odoo-project.ini --sync-addons --build-docker-image
+```
+
+The generated Docker Odoo config contains addon paths similar to:
+
+```ini
+[options]
+addons_path = /mnt/extra-addons/oca-web,/mnt/extra-addons/my-custom-addons
+data_dir = /var/lib/odoo
+```
+
+The generated Compose file contains bind mounts similar to:
+
+```yaml
+services:
+  odoo:
+    image: mycompany/odoo-dev:18.0
+    volumes:
+      - ./odoo-docker/configs:/etc/odoo:ro
+      - type: bind
+        source: ./odoo-addons/oca-web
+        target: /mnt/extra-addons/oca-web
+      - type: bind
+        source: ./odoo-addons/my-custom-addons
+        target: /mnt/extra-addons/my-custom-addons
+      - odoo-data:/var/lib/odoo
+```
+
+When addon source files change on the host, the running container sees those changes through the bind mounts. Rebuild the image only when addon Python requirements or Docker-level dependencies change.
+
+#### 6.4. Use the image with Docker Compose
 
 The custom image can be used in the same way as a regular Odoo image.
 
@@ -739,6 +801,9 @@ This section is optional.
 
 - `target_image` — Docker image name/tag to build. Required when `--build-docker-image` is used.
 - `base_image` — Docker image used as the base image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
+- `addons_mode` — Docker addon mode. Supported values: `deploy` and `dev`. Default: `deploy`.
+  - `deploy` copies addon modules into the image under `/mnt/extra-addons/`.
+  - `dev` bind-mounts addon source directories in `ROOT/compose.yml` and writes Docker container paths into `ROOT/odoo-docker/configs/odoo.conf`.
 - `compose_project_name` — optional top-level name written to `ROOT/compose.yml`.
 - `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
 - `db_service` — Docker Compose service name for PostgreSQL. Default: `db`.
@@ -751,6 +816,7 @@ version = 18.0
 
 [docker]
 target_image = mycompany/odoo:${odoo:version}
+addons_mode = deploy
 ```
 
 ### `[config]`

@@ -1,0 +1,112 @@
+name: Test Build Docker Image Dev Mode
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-docker-image-dev-mode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Create workspace root folder
+        run: mkdir -p odoo-workspace
+
+      - name: Build Docker image from project INI
+        working-directory: ./odoo-workspace
+        env:
+          ODT_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
+            --sync-addons \
+            --build-docker-image \
+            -e docker_addons_mode=dev
+
+      - name: Check generated Docker artifacts and image
+        run: |
+          test -d odoo-workspace/odoo-addons/oca-web/.git
+          test -d odoo-workspace/odoo-addons/oca-helpdesk/.git
+
+          test -f odoo-workspace/compose.yml
+          test -f odoo-workspace/odoo-docker/Dockerfile
+          test -f odoo-workspace/odoo-docker/.dockerignore
+          test -f odoo-workspace/odoo-docker/configs/odoo.conf
+          test -f odoo-workspace/odoo-docker/requirements/addons-requirements.lock.txt
+
+          image="$(awk '
+            $1 == "odoo:" { in_odoo = 1 }
+            in_odoo && $1 == "image:" { print $2; exit }
+          ' odoo-workspace/compose.yml)"
+          test -n "${image}"
+          docker image inspect "${image}" >/dev/null
+
+      - name: Start the PostgreSQL service
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose up -d db
+
+      - name: Init database with OCA addons from Docker image
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose run --rm odoo \
+            -- \
+            -c /etc/odoo/odoo.conf \
+            -d odoo \
+            -i web_notify,helpdesk_mgmt \
+            --without-demo=all \
+            --stop-after-init
+
+      - name: Verify OCA addons installed in Docker database
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose exec -T db psql -U odoo -d odoo -c \
+            "SELECT name, state
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+             ORDER BY name;"
+
+          missing="$(docker compose -f compose.yml exec -T db psql -U odoo -d odoo -tAc \
+            "SELECT string_agg(name, ',')
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+               AND state <> 'installed';")"
+
+          test -z "${missing}"
+
+      - name: Stop Docker Compose services
+        if: always()
+        working-directory: ./odoo-workspace
+        run: docker compose down -v --remove-orphans
+
+      - name: Show generated Docker workspace and config
+        if: always()
+        run: |
+          echo "Workspace tree:"
+          find odoo-workspace -maxdepth 3 | sort
+          echo
+          echo "Docker Compose:"
+          cat odoo-workspace/compose.yml || true
+          echo
+          echo "Dockerfile:"
+          cat odoo-workspace/odoo-docker/Dockerfile || true
+          echo
+          echo "Docker Odoo config:"
+          cat odoo-workspace/odoo-docker/configs/odoo.conf || true
+          echo
+          echo "Docker images:"
+          docker images || true
+          echo
+          echo "Docker Compose logs:"
+          cd odoo-workspace && docker compose -f compose.yml logs --no-color || true

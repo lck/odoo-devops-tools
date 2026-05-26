@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import io
+import json
 import logging
 import os
 import re
@@ -49,6 +50,11 @@ _DEFAULT_DOCKER_ODOO_SERVICE = "odoo"
 _DEFAULT_DOCKER_COMPOSE_PROJECT_NAME = None
 _DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
 _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
+_DEFAULT_DOCKER_ADDONS_MODE = "deploy"
+_DOCKER_ADDONS_MODE_DEPLOY = "deploy"
+_DOCKER_ADDONS_MODE_DEV = "dev"
+_DOCKER_ADDONS_MODES = {_DOCKER_ADDONS_MODE_DEPLOY, _DOCKER_ADDONS_MODE_DEV}
+_DOCKER_ADDONS_CONTAINER_ROOT = PurePosixPath("/mnt/extra-addons")
 _DOCKER_HOST_PORT_CONFIG_KEYS = {"http_port", "gevent_port", "longpolling_port"}
 
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
@@ -127,6 +133,7 @@ class VirtualenvConfig:
 class DockerConfig:
     target_image: Optional[str] = None
     base_image: Optional[str] = None
+    addons_mode: str = _DEFAULT_DOCKER_ADDONS_MODE
     compose_project_name: Optional[str] = _DEFAULT_DOCKER_COMPOSE_PROJECT_NAME
     db_service: str = _DEFAULT_DOCKER_DB_SERVICE
     odoo_service: str = _DEFAULT_DOCKER_ODOO_SERVICE
@@ -371,6 +378,17 @@ def _validate_docker_image(value: str, option: str) -> str:
     return image
 
 
+def _validate_docker_addons_mode(value: str, option: str) -> str:
+    addons_mode = (value or "").strip().lower() or _DEFAULT_DOCKER_ADDONS_MODE
+    if addons_mode not in _DOCKER_ADDONS_MODES:
+        supported = ", ".join(sorted(_DOCKER_ADDONS_MODES))
+        raise Exception(
+            f"Invalid option '{option}' in section [docker]: '{addons_mode}'. "
+            f"Supported values: {supported}."
+        )
+    return addons_mode
+
+
 def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str], list[str]]:
     odoo_major_version = _parse_odoo_version(odoo_version)
 
@@ -540,12 +558,12 @@ def load_project_config(
 
     docker = DockerConfig(base_image=f"odoo:{odoo_version}")
     if cp.has_section("docker"):
-        supported_docker_options = {"target_image", "base_image", "compose_project_name", "db_service", "odoo_service"}
+        supported_docker_options = {"target_image", "base_image", "addons_mode", "compose_project_name", "db_service", "odoo_service"}
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
-                    "Supported options: target_image, base_image, compose_project_name, db_service, odoo_service."
+                    "Supported options: target_image, base_image, addons_mode, compose_project_name, db_service, odoo_service."
                 )
 
         target_image = (
@@ -557,6 +575,10 @@ def load_project_config(
             _validate_docker_image(cp.get("docker", "base_image"), "base_image")
             if cp.has_option("docker", "base_image")
             else f"odoo:{odoo_version}"
+        )
+        docker_addons_mode = _validate_docker_addons_mode(
+            cp.get("docker", "addons_mode", fallback=_DEFAULT_DOCKER_ADDONS_MODE),
+            "addons_mode",
         )
         compose_project_name = _validate_docker_compose_project_name(
             cp.get("docker", "compose_project_name", fallback=""),
@@ -579,6 +601,7 @@ def load_project_config(
         docker = DockerConfig(
             target_image=target_image,
             base_image=base_image,
+            addons_mode=docker_addons_mode,
             compose_project_name=compose_project_name,
             db_service=db_service,
             odoo_service=odoo_service,
@@ -2080,6 +2103,55 @@ def _docker_compose_path(layout: Layout) -> Path:
     return layout.root / "compose.yml"
 
 
+def _docker_safe_addon_mount_name(addon_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", addon_name.strip()).strip("._-")
+    return safe or "addon"
+
+
+def _docker_addon_mount_name_map(cfg: ProjectConfig) -> dict[str, str]:
+    used: set[str] = set()
+    out: dict[str, str] = {}
+
+    for addon_name in cfg.addons:
+        base = _docker_safe_addon_mount_name(addon_name)
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+
+        used.add(candidate)
+        out[addon_name] = candidate
+
+    return out
+
+
+def _docker_container_addons_path_for_addons_mode(cfg: ProjectConfig) -> str:
+    if cfg.docker.addons_mode != _DOCKER_ADDONS_MODE_DEV or not cfg.addons:
+        return str(_DOCKER_ADDONS_CONTAINER_ROOT)
+
+    mount_names = _docker_addon_mount_name_map(cfg)
+    return ",".join(
+        str(_DOCKER_ADDONS_CONTAINER_ROOT / mount_names[addon_name])
+        for addon_name in cfg.addons
+    )
+
+
+def _yaml_quote_scalar(value: str) -> str:
+    return json.dumps(value)
+
+
+def _compose_host_path(layout: Layout, path: Path) -> str:
+    try:
+        resolved_path = path.resolve()
+        resolved_root = layout.root.resolve()
+        rel = resolved_path.relative_to(resolved_root)
+        rel_text = rel.as_posix()
+        return "." if rel_text == "." else f"./{rel_text}"
+    except Exception:
+        return path.expanduser().absolute().as_posix()
+
+
 def _has_active_requirements(lines: list[str]) -> bool:
     for line in lines:
         stripped = line.strip()
@@ -2355,7 +2427,7 @@ def _render_docker_compose_ports(cfg: Dict[str, Any]) -> str:
     return "\n".join(ports)
 
 
-def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
+def render_docker_odoo_conf(cfg: ProjectConfig) -> str:
     """Render a Docker-runtime Odoo config from optional project config values."""
     lines: list[str] = ["[options]"]
 
@@ -2363,12 +2435,12 @@ def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
     # ports. Port options from [config] are used as host-side Docker Compose
     # published ports only; Odoo inside the container keeps the official Docker
     # image defaults (8069 and 8072).
-    for key, value in cfg.items():
+    for key, value in cfg.config.items():
         if key in {"addons_path", "data_dir", *_DOCKER_HOST_PORT_CONFIG_KEYS}:
             continue
         lines.append(f"{key} = {_format_conf_value(value)}")
 
-    lines.append("addons_path = /mnt/extra-addons")
+    lines.append(f"addons_path = {_docker_container_addons_path_for_addons_mode(cfg)}")
     lines.append("data_dir = /var/lib/odoo")
 
     return "\n".join(lines) + "\n"
@@ -2377,16 +2449,56 @@ def render_docker_odoo_conf(cfg: Dict[str, Any]) -> str:
 def write_docker_odoo_conf(layout: Layout, cfg: ProjectConfig) -> Path:
     path = _docker_odoo_conf_path(layout)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_docker_odoo_conf(cfg.config), encoding="utf-8")
+    path.write_text(render_docker_odoo_conf(cfg), encoding="utf-8")
     return path
 
 
-def render_docker_compose(image_name: str, docker: DockerConfig, cfg: Dict[str, Any]) -> str:
+def _render_docker_dev_addon_volumes(layout: Layout, cfg: ProjectConfig) -> list[str]:
+    """Render bind mounts for addon sources in Docker dev mode."""
+    mount_names = _docker_addon_mount_name_map(cfg)
+    volumes: list[str] = []
+
+    for addon_name, spec in cfg.addons.items():
+        source_root = _validate_local_addon_path(layout, addon_name, spec)
+        if not source_root.exists():
+            raise Exception(
+                f"Addon source for [addons.{addon_name}] does not exist: {source_root}. "
+                "Run with --sync-addons/--sync-all first, or provide an existing local path."
+            )
+        if not source_root.is_dir():
+            raise Exception(
+                f"Addon source for [addons.{addon_name}] is not a directory: {source_root}"
+            )
+
+        volumes.extend([
+            "      - type: bind",
+            f"        source: {_yaml_quote_scalar(_compose_host_path(layout, source_root))}",
+            f"        target: {_yaml_quote_scalar(str(_DOCKER_ADDONS_CONTAINER_ROOT / mount_names[addon_name]))}",
+        ])
+
+    return volumes
+
+
+def _render_docker_compose_volumes(layout: Layout, cfg: ProjectConfig) -> str:
+    volumes = [
+        "      - ./odoo-docker/configs:/etc/odoo:ro",
+    ]
+
+    if cfg.docker.addons_mode == _DOCKER_ADDONS_MODE_DEV:
+        volumes.extend(_render_docker_dev_addon_volumes(layout, cfg))
+
+    volumes.append("      - odoo-data:/var/lib/odoo")
+    return "\n".join(volumes)
+
+
+def render_docker_compose(layout: Layout, image_name: str, cfg: ProjectConfig) -> str:
     """Render a sample Docker Compose file for the generated custom Odoo image."""
+    docker = cfg.docker
     compose_project_name = f"name: {docker.compose_project_name}\n\n" if docker.compose_project_name else ""
     db_service = docker.db_service
     odoo_service = docker.odoo_service
-    ports = _render_docker_compose_ports(cfg)
+    ports = _render_docker_compose_ports(cfg.config)
+    volumes = _render_docker_compose_volumes(layout, cfg)
 
     return f"""# Generated by odt-env.
 {compose_project_name}services:
@@ -2413,8 +2525,7 @@ def render_docker_compose(image_name: str, docker: DockerConfig, cfg: Dict[str, 
       USER: odoo
       PASSWORD: odoo
     volumes:
-      - ./odoo-docker/configs:/etc/odoo:ro
-      - odoo-data:/var/lib/odoo
+{volumes}
 
 volumes:
   odoo-db-data:
@@ -2425,8 +2536,7 @@ volumes:
 def write_docker_compose(
         layout: Layout,
         image_name: str,
-        docker: DockerConfig,
-        cfg: Dict[str, Any],
+        cfg: ProjectConfig,
 ) -> Path:
     """Write ROOT/compose.yml, always overwriting an existing generated file."""
     path = _docker_compose_path(layout)
@@ -2434,7 +2544,7 @@ def write_docker_compose(
     if path.exists() and not path.is_file():
         raise Exception(f"Docker Compose path exists but is not a file: {path}")
 
-    path.write_text(render_docker_compose(image_name, docker, cfg), encoding="utf-8")
+    path.write_text(render_docker_compose(layout, image_name, cfg), encoding="utf-8")
     _logger.info("Generated Docker Compose file: %s", path)
     return path
 
@@ -2449,14 +2559,25 @@ def write_dockerfile(layout: Layout, cfg: ProjectConfig, has_build_constraints: 
         cleanup_constraints = " /tmp/build-constraints.txt"
 
     base_image = (cfg.docker.base_image or f"odoo:{cfg.odoo.version}").strip()
+    addon_copy_step = ""
+    if cfg.docker.addons_mode == _DOCKER_ADDONS_MODE_DEPLOY:
+        addon_copy_step = """
+COPY addons/ /mnt/extra-addons/
+"""
+
+    addon_chown_step = ""
+    if cfg.docker.addons_mode == _DOCKER_ADDONS_MODE_DEPLOY:
+        addon_chown_step = """
+
+RUN chown -R odoo:odoo /mnt/extra-addons
+"""
 
     content = f"""# Generated by odt-env.
 # Review and edit this file before building when project-specific changes are needed.
 FROM {base_image}
 
 USER root
-
-COPY addons/ /mnt/extra-addons/
+{addon_copy_step}
 COPY requirements/addons-requirements.lock.txt /tmp/addons-requirements.lock.txt
 {build_constraints_copy.rstrip()}
 
@@ -2466,10 +2587,7 @@ RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir uv \\
     else \\
       echo "INFO: No addon Python requirements to install."; \\
     fi \\
- && rm -f /tmp/addons-requirements.lock.txt{cleanup_constraints}
-
-RUN chown -R odoo:odoo /mnt/extra-addons
-
+ && rm -f /tmp/addons-requirements.lock.txt{cleanup_constraints}{addon_chown_step}
 USER odoo
 """
     path = _dockerfile_path(layout)
@@ -2508,7 +2626,15 @@ def create_docker_artifacts(
         build_constraints_path=build_constraints_path,
     )
 
-    staged_module_count = stage_docker_addons(layout, cfg)
+    staged_module_count = 0
+    if cfg.docker.addons_mode == _DOCKER_ADDONS_MODE_DEPLOY:
+        staged_module_count = stage_docker_addons(layout, cfg)
+    else:
+        addons_dir = _docker_addons_dir(layout)
+        if addons_dir.exists():
+            _logger.info("Removing stale Docker staged addons for dev mode: %s", addons_dir)
+            _rmtree(addons_dir)
+
     dockerignore_path = write_dockerignore(layout)
     docker_conf_path = write_docker_odoo_conf(layout, cfg)
     dockerfile_path = write_dockerfile(
@@ -2533,7 +2659,7 @@ def create_docker_artifacts(
     }
 
 
-def build_docker_image(layout: Layout, image_name: str) -> str:
+def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str = _DEFAULT_DOCKER_ADDONS_MODE) -> str:
     """Build a Docker image from ROOT/odoo-docker/ build context."""
     dockerfile_path = _dockerfile_path(layout)
     lock_path = _docker_requirements_lock_path(layout)
@@ -2549,7 +2675,7 @@ def build_docker_image(layout: Layout, image_name: str) -> str:
             f"Docker addon requirements lock not found: {lock_path}. "
             "Generate Docker artifacts before building the image."
         )
-    if not addons_dir.is_dir():
+    if docker_addons_mode == _DOCKER_ADDONS_MODE_DEPLOY and not addons_dir.is_dir():
         raise Exception(
             f"Docker addon staging directory not found: {addons_dir}. "
             "Generate Docker artifacts before building the image."
@@ -2951,10 +3077,9 @@ def sync_project(
         write_docker_compose(
             layout=layout,
             image_name=target_image,
-            docker=cfg.docker,
-            cfg=cfg.config,
+            cfg=cfg,
         )
-        docker_image_built = build_docker_image(layout, target_image)
+        docker_image_built = build_docker_image(layout, target_image, docker_addons_mode=cfg.docker.addons_mode)
 
     # Generate config (unless disabled).
     if not no_configs:
@@ -3046,6 +3171,7 @@ def sync_project(
                 _logger.info(f"  Build Constraints:  {bc}")
 
     if docker_artifacts is not None or build_docker_image_requested:
+        _logger.info(f"  Docker Addons Mode:        {cfg.docker.addons_mode}")
         _logger.info(f"  Docker Context:     {layout.docker_dir}")
         _logger.info(f"  Dockerfile:         {_dockerfile_path(layout)}")
         docker_conf_path = _docker_odoo_conf_path(layout)
@@ -3470,6 +3596,8 @@ Examples:
         action="store_true",
         help=(
             "Build the Docker image configured by [docker].target_image by extending the configured base Docker image. "
+            "In [docker].addons_mode=deploy, addons are copied into the image. "
+            "In [docker].addons_mode=dev, addons are bind-mounted in ROOT/compose.yml. "
             "Also generates ROOT/compose.yml."
         ),
     )
