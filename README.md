@@ -62,13 +62,27 @@ Run `odt-env` against the project file:
 odt-env odoo-project.ini --sync-all --create-venv
 ```
 
-#### 1.3. Optional: Load the project file from Git
+#### 1.3. Optional: Load the project file from Git or URL
 
 Instead of passing a local file, the `INI` argument can point to a file stored in a Git repository:
 
 ```bash
 odt-env --sync-all --create-venv \
   git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini
+```
+
+It can also point to an HTTP(S) URL that serves a raw INI file:
+
+```bash
+odt-env --sync-all --create-venv \
+  https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini
+```
+
+GitHub `blob` URLs copied from the browser are accepted and converted to their raw file URL automatically:
+
+```bash
+odt-env --sync-all --create-venv \
+  https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo18-minimal.ini
 ```
 
 After provisioning, the workspace has the following structure:
@@ -515,6 +529,7 @@ If no options are specified, `odt-env` only regenerates configuration files and 
 - `INI` — required project file. This can be either:
   - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
   - a Git-backed INI source, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main`
+  - an HTTP(S) URL pointing to a raw INI file, for example `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini`
 
 Git-backed INI sources use this syntax:
 
@@ -524,9 +539,13 @@ git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
 
 The `?ref=REF` part is optional and can point to a branch, tag, or commit.
 
+HTTP(S)-backed INI sources must point to raw INI content.
+For GitHub files, prefer `raw.githubusercontent.com` URLs.
+GitHub `blob` URLs are accepted and converted to raw URLs automatically.
+
 ### Paths and outputs
 
-- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git-backed INI.
+- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git-backed or URL-backed INI.
 - `-e KEY=VALUE`, `--extra-var KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
 - `--no-configs` — do not generate config files
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`

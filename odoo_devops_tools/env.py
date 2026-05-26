@@ -21,13 +21,17 @@ import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
-from urllib.parse import parse_qs
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, unquote, urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from . import __version__
 
 _logger = logging.getLogger("odt-env")
 
 _GIT_INI_PREFIX = "git::"
+_URL_INI_TIMEOUT_SECONDS = 30
+_URL_INI_MAX_BYTES = 1024 * 1024
 
 _DEFAULT_REQUIREMENTS = [
     "pip",
@@ -100,6 +104,12 @@ class GitIniSource:
     repo: str
     path: PurePosixPath
     ref: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class UrlIniSource:
+    url: str
+    original_url: str
 
 
 @dataclass(frozen=True)
@@ -3230,6 +3240,142 @@ def _copy_git_ini_to_root(source: GitIniSource, root: Path) -> Path:
         return copied_ini_path
 
 
+def _github_blob_url_to_raw(url: str) -> Optional[str]:
+    """Convert a GitHub web UI blob URL to a raw.githubusercontent.com URL."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() != "github.com":
+        return None
+
+    parts = [unquote(part) for part in parsed.path.split("/") if part]
+    if len(parts) < 5 or parts[2] != "blob":
+        return None
+
+    owner, repo, _blob, ref, *file_parts = parts
+    if not owner or not repo or not ref or not file_parts:
+        return None
+    if any(part in (".", "..") for part in file_parts):
+        raise Exception("Invalid GitHub blob URL: file path must not contain '.' or '..'.")
+
+    raw_path = "/" + "/".join([owner, repo, ref, *file_parts])
+    return urlunparse(("https", "raw.githubusercontent.com", raw_path, "", "", ""))
+
+
+def _parse_url_ini_source(raw_ini: str) -> Optional[UrlIniSource]:
+    """Parse an HTTP(S)-backed INI source.
+
+    GitHub ``/blob/`` URLs are accepted as a convenience and normalized to
+    raw.githubusercontent.com URLs before downloading.
+    """
+    raw_value = (raw_ini or "").strip()
+    parsed = urlparse(raw_value)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not parsed.netloc:
+        raise Exception("Invalid URL INI source: missing host.")
+
+    if parsed.scheme == "http":
+        _logger.warning(
+            "URL INI source uses plain HTTP; prefer HTTPS when possible: %s",
+            raw_value,
+        )
+
+    normalized = _github_blob_url_to_raw(raw_value)
+    if normalized is not None:
+        _logger.info(
+            "Normalized GitHub blob URL to raw INI URL: %s -> %s",
+            raw_value,
+            normalized,
+        )
+        return UrlIniSource(url=normalized, original_url=raw_value)
+
+    return UrlIniSource(url=raw_value, original_url=raw_value)
+
+
+def _safe_url_ini_filename(source_url: str) -> str:
+    """Return a safe local filename for a downloaded URL INI."""
+    parsed = urlparse(source_url)
+    raw_name = PurePosixPath(unquote(parsed.path)).name.strip()
+    if not raw_name or raw_name in {".", ".."}:
+        return "odoo-project.ini"
+
+    # Keep the URL basename but strip path separators that could appear after
+    # decoding percent-encoded input.
+    safe_name = raw_name.replace("/", "_").replace("\\", "_")
+    return safe_name or "odoo-project.ini"
+
+
+def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
+    """Download an HTTP(S)-backed INI into ``root`` and return that local copy."""
+    request = Request(
+        source.url,
+        headers={"User-Agent": f"odt-env/{__version__}"},
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=_URL_INI_TIMEOUT_SECONDS) as response:
+            content_type = response.headers.get("Content-Type", "")
+            raw = response.read(_URL_INI_MAX_BYTES + 1)
+    except HTTPError as e:
+        raise Exception(f"Failed to download URL INI: HTTP {e.code} {e.reason} ({source.url})") from e
+    except URLError as e:
+        raise Exception(f"Failed to download URL INI: {e.reason} ({source.url})") from e
+    except OSError as e:
+        raise Exception(f"Failed to download URL INI: {e} ({source.url})") from e
+
+    if len(raw) > _URL_INI_MAX_BYTES:
+        raise Exception(
+            f"URL INI is too large: maximum supported size is {_URL_INI_MAX_BYTES} bytes ({source.url})"
+        )
+
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise Exception(f"URL INI must be UTF-8 encoded: {source.url}") from e
+
+    if not text.strip():
+        raise Exception(f"URL INI is empty: {source.url}")
+
+    # Fail early for common copy/paste mistakes where a web UI HTML page is
+    # downloaded instead of the raw INI file.
+    if re.search(r"<\s*!doctype\s+html|<\s*html[\s>]", text[:2048], flags=re.IGNORECASE):
+        raise Exception(
+            "Downloaded URL INI looks like an HTML page, not a raw INI file. "
+            "Use a raw file URL instead."
+        )
+
+    probe = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    try:
+        probe.read_string(text)
+    except configparser.Error as e:
+        raise Exception(f"Downloaded URL INI is not a valid INI file: {source.url} ({e})") from e
+    if not probe.has_section("odoo"):
+        raise Exception(f"Downloaded URL INI is missing required [odoo] section: {source.url}")
+
+    if content_type:
+        _logger.info("Downloaded URL INI content type: %s", content_type)
+
+    copied_ini_path = root / _safe_url_ini_filename(source.url)
+    try:
+        copied_ini_path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        raise Exception(f"Failed to write URL INI to workspace root: {copied_ini_path} ({e})") from e
+
+    try:
+        copied_ini_path = copied_ini_path.resolve()
+    except Exception:
+        copied_ini_path = copied_ini_path.absolute()
+
+    _logger.info(
+        "Downloaded URL INI into workspace root: %s (source=%s)",
+        copied_ini_path,
+        source.original_url,
+    )
+    return copied_ini_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     epilog = """If no options are specified, odt-env only regenerates configs and helper scripts.
 
@@ -3237,6 +3383,7 @@ Examples:
   odt-env /path/to/odoo-project.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /full/path/to/workspace-root
   odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
+  odt-env https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
   odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
@@ -3260,7 +3407,8 @@ Examples:
         "ini",
         metavar="INI",
         help=(
-            "Local path to odoo-project.ini, or Git source git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF."
+            "Local path to odoo-project.ini, Git source git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, "
+            "or HTTP(S) URL to a raw INI file."
         ),
     )
 
@@ -3270,7 +3418,8 @@ Examples:
         default=None,
         help=(
             "Override workspace ROOT directory. By default, local INI uses its containing directory; "
-            "Git INI uses the current working directory. Explicit ROOT is created automatically if needed."
+            "Git and URL INI sources use the current working directory. "
+            "Explicit ROOT is created automatically if needed."
         ),
     )
 
@@ -3416,18 +3565,20 @@ def main() -> None:
 
     try:
         git_ini_source = _parse_git_ini_source(args.ini)
+        url_ini_source = None if git_ini_source is not None else _parse_url_ini_source(args.ini)
     except Exception as e:
         parser.error(str(e))
 
     root_override: Optional[Path] = None
-    if git_ini_source is not None:
+    if git_ini_source is not None or url_ini_source is not None:
+        source_kind = "Git" if git_ini_source is not None else "URL"
         if args.root:
             root_override = _validate_root_override(parser, args.root)
         else:
             try:
                 cwd = Path.cwd()
             except OSError as e:
-                parser.error(f'Failed to resolve current working directory for Git INI ROOT: {e}')
+                parser.error(f'Failed to resolve current working directory for {source_kind} INI ROOT: {e}')
 
             try:
                 root_override = cwd.resolve()
@@ -3435,15 +3586,19 @@ def main() -> None:
                 root_override = cwd.absolute()
 
             if not root_override.is_dir():
-                parser.error(f'Current working directory for Git INI ROOT is not a directory: {root_override}')
+                parser.error(f'Current working directory for {source_kind} INI ROOT is not a directory: {root_override}')
 
             _logger.info(
-                'Workspace ROOT default for Git INI (current working directory): %s',
+                'Workspace ROOT default for %s INI (current working directory): %s',
+                source_kind,
                 root_override,
             )
 
         try:
-            ini_path = _copy_git_ini_to_root(git_ini_source, root_override)
+            if git_ini_source is not None:
+                ini_path = _copy_git_ini_to_root(git_ini_source, root_override)
+            else:
+                ini_path = _copy_url_ini_to_root(url_ini_source, root_override)
         except Exception as e:
             _logger.error('%s', e)
             raise SystemExit(1)
