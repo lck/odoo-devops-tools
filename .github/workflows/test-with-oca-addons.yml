@@ -89,6 +89,23 @@ jobs:
             --create-venv \
             --root odoo-workspace
 
+      - name: Check provisioning metadata
+        shell: bash
+        run: |
+          test -f odoo-workspace/.odt-env/last-provisioning.json
+
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest_path = Path("odoo-workspace/.odt-env/last-provisioning.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+          assert manifest.get("status") == "success", manifest
+
+          print(f"Provisioning metadata OK: {manifest_path}")
+          PY
+
       - name: Check generated scripts and folders
         run: |
           test -x odoo-workspace/odoo-scripts/run.sh
@@ -135,3 +152,9 @@ jobs:
           echo
           echo "Odoo config odoo-server.conf:"
           cat odoo-workspace/odoo-configs/odoo-server.conf || true
+          echo
+          echo "Provisioning metadata:"
+          find odoo-workspace/.odt-env -maxdepth 2 -type f -print | sort || true
+          echo
+          echo "Last provisioning manifest:"
+          cat odoo-workspace/.odt-env/last-provisioning.json || true

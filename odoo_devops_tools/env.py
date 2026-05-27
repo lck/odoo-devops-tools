@@ -14,12 +14,15 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
@@ -271,6 +274,165 @@ def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
     return buf.getvalue()
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _safe_run_id() -> str:
+    timestamp = _utc_now_iso().replace(":", "-")
+    return f"{timestamp}-{os.getpid()}"
+
+
+def _is_sensitive_key(key: str) -> bool:
+    key_l = key.lower()
+    return any(marker in key_l for marker in _SENSITIVE_KEYS)
+
+
+def _redact_url_secret(value: str) -> str:
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return value
+
+    if not parsed.scheme or not parsed.netloc or parsed.password is None:
+        return value
+
+    username = unquote(parsed.username or "")
+    hostname = parsed.hostname or ""
+    host = hostname
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+
+    netloc = f"{username}:******@{host}" if username else f"******@{host}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _redact_value(key: str, value: Any) -> Any:
+    if _is_sensitive_key(key):
+        return "******"
+    if isinstance(value, str):
+        return _redact_url_secret(value)
+    return value
+
+
+def _redact_mapping(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _redact_value(str(k), _redact_mapping(v)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_mapping(v) for v in value]
+    if isinstance(value, tuple):
+        return [_redact_mapping(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, PurePosixPath):
+        return value.as_posix()
+    return value
+
+
+def _redact_cli_args(argv: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next_key: Optional[str] = None
+
+    for arg in argv:
+        if redact_next_key is not None:
+            if redact_next_key in {"-e", "--extra-var"}:
+                key = arg.split("=", 1)[0] if "=" in arg else arg
+                redacted.append(f"{key}=******" if _is_sensitive_key(key) else _redact_url_secret(arg))
+            elif _is_sensitive_key(redact_next_key):
+                redacted.append("******")
+            else:
+                redacted.append(_redact_url_secret(arg))
+            redact_next_key = None
+            continue
+
+        if arg in {"-e", "--extra-var"}:
+            redacted.append(arg)
+            redact_next_key = arg
+            continue
+
+        if arg.startswith("--extra-var="):
+            raw = arg.split("=", 1)[1]
+            key = raw.split("=", 1)[0] if "=" in raw else raw
+            redacted.append(f"--extra-var={key}=******" if _is_sensitive_key(key) else _redact_url_secret(arg))
+            continue
+
+        if arg.startswith("--") and "=" in arg:
+            option, raw_value = arg.split("=", 1)
+            redacted.append(f"{option}=******" if _is_sensitive_key(option) else f"{option}={_redact_url_secret(raw_value)}")
+            continue
+
+        if arg.startswith("--") and _is_sensitive_key(arg):
+            redacted.append(arg)
+            redact_next_key = arg
+            continue
+
+        redacted.append(_redact_url_secret(arg))
+
+    return redacted
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, PurePosixPath):
+        return value.as_posix()
+    return str(value)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=False, default=_json_default) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp_path, path)
+
+    if not sys.platform.startswith("win"):
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def _provisioning_paths(layout: Layout, run_id: str) -> tuple[Path, Path, Path]:
+    base_dir = layout.root / ".odt-env"
+    run_path = base_dir / "provisioning-runs" / f"{run_id}.json"
+    resolved_ini_path = base_dir / "provisioning-runs" / f"{run_id}.resolved.ini"
+    last_path = base_dir / "last-provisioning.json"
+    return run_path, resolved_ini_path, last_path
+
+
+def _write_provisioning_record(layout: Layout, run_id: str, record: dict[str, Any]) -> None:
+    run_path, _resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
+    _write_json_atomic(run_path, record)
+    _write_json_atomic(last_path, record)
+
+
+def _resolved_ini_for_manifest(
+        ini_path: Path,
+        vars_overrides: Optional[Dict[str, str]],
+) -> Optional[str]:
+    try:
+        cp = _read_ini(ini_path, vars_overrides=vars_overrides, log_overrides=False)
+        return _ini_for_audit_log(cp)
+    except Exception as e:
+        _logger.warning("Failed to render resolved INI for provisioning manifest: %s", e)
+        return None
+
+
+def _collect_provisioning_details(
+        cfg: ProjectConfig,
+        resolved_ini_path: Optional[Path],
+) -> dict[str, Any]:
+    return {
+        "config": _redact_mapping(asdict(cfg)),
+        "artifacts": {
+            "resolved_ini": str(resolved_ini_path) if resolved_ini_path and resolved_ini_path.exists() else None,
+        },
+    }
+
+
 # -----------------------------
 # INI loading
 # -----------------------------
@@ -305,6 +467,7 @@ def _parse_cli_vars(extra_vars: list[str]) -> Dict[str, str]:
 def _read_ini(
         entry_ini: Path,
         vars_overrides: Optional[Dict[str, str]] = None,
+        log_overrides: bool = True,
 ) -> configparser.ConfigParser:
     cp = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
     read_ok = cp.read(entry_ini, encoding="utf-8")
@@ -317,8 +480,9 @@ def _read_ini(
 
         for key, value in vars_overrides.items():
             opt_l = key.lower()
-            log_value = "******" if any(k in opt_l for k in _SENSITIVE_KEYS) else value
-            _logger.info("Applying CLI override to [vars].%s=%s", key, log_value)
+            if log_overrides:
+                log_value = "******" if any(k in opt_l for k in _SENSITIVE_KEYS) else value
+                _logger.info("Applying CLI override to [vars].%s=%s", key, log_value)
             cp.set("vars", key, value)
 
     return cp
@@ -406,13 +570,16 @@ def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str],
 def load_project_config(
         ini_path: Path,
         vars_overrides: Optional[Dict[str, str]] = None,
+        log_resolved: bool = True,
+        log_overrides: bool = True,
 ) -> ProjectConfig:
     if not ini_path.exists():
         raise Exception(f"INI config not found: {ini_path}")
 
-    cp = _read_ini(ini_path, vars_overrides=vars_overrides)
+    cp = _read_ini(ini_path, vars_overrides=vars_overrides, log_overrides=log_overrides)
 
-    _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
+    if log_resolved:
+        _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
 
     def _require_option(section: str, option: str) -> str:
         if not cp.has_section(section):
@@ -2708,7 +2875,7 @@ def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str 
 # Main logic
 # -----------------------------
 
-def sync_project(
+def _sync_project_impl(
         ini_path: Path,
         sync_odoo: bool,
         sync_addons: bool,
@@ -3209,6 +3376,149 @@ def sync_project(
             _logger.info(f"  - update:           {layout.script("update", "sh")}")
 
 
+def sync_project(
+        ini_path: Path,
+        sync_odoo: bool,
+        sync_addons: bool,
+        root_override: Optional[Path] = None,
+        reuse_wheelhouse: bool = False,
+        create_venv: bool = False,
+        clear_pip_wheel_cache: bool = False,
+        no_configs: bool = False,
+        no_scripts: bool = False,
+        no_data_dir: bool = False,
+        build_docker_image_requested: bool = False,
+        vars_overrides: Optional[Dict[str, str]] = None,
+        no_provisioning_log: bool = False,
+        cli_argv: Optional[list[str]] = None,
+) -> None:
+    if no_provisioning_log:
+        _sync_project_impl(
+            ini_path=ini_path,
+            sync_odoo=sync_odoo,
+            sync_addons=sync_addons,
+            root_override=root_override,
+            reuse_wheelhouse=reuse_wheelhouse,
+            create_venv=create_venv,
+            clear_pip_wheel_cache=clear_pip_wheel_cache,
+            no_configs=no_configs,
+            no_scripts=no_scripts,
+            no_data_dir=no_data_dir,
+            build_docker_image_requested=build_docker_image_requested,
+            vars_overrides=vars_overrides,
+        )
+        return
+
+    root = (root_override or ini_path.parent).resolve()
+    layout = Layout.from_root(root)
+    run_id = _safe_run_id()
+    started_at = _utc_now_iso()
+    argv = _redact_cli_args(cli_argv or sys.argv)
+    run_path, resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
+
+    record: dict[str, Any] = {
+        "version": f"odt-env-{__version__}",
+        "run_id": run_id,
+        "status": "started",
+        "started_at": started_at,
+        "finished_at": None,
+        "host": socket.gethostname(),
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+        "cwd": str(Path.cwd()),
+        "argv": argv,
+        "command": shlex.join(argv),
+        "workspace": {
+            "root": str(layout.root),
+            "ini_path": str(ini_path),
+        },
+        "options": {
+            "sync_odoo": sync_odoo,
+            "sync_addons": sync_addons,
+            "reuse_wheelhouse": reuse_wheelhouse,
+            "create_venv": create_venv,
+            "clear_pip_wheel_cache": clear_pip_wheel_cache,
+            "no_configs": no_configs,
+            "no_scripts": no_scripts,
+            "no_data_dir": no_data_dir,
+            "build_docker_image": build_docker_image_requested,
+        },
+        "vars_overrides": _redact_mapping(vars_overrides or {}),
+        "config": None,
+        "artifacts": {
+            "manifest": str(run_path),
+            "last_manifest": str(last_path),
+            "resolved_ini": None,
+        },
+        "error": None,
+    }
+
+    _write_provisioning_record(layout, run_id, record)
+
+    resolved_ini = _resolved_ini_for_manifest(ini_path, vars_overrides)
+    if resolved_ini is not None:
+        resolved_ini_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_ini_path.write_text(resolved_ini, encoding="utf-8")
+        if not sys.platform.startswith("win"):
+            try:
+                resolved_ini_path.chmod(0o600)
+            except OSError:
+                pass
+        record["artifacts"]["resolved_ini"] = str(resolved_ini_path)
+        _write_provisioning_record(layout, run_id, record)
+
+    try:
+        _sync_project_impl(
+            ini_path=ini_path,
+            sync_odoo=sync_odoo,
+            sync_addons=sync_addons,
+            root_override=root_override,
+            reuse_wheelhouse=reuse_wheelhouse,
+            create_venv=create_venv,
+            clear_pip_wheel_cache=clear_pip_wheel_cache,
+            no_configs=no_configs,
+            no_scripts=no_scripts,
+            no_data_dir=no_data_dir,
+            build_docker_image_requested=build_docker_image_requested,
+            vars_overrides=vars_overrides,
+        )
+    except Exception as e:
+        record["status"] = "failed"
+        record["finished_at"] = _utc_now_iso()
+        record["error"] = {
+            "type": type(e).__name__,
+            "message": str(e),
+        }
+        try:
+            cfg = load_project_config(
+                ini_path,
+                vars_overrides=vars_overrides,
+                log_resolved=False,
+                log_overrides=False,
+            )
+            details = _collect_provisioning_details(cfg, resolved_ini_path)
+            record["config"] = details["config"]
+            record["artifacts"].update(details["artifacts"])
+        except Exception:
+            pass
+        _write_provisioning_record(layout, run_id, record)
+        raise
+
+    cfg = load_project_config(
+        ini_path,
+        vars_overrides=vars_overrides,
+        log_resolved=False,
+        log_overrides=False,
+    )
+    details = _collect_provisioning_details(cfg, resolved_ini_path)
+    record["config"] = details["config"]
+    record["artifacts"].update(details["artifacts"])
+    record["status"] = "success"
+    record["finished_at"] = _utc_now_iso()
+    _write_provisioning_record(layout, run_id, record)
+    _logger.info("  Provisioning log:   %s", last_path)
+
+
 # -----------------------------
 # CLI
 # -----------------------------
@@ -3513,6 +3823,8 @@ Examples:
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
   odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
+  odt-env --show-last-run
+  odt-env --root /full/path/to/workspace-root --show-last-run
 """
 
     parser = argparse.ArgumentParser(
@@ -3532,9 +3844,10 @@ Examples:
     parser.add_argument(
         "ini",
         metavar="INI",
+        nargs="?",
         help=(
             "Local path to odoo-project.ini, Git source git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, "
-            "or HTTP(S) URL to a raw INI file."
+            "or HTTP(S) URL to a raw INI file. Required unless --show-last-run is used."
         ),
     )
 
@@ -3545,7 +3858,7 @@ Examples:
         help=(
             "Override workspace ROOT directory. By default, local INI uses its containing directory; "
             "Git and URL INI sources use the current working directory. "
-            "Explicit ROOT is created automatically if needed."
+            "Explicit ROOT is created automatically if needed, except for --show-last-run, which is read-only."
         ),
     )
 
@@ -3617,6 +3930,19 @@ Examples:
         action="store_true",
         help="Do not generate odoo data folder.",
     )
+    parser.add_argument(
+        "--no-provisioning-log",
+        action="store_true",
+        help="Do not write provisioning log under ROOT/.odt-env/.",
+    )
+    parser.add_argument(
+        "--show-last-run",
+        action="store_true",
+        help=(
+            "Print ROOT/.odt-env/last-provisioning.json to stdout and exit without provisioning. "
+            "ROOT is --root when provided, otherwise the current working directory."
+        ),
+    )
 
     return parser
 
@@ -3659,6 +3985,18 @@ def _validate_root_override(parser: argparse.ArgumentParser, raw_root: str) -> P
     return resolved
 
 
+def _show_last_run(root: Path) -> None:
+    """Print ROOT/.odt-env/last-provisioning.json to stdout."""
+    last_path = root / ".odt-env" / "last-provisioning.json"
+    if not last_path.is_file():
+        raise FileNotFoundError(f"Last provisioning log not found: {last_path}")
+
+    text = last_path.read_text(encoding="utf-8")
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+
+
 def main() -> None:
     # Standard logging to stdout only.
     logging.basicConfig(
@@ -3674,6 +4012,29 @@ def main() -> None:
         raise SystemExit(2)
 
     args = parser.parse_args()
+
+    if bool(getattr(args, 'show_last_run', False)):
+        root_candidate = Path(args.root).expanduser() if args.root else Path.cwd()
+        try:
+            root = root_candidate.resolve()
+        except Exception:
+            root = root_candidate.absolute()
+
+        if not root.exists():
+            parser.error(f"ROOT path does not exist: {root}")
+        if not root.is_dir():
+            parser.error(f"ROOT path is not a directory: {root}")
+
+        try:
+            _show_last_run(root)
+        except Exception as e:
+            print(f"{parser.prog}: error: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        return
+
+    if not args.ini:
+        parser.error("the following arguments are required: INI")
+
     clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
     create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
     reuse_wheelhouse = create_venv_from_wheelhouse
@@ -3682,6 +4043,7 @@ def main() -> None:
     no_scripts = bool(getattr(args, 'no_scripts', False))
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
     build_docker_image_requested = bool(getattr(args, 'build_docker_image', False))
+    no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
 
     try:
         vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
@@ -3766,9 +4128,12 @@ def main() -> None:
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
+            no_provisioning_log=no_provisioning_log,
+            cli_argv=sys.argv,
         )
     except Exception as e:
         _logger.error(f'{e}')
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

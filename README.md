@@ -102,8 +102,11 @@ After provisioning, the workspace has the following structure:
 ROOT/
 ├── odoo-project.ini      # project definition
 ├── compose.yml           # generated sample Docker Compose file when --build-docker-image is used
-├── odoo/                 # Git-managed Odoo source repository; not required when [odoo].path is used
-├── odoo-addons/          # addon repositories from [addons.<name>] sections; unused in this minimal example
+├── .odt-env/             # provisioning metadata
+│   ├── last-provisioning.json
+│   └── provisioning-runs/
+├── odoo/                 # Git-managed Odoo source repository
+├── odoo-addons/          # addon repositories from [addons.<name>] sections
 ├── odoo-backups/         # backups created by helper scripts
 ├── odoo-configs/         # generated configuration, including odoo-server.conf
 ├── odoo-data/            # Odoo data directory
@@ -623,6 +626,8 @@ GitHub `blob` URLs are accepted and converted to raw URLs automatically.
 - `--no-configs` — do not generate config files
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`
 - `--no-data-dir` — do not create the Odoo data directory
+- `--no-provisioning-log` — do not write provisioning metadata under `ROOT/.odt-env/`
+- `--show-last-run` — print metadata from the last provisioning run and exit without provisioning
 
 ### Repository sync
 

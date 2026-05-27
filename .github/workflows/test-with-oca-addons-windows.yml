@@ -1,0 +1,192 @@
+name: Test Create Workspace With OCA Addons (Windows)
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  odoo-with-oca-addons-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v8
+        with:
+          username: odoo
+          password: odoo
+          database: postgres
+          port: 5432
+          postgres-version: "16"
+
+      - name: Verify PostgreSQL
+        env:
+          PGPASSWORD: odoo
+        run: |
+          psql -h 127.0.0.1 -p 5432 -U odoo -d postgres -c "SELECT version();"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Generate INI file
+        run: |
+          @'
+          [virtualenv]
+          requirements =
+            psycopg2-binary==2.9.9
+          requirements_ignore =
+            psycopg2
+
+          [odoo]
+          version = 18.0
+
+          [addons.oca-web]
+          repo = https://github.com/OCA/web.git
+          branch = ${odoo:version}
+
+          [addons.oca-helpdesk]
+          repo = https://github.com/OCA/helpdesk.git
+          branch = ${odoo:version}
+
+          [config]
+          db_host = 127.0.0.1
+          db_port = 5432
+          db_user = odoo
+          db_password = odoo
+          db_name = odoo
+          '@ | Set-Content -Path odoo-project.ini -Encoding UTF8
+
+          Write-Host "Generated odoo-project.ini:"
+          Get-Content odoo-project.ini
+
+      - name: Create workspace root
+        run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
+
+      - name: Provision Odoo workspace
+        run: |
+          uv run odt-env .\odoo-project.ini `
+            --sync-all `
+            --create-venv `
+            --root odoo-workspace
+
+      - name: Check provisioning metadata
+        run: |
+          $manifestPath = "odoo-workspace\.odt-env\last-provisioning.json"
+
+          if (-not (Test-Path -LiteralPath $manifestPath)) {
+            throw "Provisioning manifest not found: $manifestPath"
+          }
+
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+          if ($manifest.status -ne "success") {
+            $manifest | ConvertTo-Json -Depth 20
+            throw "Provisioning failed. Expected status=success, got status=$($manifest.status)"
+          }
+
+          Write-Host "Provisioning metadata OK: $manifestPath"
+
+      - name: Check generated scripts and folders
+        run: |
+          $requiredPaths = @(
+            "odoo-workspace\odoo-scripts\run.bat",
+            "odoo-workspace\odoo-scripts\update.bat",
+            "odoo-workspace\odoo-addons\oca-web",
+            "odoo-workspace\odoo-addons\oca-helpdesk",
+            "odoo-workspace\odoo-addons\oca-web\.git",
+            "odoo-workspace\odoo-addons\oca-helpdesk\.git"
+          )
+
+          foreach ($path in $requiredPaths) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required path not found: $path"
+            }
+          }
+
+      - name: Init database with OCA addons
+        working-directory: odoo-workspace
+        run: .\odoo-scripts\run.bat -i web_notify,helpdesk_mgmt --stop-after-init
+
+      - name: Verify OCA addons installed in database
+        env:
+          PGPASSWORD: odoo
+        run: |
+          psql -h 127.0.0.1 -p 5432 -U odoo -d odoo -c @"
+          SELECT name, state
+          FROM ir_module_module
+          WHERE name IN ('web_notify', 'helpdesk_mgmt')
+          ORDER BY name;
+          "@
+
+          $missing = psql -h 127.0.0.1 -p 5432 -U odoo -d odoo -tAc @"
+          SELECT string_agg(expected.name, ',')
+          FROM (VALUES ('web_notify'), ('helpdesk_mgmt')) AS expected(name)
+          LEFT JOIN ir_module_module module
+            ON module.name = expected.name
+           AND module.state = 'installed'
+          WHERE module.name IS NULL;
+          "@
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $missing = ($missing | Out-String).Trim()
+          if ($missing) {
+            throw "Modules not installed: $missing"
+          }
+
+      - name: Update addons
+        working-directory: odoo-workspace
+        run: .\odoo-scripts\update.bat
+
+      - name: Show generated workspace and config
+        if: always()
+        run: |
+          Write-Host "Workspace tree:"
+          if (Test-Path -LiteralPath "odoo-workspace") {
+            Get-ChildItem -LiteralPath "odoo-workspace" -Depth 2 -Force |
+              Sort-Object FullName |
+              ForEach-Object { $_.FullName }
+          }
+
+          Write-Host ""
+          Write-Host "Configs:"
+          if (Test-Path -LiteralPath "odoo-workspace\odoo-configs") {
+            Get-ChildItem -LiteralPath "odoo-workspace\odoo-configs" -Force
+          }
+
+          Write-Host ""
+          Write-Host "Odoo config odoo-server.conf:"
+          if (Test-Path -LiteralPath "odoo-workspace\odoo-configs\odoo-server.conf") {
+            Get-Content -LiteralPath "odoo-workspace\odoo-configs\odoo-server.conf"
+          }
+
+          Write-Host ""
+          Write-Host "Provisioning metadata:"
+          if (Test-Path -LiteralPath "odoo-workspace\.odt-env") {
+            Get-ChildItem -LiteralPath "odoo-workspace\.odt-env" -Recurse -File -Force |
+              Sort-Object FullName |
+              ForEach-Object { $_.FullName }
+          }
+
+          Write-Host ""
+          Write-Host "Last provisioning manifest:"
+          if (Test-Path -LiteralPath "odoo-workspace\.odt-env\last-provisioning.json") {
+            Get-Content -LiteralPath "odoo-workspace\.odt-env\last-provisioning.json"
+          }
