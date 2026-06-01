@@ -329,6 +329,18 @@ def _redact_mapping(value: Any) -> Any:
     return value
 
 
+def _redact_cli_assignment(raw: str, sectioned: bool = False) -> str:
+    """Redact the value part of KEY=VALUE or SECTION:KEY=VALUE when KEY is sensitive."""
+    if "=" not in raw:
+        return _redact_url_secret(raw)
+
+    target, value = raw.split("=", 1)
+    key = target.split(":", 1)[1] if sectioned and ":" in target else target
+    if _is_sensitive_key(key):
+        return f"{target}=******"
+    return f"{target}={_redact_url_secret(value)}"
+
+
 def _redact_cli_args(argv: list[str]) -> list[str]:
     redacted: list[str] = []
     redact_next_key: Optional[str] = None
@@ -336,8 +348,9 @@ def _redact_cli_args(argv: list[str]) -> list[str]:
     for arg in argv:
         if redact_next_key is not None:
             if redact_next_key in {"-e", "--extra-var"}:
-                key = arg.split("=", 1)[0] if "=" in arg else arg
-                redacted.append(f"{key}=******" if _is_sensitive_key(key) else _redact_url_secret(arg))
+                redacted.append(_redact_cli_assignment(arg))
+            elif redact_next_key in {"-S", "--set"}:
+                redacted.append(_redact_cli_assignment(arg, sectioned=True))
             elif _is_sensitive_key(redact_next_key):
                 redacted.append("******")
             else:
@@ -350,10 +363,25 @@ def _redact_cli_args(argv: list[str]) -> list[str]:
             redact_next_key = arg
             continue
 
+        if arg in {"-S", "--set"}:
+            redacted.append(arg)
+            redact_next_key = arg
+            continue
+
         if arg.startswith("--extra-var="):
             raw = arg.split("=", 1)[1]
-            key = raw.split("=", 1)[0] if "=" in raw else raw
-            redacted.append(f"--extra-var={key}=******" if _is_sensitive_key(key) else _redact_url_secret(arg))
+            redacted.append(f"--extra-var={_redact_cli_assignment(raw)}")
+            continue
+
+        if arg.startswith("--set="):
+            raw = arg.split("=", 1)[1]
+            redacted.append(f"--set={_redact_cli_assignment(raw, sectioned=True)}")
+            continue
+
+        # argparse accepts the short option value as either '-S value' or '-Svalue'.
+        if arg.startswith("-S") and arg != "-S":
+            raw = arg[2:]
+            redacted.append(f"-S{_redact_cli_assignment(raw, sectioned=True)}")
             continue
 
         if arg.startswith("--") and "=" in arg:
@@ -412,9 +440,15 @@ def _write_provisioning_record(layout: Layout, run_id: str, record: dict[str, An
 def _resolved_ini_for_manifest(
         ini_path: Path,
         vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Optional[str]:
     try:
-        cp = _read_ini(ini_path, vars_overrides=vars_overrides, log_overrides=False)
+        cp = _read_ini(
+            ini_path,
+            vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
+            log_overrides=False,
+        )
         return _ini_for_audit_log(cp)
     except Exception as e:
         _logger.warning("Failed to render resolved INI for provisioning manifest: %s", e)
@@ -464,15 +498,79 @@ def _parse_cli_vars(extra_vars: list[str]) -> Dict[str, str]:
     return overrides
 
 
+def _parse_cli_ini_overrides(raw_overrides: list[str]) -> Dict[str, Dict[str, str]]:
+    """Parse -S/--set overrides in SECTION:KEY=VALUE format."""
+    overrides: Dict[str, Dict[str, str]] = {}
+
+    for item in raw_overrides:
+        raw_item = (item or "").strip()
+        if not raw_item or "=" not in raw_item:
+            raise Exception(
+                f"Invalid -S/--set value '{item}' (expected format SECTION:KEY=VALUE)."
+            )
+
+        target, value = raw_item.split("=", 1)
+        target = target.strip()
+        value = value.strip()
+
+        if not target or ":" not in target:
+            raise Exception(
+                f"Invalid -S/--set value '{item}' (expected format SECTION:KEY=VALUE)."
+            )
+
+        section, key = target.split(":", 1)
+        section = section.strip()
+        key = key.strip().lower()
+
+        if not section or not key:
+            raise Exception(
+                f"Invalid -S/--set value '{item}' (expected non-empty SECTION and KEY)."
+            )
+
+        section_overrides = overrides.setdefault(section, {})
+        if key in section_overrides:
+            _logger.warning("CLI override for [%s].%s redefined; using last value.", section, key)
+
+        section_overrides[key] = value
+
+    return overrides
+
+
+def _validate_ini_overrides_exist(
+        cp: configparser.ConfigParser,
+        ini_overrides: Dict[str, Dict[str, str]],
+) -> None:
+    """Require every -S/--set target to already exist in the source INI file."""
+    for section, options in ini_overrides.items():
+        if not cp.has_section(section):
+            raise Exception(
+                f"Invalid -S/--set override: section [{section}] does not exist in the INI file. "
+                "--set can only override options already present in the INI file."
+            )
+
+        for key in options:
+            if not cp.has_option(section, key):
+                raise Exception(
+                    f"Invalid -S/--set override: option '{key}' does not exist in section [{section}] "
+                    "in the INI file. --set can only override options already present in the INI file."
+                )
+
+
 def _read_ini(
         entry_ini: Path,
         vars_overrides: Optional[Dict[str, str]] = None,
+        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         log_overrides: bool = True,
 ) -> configparser.ConfigParser:
     cp = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
     read_ok = cp.read(entry_ini, encoding="utf-8")
     if not read_ok:
         raise Exception(f"Failed to read INI config: {entry_ini}")
+
+    # Validate --set against the original INI content before -e/--extra-var can
+    # inject anything into [vars]. This keeps --set as a pure override mechanism.
+    if ini_overrides:
+        _validate_ini_overrides_exist(cp, ini_overrides)
 
     if vars_overrides:
         if not cp.has_section("vars"):
@@ -484,6 +582,14 @@ def _read_ini(
                 log_value = "******" if any(k in opt_l for k in _SENSITIVE_KEYS) else value
                 _logger.info("Applying CLI override to [vars].%s=%s", key, log_value)
             cp.set("vars", key, value)
+
+    if ini_overrides:
+        for section, options in ini_overrides.items():
+            for key, value in options.items():
+                if log_overrides:
+                    log_value = "******" if _is_sensitive_key(key) else value
+                    _logger.info("Applying CLI override to [%s].%s=%s", section, key, log_value)
+                cp.set(section, key, value)
 
     return cp
 
@@ -570,13 +676,19 @@ def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str],
 def load_project_config(
         ini_path: Path,
         vars_overrides: Optional[Dict[str, str]] = None,
+        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         log_resolved: bool = True,
         log_overrides: bool = True,
 ) -> ProjectConfig:
     if not ini_path.exists():
         raise Exception(f"INI config not found: {ini_path}")
 
-    cp = _read_ini(ini_path, vars_overrides=vars_overrides, log_overrides=log_overrides)
+    cp = _read_ini(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+        log_overrides=log_overrides,
+    )
 
     if log_resolved:
         _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
@@ -2888,13 +3000,18 @@ def _sync_project_impl(
         no_data_dir: bool = False,
         build_docker_image_requested: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
+        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> None:
     root = (root_override or ini_path.parent).resolve()
     if root.exists() and not root.is_dir():
         raise Exception(f"ROOT exists but is not a directory: {root}")
     layout = Layout.from_root(root)
 
-    cfg = load_project_config(ini_path, vars_overrides=vars_overrides)
+    cfg = load_project_config(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+    )
 
     # If user overrides "data_dir" via [config] section, propagate changes to layout->data_dir.
     if "data_dir" in cfg.config:
@@ -3389,6 +3506,7 @@ def sync_project(
         no_data_dir: bool = False,
         build_docker_image_requested: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
+        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         no_provisioning_log: bool = False,
         cli_argv: Optional[list[str]] = None,
 ) -> None:
@@ -3406,6 +3524,7 @@ def sync_project(
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
         )
         return
 
@@ -3444,6 +3563,7 @@ def sync_project(
             "build_docker_image": build_docker_image_requested,
         },
         "vars_overrides": _redact_mapping(vars_overrides or {}),
+        "ini_overrides": _redact_mapping(ini_overrides or {}),
         "config": None,
         "artifacts": {
             "manifest": str(run_path),
@@ -3455,7 +3575,11 @@ def sync_project(
 
     _write_provisioning_record(layout, run_id, record)
 
-    resolved_ini = _resolved_ini_for_manifest(ini_path, vars_overrides)
+    resolved_ini = _resolved_ini_for_manifest(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+    )
     if resolved_ini is not None:
         resolved_ini_path.parent.mkdir(parents=True, exist_ok=True)
         resolved_ini_path.write_text(resolved_ini, encoding="utf-8")
@@ -3481,6 +3605,7 @@ def sync_project(
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
         )
     except Exception as e:
         record["status"] = "failed"
@@ -3493,6 +3618,7 @@ def sync_project(
             cfg = load_project_config(
                 ini_path,
                 vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
                 log_resolved=False,
                 log_overrides=False,
             )
@@ -3507,6 +3633,7 @@ def sync_project(
     cfg = load_project_config(
         ini_path,
         vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
         log_resolved=False,
         log_overrides=False,
     )
@@ -3823,6 +3950,7 @@ Examples:
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
   odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
+  odt-env /path/to/odoo-project.ini --sync-all --create-venv --set odoo:version=19.0
   odt-env --show-last-run
   odt-env --root /full/path/to/workspace-root --show-last-run
 """
@@ -3872,6 +4000,19 @@ Examples:
         help=(
             "Override or inject a variable in the optional [vars] INI section. "
             "Can be passed multiple times. Example: -e odoo_version=19.0"
+        ),
+    )
+
+    parser.add_argument(
+        "-S",
+        "--set",
+        dest="ini_overrides",
+        action="append",
+        default=[],
+        metavar="SECTION:KEY=VALUE",
+        help=(
+            "Override an option that is already present in the INI file. "
+            "Can be passed multiple times. Example: --set odoo:version=19.0"
         ),
     )
 
@@ -4047,11 +4188,15 @@ def main() -> None:
 
     try:
         vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
+        ini_overrides = _parse_cli_ini_overrides(getattr(args, 'ini_overrides', []) or [])
     except Exception as e:
         parser.error(str(e))
 
     if vars_overrides:
         _logger.info('CLI [vars] overrides enabled for keys: %s', ', '.join(sorted(vars_overrides)))
+    if ini_overrides:
+        override_targets = [f"{section}:{key}" for section, options in ini_overrides.items() for key in options]
+        _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
 
     try:
         git_ini_source = _parse_git_ini_source(args.ini)
@@ -4128,6 +4273,7 @@ def main() -> None:
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
             no_provisioning_log=no_provisioning_log,
             cli_argv=sys.argv,
         )

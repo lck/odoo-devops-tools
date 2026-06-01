@@ -32,7 +32,7 @@ jobs:
           uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
             --sync-addons \
             --build-docker-image \
-            -e docker_addons_mode=dev
+            --set docker:addons_mode=dev
 
       - name: Check generated Docker artifacts and image
         run: |

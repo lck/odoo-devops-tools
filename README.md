@@ -622,7 +622,8 @@ GitHub `blob` URLs are accepted and converted to raw URLs automatically.
 ### Paths and outputs
 
 - `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git-backed or URL-backed INI.
-- `-e KEY=VALUE`, `--extra-var KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
+- `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
+- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — override a value that is already present in the INI file; can be repeated. This never creates a new section or key.
 - `--no-configs` — do not generate config files
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`
 - `--no-data-dir` — do not create the Odoo data directory
@@ -677,7 +678,8 @@ The following sections are supported:
 - The project file can have any filename. In this README, `odoo-project.ini` is only an example.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
-- Values from `[vars]` can be overridden from the CLI with `-e name=value` / `--extra-var name=value`.
+- Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
+- Values that already exist in the INI file can be overridden directly with `-S section:key=value` / `--set section:key=value`.
 - Multi-line values are used for lists such as `requirements`, `build_constraints`, and `requirements_ignore`.
 
 ### `[vars]`

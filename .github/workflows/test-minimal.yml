@@ -53,12 +53,15 @@ jobs:
       - name: Verify uv
         run: uv --version
 
-      - name: Generate INI file
+      - name: Generate INI file for Odoo 18.0
         shell: bash
         run: |
-          cat > odoo-project.ini <<EOF
+          cat > odoo-project.ini <<'EOF'
+          [vars]
+          odoo_version = 18.0
+
           [odoo]
-          version = 18.0
+          version = ${vars:odoo_version}
 
           [config]
           db_host = 127.0.0.1
@@ -74,12 +77,26 @@ jobs:
       - name: Create workspace root
         run: mkdir -p odoo-workspace
 
-      - name: Provision Odoo workspace
+      - name: Provision Odoo 19.0 workspace by overriding odoo_version variable
         run: |
           uv run odt-env ./odoo-project.ini \
             --sync-all \
             --create-venv \
-            --root odoo-workspace
+            --root odoo-workspace \
+            -e odoo_version=19.0
+
+      - name: Check installed Odoo version
+        working-directory: odoo-workspace
+        run: |
+          ./venv/bin/python - <<'PY'
+          import odoo.release
+
+          version = odoo.release.version
+          print(f"Installed Odoo version: {version}")
+
+          if not version.startswith("19.0"):
+              raise SystemExit(f"Expected Odoo 19.0, got {version}")
+          PY
 
       - name: Check generated scripts
         run: |
