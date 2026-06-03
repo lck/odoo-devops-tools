@@ -561,20 +561,11 @@ Start the PostgreSQL service first:
 docker compose up -d db
 ```
 
-Initialize the Odoo database and install the initial modules.
-This step uses the standard Odoo CLI and should be run before starting the long-running Odoo service for the first time:
+Initialize the Odoo database:
 
 ```bash
-docker compose run --rm odoo \
-  -- \
-  -c /etc/odoo/odoo.conf \
-  -d odoo \
-  -i web_notify,helpdesk_mgmt \
-  --without-demo=all \
-  --stop-after-init
+docker compose run --rm odoo -- -d odoo -i base --stop-after-init
 ```
-
-Replace `web_notify,helpdesk_mgmt` with the modules that should be installed during the initial database bootstrap.
 
 After the database has been initialized, start the Odoo service:
 
