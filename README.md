@@ -73,27 +73,32 @@ Run `odt-env` against the project file:
 odt-env odoo-project.ini --sync-all --create-venv
 ```
 
-#### 1.3. Optional: Load the project file from Git or URL
+#### 1.3. Optional: Load a reusable project template from Git or URL
 
-Instead of passing a local file, the `INI` argument can point to a file stored in a Git repository:
+Instead of passing a local file, the `INI` argument can point to the reusable `odoo-project.ini` template stored in a Git repository.
+
+Pass project-specific values with `--set`.
 
 ```bash
-odt-env --sync-all --create-venv \
-  git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini
+odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main" \
+  --sync-all --create-venv \
+  --set odoo:version=18.0 \
+  --set config:db_host=127.0.0.1 \
+  --set config:db_name=odoo \
+  --set config:db_user=odoo \
+  --set config:db_password=odoo
 ```
 
-It can also point to an HTTP(S) URL that serves a raw INI file:
+It can also point to an HTTP(S) URL that serves the raw reusable template:
 
 ```bash
-odt-env --sync-all --create-venv \
-  https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini
-```
-
-GitHub `blob` URLs copied from the browser are accepted and converted to their raw file URL automatically:
-
-```bash
-odt-env --sync-all --create-venv \
-  https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo18-minimal.ini
+odt-env "https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini" \
+  --sync-all --create-venv \
+  --set odoo:version=18.0 \
+  --set config:db_host=127.0.0.1 \
+  --set config:db_name=odoo \
+  --set config:db_user=odoo \
+  --set config:db_password=odoo
 ```
 
 After provisioning, the workspace has the following structure:
@@ -595,20 +600,16 @@ If no options are specified, `odt-env` only regenerates configuration files and 
 
 - `INI` — required project file. This can be either:
   - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
-  - a Git-backed INI source, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main`
-  - an HTTP(S) URL pointing to a raw INI file, for example `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini`
+  - a Git-backed reusable template, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
+  - an HTTP(S) URL pointing to the raw reusable template, for example `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
 
-Git-backed INI sources use this syntax:
+Git-backed reusable templates use this syntax:
 
 ```text
 git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
 ```
 
 The `?ref=REF` part is optional and can point to a branch, tag, or commit.
-
-HTTP(S)-backed INI sources must point to raw INI content.
-For GitHub files, prefer `raw.githubusercontent.com` URLs.
-GitHub `blob` URLs are accepted and converted to raw URLs automatically.
 
 ### Paths and outputs
 

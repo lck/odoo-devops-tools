@@ -53,37 +53,23 @@ jobs:
       - name: Verify uv
         run: uv --version
 
-      - name: Generate INI file for Odoo 18.0
-        shell: bash
-        run: |
-          cat > odoo-project.ini <<'EOF'
-          [vars]
-          odoo_version = 18.0
-
-          [odoo]
-          version = ${vars:odoo_version}
-
-          [config]
-          db_host = 127.0.0.1
-          db_port = 5432
-          db_user = odoo
-          db_password = odoo
-          db_name = odoo
-          EOF
-
-          echo "Generated odoo-project.ini:"
-          cat odoo-project.ini
-
       - name: Create workspace root
         run: mkdir -p odoo-workspace
 
-      - name: Provision Odoo 19.0 workspace by overriding odoo_version variable
+      - name: Provision Odoo workspace in workspace root folder
+        working-directory: ./odoo-workspace
+        env:
+          ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env ./odoo-project.ini \
+          uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=${ODT_REF}" \
             --sync-all \
             --create-venv \
-            --root odoo-workspace \
-            -e odoo_version=19.0
+            --set odoo:version=19.0 \
+            --set config:db_host=127.0.0.1 \
+            --set config:db_port=5432 \
+            --set config:db_name=odoo \
+            --set config:db_user=odoo \
+            --set config:db_password=odoo
 
       - name: Check installed Odoo version
         working-directory: odoo-workspace

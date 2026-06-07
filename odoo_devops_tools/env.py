@@ -540,19 +540,27 @@ def _validate_ini_overrides_exist(
         cp: configparser.ConfigParser,
         ini_overrides: Dict[str, Dict[str, str]],
 ) -> None:
-    """Require every -S/--set target to already exist in the source INI file."""
+    """Require --set targets to exist, except new [config] options.
+
+    The [config] section maps directly to generated Odoo configuration options,
+    so allowing new keys there keeps reusable templates small while preserving
+    strict validation for odt-env's own structured sections.
+    """
     for section, options in ini_overrides.items():
         if not cp.has_section(section):
             raise Exception(
                 f"Invalid -S/--set override: section [{section}] does not exist in the INI file. "
-                "--set can only override options already present in the INI file."
+                "--set can only create new options in the existing [config] section."
             )
 
         for key in options:
+            if section == "config":
+                continue
+
             if not cp.has_option(section, key):
                 raise Exception(
                     f"Invalid -S/--set override: option '{key}' does not exist in section [{section}] "
-                    "in the INI file. --set can only override options already present in the INI file."
+                    "in the INI file. --set can only create new options in [config]."
                 )
 
 
@@ -568,7 +576,7 @@ def _read_ini(
         raise Exception(f"Failed to read INI config: {entry_ini}")
 
     # Validate --set against the original INI content before -e/--extra-var can
-    # inject anything into [vars]. This keeps --set as a pure override mechanism.
+    # inject anything into [vars]. New options are allowed only in [config].
     if ini_overrides:
         _validate_ini_overrides_exist(cp, ini_overrides)
 
@@ -3014,17 +3022,23 @@ def _sync_project_impl(
     )
 
     # If user overrides "data_dir" via [config] section, propagate changes to layout->data_dir.
+    # An empty value means "use the default layout data directory". This keeps template INI
+    # files override-friendly for --set config:data_dir=... without accidentally resolving
+    # an empty value to ROOT.
     if "data_dir" in cfg.config:
-        cfg_data_dir_raw = cfg.config.get("data_dir")
-        cfg_data_dir_path = Path(cfg_data_dir_raw.strip()).expanduser()
-        if not cfg_data_dir_path.is_absolute():
-            cfg_data_dir_path = layout.root / cfg_data_dir_path
-        try:
-            cfg_data_dir = cfg_data_dir_path.resolve()
-        except Exception:
-            cfg_data_dir = cfg_data_dir_path.absolute()
-        _logger.warning(f"data_dir override via [config] section: from={layout.data_dir}, to={cfg_data_dir}")
-        layout = replace(layout, data_dir=cfg_data_dir)
+        cfg_data_dir_raw = (cfg.config.get("data_dir") or "").strip()
+        if cfg_data_dir_raw:
+            cfg_data_dir_path = Path(cfg_data_dir_raw).expanduser()
+            if not cfg_data_dir_path.is_absolute():
+                cfg_data_dir_path = layout.root / cfg_data_dir_path
+            try:
+                cfg_data_dir = cfg_data_dir_path.resolve()
+            except Exception:
+                cfg_data_dir = cfg_data_dir_path.absolute()
+            _logger.warning(f"data_dir override via [config] section: from={layout.data_dir}, to={cfg_data_dir}")
+            layout = replace(layout, data_dir=cfg_data_dir)
+        else:
+            _logger.info("Ignoring empty [config].data_dir; using default: %s", layout.data_dir)
 
     # A local [odoo].path replaces the default ROOT/odoo location everywhere:
     # requirements, editable install, generated configs, helper scripts, and status output.
