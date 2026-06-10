@@ -6,14 +6,10 @@ At the center of the toolkit is **`odt-env`**: a declarative CLI that turns one 
 
 Why use `odt-env`?
 
-- Keep the whole workspace definition in one project file: Odoo version, source repositories, addons, Python settings, Docker settings, and Odoo configuration.
-- Recreate the same workspace consistently across machines by syncing Odoo and addons from Git, local paths, or pinned commits.
-- Use fast shallow clones by default, with optional full-history clones when development workflows need them.
-- Let `uv` provision the right Python virtual environment and resolve Odoo plus addon dependencies into a single lock file.
-- Build a local wheelhouse once and recreate the virtual environment later using strict offline installs.
-- Generate the Odoo configuration and helper scripts for running, testing, shell access, module updates, backups, and restores.
-- Build a custom Docker image from the same project definition and generate a ready-to-review Docker Compose file.
-- Load the project file from a local path, Git repository, or HTTP(S) URL, with CLI variable overrides for reusable project templates.
+- One project file defines your full Odoo workspace.
+- `uv` handles the virtual environment, dependency locking, and offline wheelhouse.
+- `odt-env` generates configuration and helper scripts, and can also build Docker images and Compose files, without starting any services.
+- You stay in control: review what was generated, then run Odoo, scripts, or Docker Compose yourself.
 
 ---
 
@@ -21,6 +17,7 @@ Why use `odt-env`?
 
 - **git**: https://git-scm.com/install/
 - **uv** (Python package & project manager): https://docs.astral.sh/uv/getting-started/installation/
+- **Docker**: https://docs.docker.com/get-docker/ — optional, needed for Docker image and Compose workflows.
 
 ---
 
@@ -40,11 +37,43 @@ odt-env --help
 
 ---
 
+## Quick start
+
+Create an Odoo 18 workspace in `./odoo18-workspace` directly from the reusable online template:
+
+```bash
+odt-env "https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini" \
+  --root ./odoo18-workspace \
+  --sync-all \
+  --create-venv \
+  --set odoo:version=18.0 \
+  --set config:db_host=127.0.0.1 \
+  --set config:db_name=odoo \
+  --set config:db_user=odoo \
+  --set config:db_password=odoo
+```
+
+> **Note**
+> Make sure PostgreSQL is running at the configured host and the configured database user exists.
+
+When the workspace is ready, start Odoo:
+
+```bash
+cd odoo18-workspace
+./odoo-scripts/run.sh
+```
+
+The server starts with the generated configuration from `./odoo-configs/odoo-server.conf`.
+
+After the server starts, Odoo is available at http://localhost:8069.
+
+---
+
 ## Usage
 
-### 1. Minimal example
+### 1. Basic example
 
-This is the minimal example for provisioning a workspace with Odoo 18.
+This example shows how to provision an Odoo 18 workspace from a local project file.
 
 #### 1.1. Create a project file
 
@@ -71,34 +100,6 @@ Run `odt-env` against the project file:
 
 ```bash
 odt-env odoo-project.ini --sync-all --create-venv
-```
-
-#### 1.3. Optional: Load a reusable project template from Git or URL
-
-Instead of passing a local file, the `INI` argument can point to the reusable `odoo-project.ini` template stored in a Git repository.
-
-Pass project-specific values with `--set`.
-
-```bash
-odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main" \
-  --sync-all --create-venv \
-  --set odoo:version=18.0 \
-  --set config:db_host=127.0.0.1 \
-  --set config:db_name=odoo \
-  --set config:db_user=odoo \
-  --set config:db_password=odoo
-```
-
-It can also point to an HTTP(S) URL that serves the raw reusable template:
-
-```bash
-odt-env "https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini" \
-  --sync-all --create-venv \
-  --set odoo:version=18.0 \
-  --set config:db_host=127.0.0.1 \
-  --set config:db_name=odoo \
-  --set config:db_user=odoo \
-  --set config:db_password=odoo
 ```
 
 After provisioning, the workspace has the following structure:
@@ -129,7 +130,7 @@ ROOT/
 └── wheelhouse/           # wheelhouse for offline installs
 ```
 
-#### 1.4. Start Odoo
+#### 1.3. Start Odoo
 
 When the workspace is ready, start Odoo:
 
@@ -601,7 +602,9 @@ If no options are specified, `odt-env` only regenerates configuration files and 
 - `INI` — required project file. This can be either:
   - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
   - a Git-backed reusable template, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
-  - an HTTP(S) URL pointing to the raw reusable template, for example `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
+  - an HTTP(S) URL pointing to a reusable template, for example:
+    - `https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini`
+    - `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
 
 Git-backed reusable templates use this syntax:
 
