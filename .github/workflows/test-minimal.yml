@@ -61,9 +61,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=${ODT_REF}" \
-            --sync-all \
-            --create-venv \
+          uv run odt-env --sync-all --create-venv \
             --set odoo:version=19.0 \
             --set config:db_host=127.0.0.1 \
             --set config:db_port=5432 \

@@ -37,6 +37,41 @@ _GIT_INI_PREFIX = "git::"
 _URL_INI_TIMEOUT_SECONDS = 30
 _URL_INI_MAX_BYTES = 1024 * 1024
 
+_DEFAULT_PROJECT_INI_NAME = "odoo-project.ini"
+
+_DEFAULT_PROJECT_INI_TEMPLATE = r"""
+[virtualenv]
+managed_python = true
+python_version =
+build_constraints =
+requirements =
+requirements_ignore =
+
+[odoo]
+version = 19.0
+repo = https://github.com/odoo/odoo.git
+branch = ${odoo:version}
+commit =
+shallow = true
+
+[docker]
+target_image = local/odoo:${odoo:version}
+base_image = odoo:${odoo:version}
+addons_mode = deploy
+compose_project_name =
+db_service = db
+odoo_service = odoo
+
+[config]
+"""
+
+_IMPLICIT_LOCAL_CONFIG_DEFAULTS = {
+    "db_host": "127.0.0.1",
+    "db_name": "odoo",
+    "db_user": "odoo",
+    "db_password": "odoo",
+}
+
 _DEFAULT_REQUIREMENTS = [
     "pip",
     "setuptools",
@@ -274,6 +309,27 @@ def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
     return buf.getvalue()
 
 
+def _ini_for_effective_file(cp: configparser.ConfigParser) -> str:
+    """
+    Return a resolved (interpolated) INI representation suitable for saving
+    back to the workspace root as the effective project file.
+
+    Unlike _ini_for_audit_log(), this intentionally does not redact values:
+    the goal is to persist the exact values that will be used by odt-env.
+    Comments are not preserved by ConfigParser by design.
+    """
+    effective = configparser.ConfigParser(interpolation=None)
+    for section in cp.sections():
+        if not effective.has_section(section):
+            effective.add_section(section)
+        for option in cp._sections.get(section, {}).keys():
+            value = cp.get(section, option, raw=False)
+            effective.set(section, option, value)
+    buf = io.StringIO()
+    effective.write(buf)
+    return buf.getvalue()
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -423,18 +479,90 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
-def _provisioning_paths(layout: Layout, run_id: str) -> tuple[Path, Path, Path]:
+def _provisioning_paths(layout: Layout, run_id: str) -> tuple[Path, Path, Path, Path]:
     base_dir = layout.root / ".odt-env"
-    run_path = base_dir / "provisioning-runs" / f"{run_id}.json"
-    resolved_ini_path = base_dir / "provisioning-runs" / f"{run_id}.resolved.ini"
+    run_path = base_dir / "history" / f"{run_id}-provisioning.json"
+    source_ini_path = base_dir / "history" / f"{run_id}.source-project.ini"
+    resolved_ini_path = base_dir / "history" / f"{run_id}.resolved-project.ini"
     last_path = base_dir / "last-provisioning.json"
-    return run_path, resolved_ini_path, last_path
+    return run_path, source_ini_path, resolved_ini_path, last_path
 
 
 def _write_provisioning_record(layout: Layout, run_id: str, record: dict[str, Any]) -> None:
-    run_path, _resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
+    run_path, _source_ini_path, _resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
     _write_json_atomic(run_path, record)
     _write_json_atomic(last_path, record)
+
+
+def _apply_missing_config_defaults(
+        cp: configparser.ConfigParser,
+        defaults: Optional[Dict[str, str]],
+        log_defaults: bool = True,
+) -> bool:
+    """Apply missing [config] defaults and return True if the INI changed."""
+    if not defaults:
+        return False
+
+    changed = False
+    if not cp.has_section("config"):
+        cp.add_section("config")
+        changed = True
+
+    for key, value in defaults.items():
+        if cp.has_option("config", key):
+            continue
+        if log_defaults:
+            log_value = "******" if _is_sensitive_key(key) else value
+            _logger.info("Applying implicit default to [config].%s=%s", key, log_value)
+        cp.set("config", key, value)
+        changed = True
+
+    return changed
+
+
+def _write_default_project_ini_template(ini_path: Path) -> None:
+    """Create the bundled default project INI template at ``ini_path``."""
+    if ini_path.exists():
+        if not ini_path.is_file():
+            raise Exception(f"Default INI path exists but is not a file: {ini_path}")
+        return
+
+    ini_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = ini_path.with_suffix(ini_path.suffix + ".tmp")
+    tmp_path.write_text(_DEFAULT_PROJECT_INI_TEMPLATE, encoding="utf-8")
+    os.replace(tmp_path, ini_path)
+
+    if not sys.platform.startswith("win"):
+        try:
+            ini_path.chmod(0o600)
+        except OSError:
+            pass
+
+    _logger.info("Created default project INI template: %s", ini_path)
+
+
+def _implicit_ini_needs_effective_save(
+        ini_path: Path,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        config_defaults: Optional[Dict[str, str]],
+        force: bool = False,
+) -> bool:
+    """Return True when implicit-INI mode should persist an effective project file."""
+    if force or vars_overrides or ini_overrides:
+        return True
+    if not config_defaults:
+        return False
+
+    cp = _read_ini(
+        ini_path,
+        vars_overrides=None,
+        ini_overrides=None,
+        log_overrides=False,
+    )
+    if not cp.has_section("config"):
+        return True
+    return any(not cp.has_option("config", key) for key in config_defaults)
 
 
 def _resolved_ini_for_manifest(
@@ -455,13 +583,132 @@ def _resolved_ini_for_manifest(
         return None
 
 
+def _source_ini_for_manifest(layout: Layout, ini_path: Path) -> Optional[Path]:
+    """Return the best source INI to copy into the per-run provisioning audit."""
+    source_project_ini_path = layout.root / ".odt-env" / "last-source-project.ini"
+    resolved_project_ini_path = layout.root / ".odt-env" / "last-resolved-project.ini"
+
+    # When a remote/implicit project file was materialized, the workspace-root
+    # INI is rewritten to its effective resolved form and the original source is
+    # kept separately. Use that source only when it clearly matches the current
+    # effective project file; otherwise fall back to the INI path passed to this
+    # run to avoid copying a stale last-source-project.ini from a previous run.
+    if source_project_ini_path.is_file() and resolved_project_ini_path.is_file() and ini_path.is_file():
+        try:
+            ini_parent = ini_path.resolve().parent
+        except Exception:
+            ini_parent = ini_path.absolute().parent
+        try:
+            if ini_parent == layout.root.resolve() and ini_path.read_bytes() == resolved_project_ini_path.read_bytes():
+                return source_project_ini_path
+        except OSError:
+            pass
+
+    if ini_path.is_file():
+        return ini_path
+    if source_project_ini_path.is_file():
+        return source_project_ini_path
+    return None
+
+
+def _copy_source_ini_for_manifest(layout: Layout, run_id: str, ini_path: Path) -> Optional[Path]:
+    source_path = _source_ini_for_manifest(layout, ini_path)
+    if source_path is None:
+        _logger.warning("Failed to locate source INI for provisioning manifest: %s", ini_path)
+        return None
+
+    _run_path, source_ini_path, _resolved_ini_path, _last_path = _provisioning_paths(layout, run_id)
+    source_ini_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, source_ini_path)
+
+    if not sys.platform.startswith("win"):
+        try:
+            source_ini_path.chmod(0o600)
+        except OSError:
+            pass
+
+    return source_ini_path
+
+
+def _save_remote_ini_source_copy(ini_path: Path) -> Path:
+    """Keep the original downloaded/copied remote INI under ROOT/.odt-env."""
+    root = ini_path.parent
+    source_ini_path = root / ".odt-env" / "last-source-project.ini"
+    source_ini_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ini_path, source_ini_path)
+    return source_ini_path
+
+
+def _save_resolved_project_ini_copy(ini_path: Path, resolved_ini: str) -> Path:
+    """Keep the effective resolved project INI under ROOT/.odt-env."""
+    root = ini_path.parent
+    resolved_ini_path = root / ".odt-env" / "last-resolved-project.ini"
+    resolved_ini_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = resolved_ini_path.with_suffix(resolved_ini_path.suffix + ".tmp")
+    tmp_path.write_text(resolved_ini, encoding="utf-8")
+    os.replace(tmp_path, resolved_ini_path)
+
+    if not sys.platform.startswith("win"):
+        try:
+            resolved_ini_path.chmod(0o600)
+        except OSError:
+            pass
+
+    return resolved_ini_path
+
+
+def _save_effective_ini_copy(
+    ini_path: Path,
+    vars_overrides: Optional[Dict[str, str]],
+    ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+    config_defaults: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    Rewrite a workspace-root INI with the values actually used after CLI
+    overrides and optional implicit defaults.
+
+    The original template/source file is kept under ROOT/.odt-env/last-source-project.ini,
+    and the resolved/effective copy is kept under ROOT/.odt-env/last-resolved-project.ini.
+    """
+    cp = _read_ini(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+        log_overrides=False,
+    )
+    _apply_missing_config_defaults(cp, config_defaults, log_defaults=False)
+    source_ini_path = _save_remote_ini_source_copy(ini_path)
+    resolved_ini = _ini_for_effective_file(cp)
+
+    tmp_path = ini_path.with_suffix(ini_path.suffix + ".tmp")
+    tmp_path.write_text(resolved_ini, encoding="utf-8")
+    os.replace(tmp_path, ini_path)
+
+    if not sys.platform.startswith("win"):
+        try:
+            ini_path.chmod(0o600)
+        except OSError:
+            pass
+
+    resolved_project_ini_path = _save_resolved_project_ini_copy(ini_path, resolved_ini)
+
+    _logger.info(
+        "Saved effective INI to workspace root: %s (original source/template: %s, resolved copy: %s)",
+        ini_path,
+        source_ini_path,
+        resolved_project_ini_path,
+    )
+
+
 def _collect_provisioning_details(
         cfg: ProjectConfig,
+        source_ini_path: Optional[Path],
         resolved_ini_path: Optional[Path],
 ) -> dict[str, Any]:
     return {
         "config": _redact_mapping(asdict(cfg)),
         "artifacts": {
+            "source_ini": str(source_ini_path) if source_ini_path and source_ini_path.exists() else None,
             "resolved_ini": str(resolved_ini_path) if resolved_ini_path and resolved_ini_path.exists() else None,
         },
     }
@@ -548,9 +795,11 @@ def _validate_ini_overrides_exist(
     """
     for section, options in ini_overrides.items():
         if not cp.has_section(section):
+            if section == "config":
+                continue
             raise Exception(
                 f"Invalid -S/--set override: section [{section}] does not exist in the INI file. "
-                "--set can only create new options in the existing [config] section."
+                "--set can only create new options in [config]."
             )
 
         for key in options:
@@ -579,6 +828,8 @@ def _read_ini(
     # inject anything into [vars]. New options are allowed only in [config].
     if ini_overrides:
         _validate_ini_overrides_exist(cp, ini_overrides)
+        if "config" in ini_overrides and not cp.has_section("config"):
+            cp.add_section("config")
 
     if vars_overrides:
         if not cp.has_section("vars"):
@@ -3547,7 +3798,7 @@ def sync_project(
     run_id = _safe_run_id()
     started_at = _utc_now_iso()
     argv = _redact_cli_args(cli_argv or sys.argv)
-    run_path, resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
+    run_path, source_ini_path, resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
 
     record: dict[str, Any] = {
         "version": f"odt-env-{__version__}",
@@ -3582,12 +3833,19 @@ def sync_project(
         "artifacts": {
             "manifest": str(run_path),
             "last_manifest": str(last_path),
+            "source_ini": None,
             "resolved_ini": None,
         },
         "error": None,
     }
 
     _write_provisioning_record(layout, run_id, record)
+
+    copied_source_ini_path = _copy_source_ini_for_manifest(layout, run_id, ini_path)
+    if copied_source_ini_path is not None:
+        source_ini_path = copied_source_ini_path
+        record["artifacts"]["source_ini"] = str(source_ini_path)
+        _write_provisioning_record(layout, run_id, record)
 
     resolved_ini = _resolved_ini_for_manifest(
         ini_path,
@@ -3636,7 +3894,7 @@ def sync_project(
                 log_resolved=False,
                 log_overrides=False,
             )
-            details = _collect_provisioning_details(cfg, resolved_ini_path)
+            details = _collect_provisioning_details(cfg, source_ini_path, resolved_ini_path)
             record["config"] = details["config"]
             record["artifacts"].update(details["artifacts"])
         except Exception:
@@ -3651,7 +3909,7 @@ def sync_project(
         log_resolved=False,
         log_overrides=False,
     )
-    details = _collect_provisioning_details(cfg, resolved_ini_path)
+    details = _collect_provisioning_details(cfg, source_ini_path, resolved_ini_path)
     record["config"] = details["config"]
     record["artifacts"].update(details["artifacts"])
     record["status"] = "success"
@@ -3665,7 +3923,7 @@ def sync_project(
 # -----------------------------
 
 def _parse_git_ini_source(raw_ini: str) -> Optional[GitIniSource]:
-    """Parse a Git-backed INI source.
+    """Parse a Git-backed remote INI source.
 
     Supported syntax:
       git::REPO_URL//PATH/TO/PROJECT.ini?ref=BRANCH_OR_TAG_OR_COMMIT
@@ -3777,7 +4035,7 @@ def _clone_git_ini_repo(source: GitIniSource, dest: Path) -> None:
 
 
 def _copy_git_ini_to_root(source: GitIniSource, root: Path) -> Path:
-    """Fetch a Git-backed INI, copy it into ``root``, and return that local copy."""
+    """Fetch a Git-backed remote INI, copy it into ``root``, and return that local copy."""
     with tempfile.TemporaryDirectory(prefix="odt-env-git-ini-") as tmp_dir:
         repo_dir = Path(tmp_dir) / "repo"
         _clone_git_ini_repo(source, repo_dir)
@@ -3840,7 +4098,7 @@ def _github_blob_url_to_raw(url: str) -> Optional[str]:
 
 
 def _parse_url_ini_source(raw_ini: str) -> Optional[UrlIniSource]:
-    """Parse an HTTP(S)-backed INI source.
+    """Parse a URL-backed remote INI source.
 
     GitHub ``/blob/`` URLs are accepted as a convenience and normalized to
     raw.githubusercontent.com URLs before downloading.
@@ -3884,7 +4142,7 @@ def _safe_url_ini_filename(source_url: str) -> str:
 
 
 def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
-    """Download an HTTP(S)-backed INI into ``root`` and return that local copy."""
+    """Download a URL-backed remote INI into ``root`` and return that local copy."""
     request = Request(
         source.url,
         headers={"User-Agent": f"odt-env/{__version__}"},
@@ -3957,12 +4215,14 @@ def build_parser() -> argparse.ArgumentParser:
     epilog = """If no options are specified, odt-env only regenerates configs and helper scripts.
 
 Examples:
+  odt-env --root ./odoo18-workspace --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /full/path/to/workspace-root
   odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
   odt-env https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
   odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
+  odt-env --root ./odoo19-workspace --sync-all --create-venv --set odoo:version=19.0
   odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --set odoo:version=19.0
   odt-env --show-last-run
@@ -3988,8 +4248,9 @@ Examples:
         metavar="INI",
         nargs="?",
         help=(
-            "Local path to odoo-project.ini, Git source git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, "
-            "or HTTP(S) URL to a raw INI file. Required unless --show-last-run is used."
+            "Optional local path to odoo-project.ini, Git-backed remote INI "
+            "git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
+            "If omitted, odt-env uses ROOT/odoo-project.ini, creating it from the bundled default template when missing."
         ),
     )
 
@@ -3999,7 +4260,7 @@ Examples:
         default=None,
         help=(
             "Override workspace ROOT directory. By default, local INI uses its containing directory; "
-            "Git and URL INI sources use the current working directory. "
+            "Remote INI sources use the current working directory. "
             "Explicit ROOT is created automatically if needed, except for --show-last-run, which is read-only."
         ),
     )
@@ -4026,7 +4287,8 @@ Examples:
         metavar="SECTION:KEY=VALUE",
         help=(
             "Override an option that is already present in the INI file. "
-            "Can be passed multiple times. Example: --set odoo:version=19.0"
+            "Can be passed multiple times. New options are allowed only in [config]. "
+            "Example: --set odoo:version=19.0"
         ),
     )
 
@@ -4162,10 +4424,6 @@ def main() -> None:
 
     parser = build_parser()
 
-    if len(sys.argv) == 1:
-        parser.print_help()
-        raise SystemExit(2)
-
     args = parser.parse_args()
 
     if bool(getattr(args, 'show_last_run', False)):
@@ -4186,9 +4444,6 @@ def main() -> None:
             print(f"{parser.prog}: error: {e}", file=sys.stderr)
             raise SystemExit(1)
         return
-
-    if not args.ini:
-        parser.error("the following arguments are required: INI")
 
     clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
     create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
@@ -4212,22 +4467,17 @@ def main() -> None:
         override_targets = [f"{section}:{key}" for section, options in ini_overrides.items() for key in options]
         _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
 
-    try:
-        git_ini_source = _parse_git_ini_source(args.ini)
-        url_ini_source = None if git_ini_source is not None else _parse_url_ini_source(args.ini)
-    except Exception as e:
-        parser.error(str(e))
-
     root_override: Optional[Path] = None
-    if git_ini_source is not None or url_ini_source is not None:
-        source_kind = "Git" if git_ini_source is not None else "URL"
+    implicit_ini = not bool((args.ini or "").strip())
+
+    if implicit_ini:
         if args.root:
             root_override = _validate_root_override(parser, args.root)
         else:
             try:
                 cwd = Path.cwd()
             except OSError as e:
-                parser.error(f'Failed to resolve current working directory for {source_kind} INI ROOT: {e}')
+                parser.error(f'Failed to resolve current working directory for implicit INI ROOT: {e}')
 
             try:
                 root_override = cwd.resolve()
@@ -4235,33 +4485,91 @@ def main() -> None:
                 root_override = cwd.absolute()
 
             if not root_override.is_dir():
-                parser.error(f'Current working directory for {source_kind} INI ROOT is not a directory: {root_override}')
+                parser.error(f'Current working directory for implicit INI ROOT is not a directory: {root_override}')
 
             _logger.info(
-                'Workspace ROOT default for %s INI (current working directory): %s',
-                source_kind,
+                'Workspace ROOT default for implicit INI (current working directory): %s',
                 root_override,
             )
 
+        ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+        config_defaults = None if build_docker_image_requested else _IMPLICIT_LOCAL_CONFIG_DEFAULTS
+
         try:
-            if git_ini_source is not None:
-                ini_path = _copy_git_ini_to_root(git_ini_source, root_override)
-            else:
-                ini_path = _copy_url_ini_to_root(url_ini_source, root_override)
+            created_default_ini = not ini_path.exists()
+            _write_default_project_ini_template(ini_path)
+            if _implicit_ini_needs_effective_save(
+                ini_path,
+                vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
+                config_defaults=config_defaults,
+                force=created_default_ini,
+            ):
+                _save_effective_ini_copy(
+                    ini_path,
+                    vars_overrides=vars_overrides,
+                    ini_overrides=ini_overrides,
+                    config_defaults=config_defaults,
+                )
         except Exception as e:
             _logger.error('%s', e)
             raise SystemExit(1)
     else:
-        ini_path = Path(args.ini).expanduser().resolve()
-        if not ini_path.exists():
-            parser.error(f'INI file does not exist: {ini_path}')
-        if not ini_path.is_file():
-            parser.error(f'INI path is not a file: {ini_path}')
+        try:
+            git_ini_source = _parse_git_ini_source(args.ini)
+            url_ini_source = None if git_ini_source is not None else _parse_url_ini_source(args.ini)
+        except Exception as e:
+            parser.error(str(e))
 
-        if args.root:
-            root_override = _validate_root_override(parser, args.root)
+        if git_ini_source is not None or url_ini_source is not None:
+            source_kind = "Git" if git_ini_source is not None else "URL"
+            if args.root:
+                root_override = _validate_root_override(parser, args.root)
+            else:
+                try:
+                    cwd = Path.cwd()
+                except OSError as e:
+                    parser.error(f'Failed to resolve current working directory for {source_kind} INI ROOT: {e}')
+
+                try:
+                    root_override = cwd.resolve()
+                except Exception:
+                    root_override = cwd.absolute()
+
+                if not root_override.is_dir():
+                    parser.error(f'Current working directory for {source_kind} INI ROOT is not a directory: {root_override}')
+
+                _logger.info(
+                    'Workspace ROOT default for %s INI (current working directory): %s',
+                    source_kind,
+                    root_override,
+                )
+
+            try:
+                if git_ini_source is not None:
+                    ini_path = _copy_git_ini_to_root(git_ini_source, root_override)
+                else:
+                    ini_path = _copy_url_ini_to_root(url_ini_source, root_override)
+
+                _save_effective_ini_copy(
+                    ini_path,
+                    vars_overrides=vars_overrides,
+                    ini_overrides=ini_overrides,
+                )
+            except Exception as e:
+                _logger.error('%s', e)
+                raise SystemExit(1)
         else:
-            _logger.info('Workspace ROOT default (INI directory): %s', ini_path.parent.resolve())
+            ini_path = Path(args.ini).expanduser().resolve()
+            if not ini_path.exists():
+                parser.error(f'INI file does not exist: {ini_path}')
+            if not ini_path.is_file():
+                parser.error(f'INI path is not a file: {ini_path}')
+
+            if args.root:
+                root_override = _validate_root_override(parser, args.root)
+            else:
+                _logger.info('Workspace ROOT default (INI directory): %s', ini_path.parent.resolve())
 
     if args.all:
         sync_odoo, sync_addons = True, True

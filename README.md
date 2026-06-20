@@ -39,13 +39,10 @@ odt-env --help
 
 ## Quick start
 
-Create an Odoo 18 workspace in `./odoo18-workspace` directly from the reusable online template:
+Create a new Odoo 18 workspace using the bundled default template:
 
 ```bash
-odt-env "https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini" \
-  --root ./odoo18-workspace \
-  --sync-all \
-  --create-venv \
+odt-env --root ./odoo18-workspace --sync-all --create-venv \
   --set odoo:version=18.0 \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
@@ -108,9 +105,14 @@ After provisioning, the workspace has the following structure:
 ROOT/
 ├── odoo-project.ini      # project definition
 ├── compose.yml           # generated sample Docker Compose file when --build-docker-image is used
-├── .odt-env/             # provisioning metadata
+├── .odt-env/             # provisioning metadata and project snapshots
 │   ├── last-provisioning.json
-│   └── provisioning-runs/
+│   ├── last-source-project.ini
+│   ├── last-resolved-project.ini
+│   └── history/
+│       ├── <run_id>-provisioning.json
+│       ├── <run_id>.source-project.ini
+│       └── <run_id>.resolved-project.ini
 ├── odoo/                 # Git-managed Odoo source repository
 ├── odoo-addons/          # addon repositories from [addons.<name>] sections
 ├── odoo-backups/         # backups created by helper scripts
@@ -592,21 +594,21 @@ docker compose up -d --force-recreate odoo
 ### Syntax
 
 ```text
-odt-env [OPTIONS] INI
+odt-env [OPTIONS] [INI]
 ```
 
 If no options are specified, `odt-env` only regenerates configuration files and helper scripts.
 
 ### Positional arguments
 
-- `INI` — required project file. This can be either:
+- `INI` — optional project file. If omitted, `odt-env` uses `ROOT/odoo-project.ini`; if that file is missing, it creates it from the bundled default template. `INI` can also be:
   - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
-  - a Git-backed reusable template, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
-  - an HTTP(S) URL pointing to a reusable template, for example:
+  - a remote INI loaded from a Git repository, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
+  - a remote INI loaded from a URL, for example:
     - `https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini`
     - `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
 
-Git-backed reusable templates use this syntax:
+Git-backed remote INI files use this syntax:
 
 ```text
 git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
@@ -616,14 +618,14 @@ The `?ref=REF` part is optional and can point to a branch, tag, or commit.
 
 ### Paths and outputs
 
-- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a Git-backed or URL-backed INI.
+- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a remote INI.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
-- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — override a value that is already present in the INI file; can be repeated. This never creates a new section or key.
+- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — override a value that is already present in the INI file; can be repeated. New options are allowed only in the `[config]` section.
 - `--no-configs` — do not generate config files
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`
 - `--no-data-dir` — do not create the Odoo data directory
 - `--no-provisioning-log` — do not write provisioning metadata under `ROOT/.odt-env/`
-- `--show-last-run` — print metadata from the last provisioning run and exit without provisioning
+- `--show-last-run` — print metadata from `ROOT/.odt-env/last-provisioning.json` and exit without provisioning
 
 ### Repository sync
 
@@ -670,7 +672,7 @@ The following sections are supported:
 
 ### General rules
 
-- The project file can have any filename. In this README, `odoo-project.ini` is only an example.
+- The project file can have any filename when passed explicitly. When `INI` is omitted, `odt-env` uses `ROOT/odoo-project.ini`.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
 - Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
