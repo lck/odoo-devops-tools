@@ -231,13 +231,90 @@ class Layout:
 # Helpers: validation & parsing
 # -----------------------------
 
-def _handle_process_output(p, err_msg: str):
+def _format_cmd(cmd: list[str]) -> str:
+    return shlex.join(str(part) for part in cmd)
+
+
+def _handle_process_output(p: subprocess.CompletedProcess[str], err_msg: str) -> None:
     if p.stdout:
         _logger.info(p.stdout)
     if p.stderr:
         _logger.warning(p.stderr)
     if p.returncode != 0:
         raise Exception(err_msg)
+
+
+def _run_checked(
+        cmd: list[str],
+        cwd: Optional[Path] = None,
+        err_msg: Optional[str] = None,
+) -> subprocess.CompletedProcess[str]:
+    p = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        text=True,
+        capture_output=True,
+    )
+    if err_msg is None:
+        failure_message = "Command failed"
+    else:
+        failure_message = err_msg
+    _handle_process_output(
+        p,
+        f"{failure_message}\n"
+        f"Command: {_format_cmd(cmd)}\n"
+        f"{p.stdout}\n{p.stderr}",
+    )
+    return p
+
+
+def _ensure_command(name: str) -> None:
+    if shutil.which(name) is None:
+        raise Exception(f"Required command not found in PATH: {name}")
+
+
+def _chmod_private(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        return
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _make_executable(path: Path) -> None:
+    try:
+        mode = path.stat().st_mode
+        path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError:
+        pass
+
+
+def _write_text_file(
+        path: Path,
+        content: str,
+        *,
+        private: bool = False,
+        executable: bool = False,
+        atomic: bool = False,
+        crlf: bool = False,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = content.replace("\n", "\r\n") if crlf else content
+    target = path.with_suffix(path.suffix + ".tmp") if atomic else path
+    target.write_text(text, encoding="utf-8")
+    if atomic:
+        os.replace(target, path)
+    if private:
+        _chmod_private(path)
+    if executable:
+        _make_executable(path)
+
+
+def _write_script(layout: Layout, name: str, ext: str, content: str) -> Path:
+    path = layout.script(name, ext)
+    _write_text_file(path, content, executable=(ext == "sh"), crlf=(ext == "bat"))
+    return path
 
 
 def _rmtree(path: Path) -> None:
@@ -285,49 +362,31 @@ def _require_list_str(d: Dict[str, Any], key: str) -> list[str]:
     return [x.strip() for x in v]
 
 
-def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
-    """
-    Return a resolved (interpolated) INI representation suitable for audit logging.
-    Comments are not preserved by ConfigParser by design.
-    """
-    # Build a resolved copy (so ${vars:...} etc. is expanded in the log).
-    resolved = configparser.ConfigParser(interpolation=None)
+def _render_resolved_ini(cp: configparser.ConfigParser, *, redact: bool = False) -> str:
+    """Render an interpolated INI copy. ConfigParser does not preserve comments."""
+    rendered = configparser.ConfigParser(interpolation=None)
 
     for section in cp.sections():
-        if not resolved.has_section(section):
-            resolved.add_section(section)
-
+        rendered.add_section(section)
         for option in cp._sections.get(section, {}).keys():
-            value = cp.get(section, option, raw=False)  # resolve interpolation
-            opt_l = option.lower()
-            if any(k in opt_l for k in _SENSITIVE_KEYS):
+            value = cp.get(section, option, raw=False)
+            if redact and _is_sensitive_key(option):
                 value = "******"
-            resolved.set(section, option, value)
+            rendered.set(section, option, value)
 
     buf = io.StringIO()
-    resolved.write(buf)
+    rendered.write(buf)
     return buf.getvalue()
+
+
+def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
+    """Return resolved INI content suitable for audit logs."""
+    return _render_resolved_ini(cp, redact=True)
 
 
 def _ini_for_effective_file(cp: configparser.ConfigParser) -> str:
-    """
-    Return a resolved (interpolated) INI representation suitable for saving
-    back to the workspace root as the effective project file.
-
-    Unlike _ini_for_audit_log(), this intentionally does not redact values:
-    the goal is to persist the exact values that will be used by odt-env.
-    Comments are not preserved by ConfigParser by design.
-    """
-    effective = configparser.ConfigParser(interpolation=None)
-    for section in cp.sections():
-        if not effective.has_section(section):
-            effective.add_section(section)
-        for option in cp._sections.get(section, {}).keys():
-            value = cp.get(section, option, raw=False)
-            effective.set(section, option, value)
-    buf = io.StringIO()
-    effective.write(buf)
-    return buf.getvalue()
+    """Return resolved INI content suitable for saving as the effective project file."""
+    return _render_resolved_ini(cp, redact=False)
 
 
 def _utc_now_iso() -> str:
@@ -464,19 +523,12 @@ def _json_default(value: Any) -> str:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
+    _write_text_file(
+        path,
         json.dumps(payload, indent=2, sort_keys=False, default=_json_default) + "\n",
-        encoding="utf-8",
+        private=True,
+        atomic=True,
     )
-    os.replace(tmp_path, path)
-
-    if not sys.platform.startswith("win"):
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
 
 
 def _provisioning_paths(layout: Layout, run_id: str) -> tuple[Path, Path, Path, Path]:
@@ -527,16 +579,12 @@ def _write_default_project_ini_template(ini_path: Path) -> None:
             raise Exception(f"Default INI path exists but is not a file: {ini_path}")
         return
 
-    ini_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = ini_path.with_suffix(ini_path.suffix + ".tmp")
-    tmp_path.write_text(_DEFAULT_PROJECT_INI_TEMPLATE, encoding="utf-8")
-    os.replace(tmp_path, ini_path)
-
-    if not sys.platform.startswith("win"):
-        try:
-            ini_path.chmod(0o600)
-        except OSError:
-            pass
+    _write_text_file(
+        ini_path,
+        _DEFAULT_PROJECT_INI_TEMPLATE,
+        private=True,
+        atomic=True,
+    )
 
     _logger.info("Created default project INI template: %s", ini_path)
 
@@ -620,12 +668,7 @@ def _copy_source_ini_for_manifest(layout: Layout, run_id: str, ini_path: Path) -
     _run_path, source_ini_path, _resolved_ini_path, _last_path = _provisioning_paths(layout, run_id)
     source_ini_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, source_ini_path)
-
-    if not sys.platform.startswith("win"):
-        try:
-            source_ini_path.chmod(0o600)
-        except OSError:
-            pass
+    _chmod_private(source_ini_path)
 
     return source_ini_path
 
@@ -643,16 +686,12 @@ def _save_resolved_project_ini_copy(ini_path: Path, resolved_ini: str) -> Path:
     """Keep the effective resolved project INI under ROOT/.odt-env."""
     root = ini_path.parent
     resolved_ini_path = root / ".odt-env" / "last-resolved-project.ini"
-    resolved_ini_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = resolved_ini_path.with_suffix(resolved_ini_path.suffix + ".tmp")
-    tmp_path.write_text(resolved_ini, encoding="utf-8")
-    os.replace(tmp_path, resolved_ini_path)
-
-    if not sys.platform.startswith("win"):
-        try:
-            resolved_ini_path.chmod(0o600)
-        except OSError:
-            pass
+    _write_text_file(
+        resolved_ini_path,
+        resolved_ini,
+        private=True,
+        atomic=True,
+    )
 
     return resolved_ini_path
 
@@ -680,15 +719,12 @@ def _save_effective_ini_copy(
     source_ini_path = _save_remote_ini_source_copy(ini_path)
     resolved_ini = _ini_for_effective_file(cp)
 
-    tmp_path = ini_path.with_suffix(ini_path.suffix + ".tmp")
-    tmp_path.write_text(resolved_ini, encoding="utf-8")
-    os.replace(tmp_path, ini_path)
-
-    if not sys.platform.startswith("win"):
-        try:
-            ini_path.chmod(0o600)
-        except OSError:
-            pass
+    _write_text_file(
+        ini_path,
+        resolved_ini,
+        private=True,
+        atomic=True,
+    )
 
     resolved_project_ini_path = _save_resolved_project_ini_copy(ini_path, resolved_ini)
 
@@ -718,28 +754,25 @@ def _collect_provisioning_details(
 # INI loading
 # -----------------------------
 
+def _split_cli_assignment(item: str, option: str, expected: str) -> tuple[str, str]:
+    raw_item = (item or "").strip()
+    if not raw_item or "=" not in raw_item:
+        raise Exception(f"Invalid {option} value '{item}' (expected format {expected}).")
+
+    target, value = raw_item.split("=", 1)
+    target = target.strip()
+    if not target:
+        raise Exception(f"Invalid {option} value '{item}' (expected non-empty {expected}).")
+    return target, value.strip()
+
+
 def _parse_cli_vars(extra_vars: list[str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
 
     for item in extra_vars:
-        raw_item = (item or "").strip()
-        if not raw_item or "=" not in raw_item:
-            raise Exception(
-                f"Invalid -e/--extra-var value '{item}' (expected format KEY=VALUE)."
-            )
-
-        key, value = raw_item.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-
-        if not key:
-            raise Exception(
-                f"Invalid -e/--extra-var value '{item}' (expected non-empty KEY=VALUE)."
-            )
-
+        key, value = _split_cli_assignment(item, "-e/--extra-var", "KEY=VALUE")
         if key in overrides:
             _logger.warning("CLI override for [vars].%s redefined; using last value.", key)
-
         overrides[key] = value
 
     return overrides
@@ -750,34 +783,19 @@ def _parse_cli_ini_overrides(raw_overrides: list[str]) -> Dict[str, Dict[str, st
     overrides: Dict[str, Dict[str, str]] = {}
 
     for item in raw_overrides:
-        raw_item = (item or "").strip()
-        if not raw_item or "=" not in raw_item:
-            raise Exception(
-                f"Invalid -S/--set value '{item}' (expected format SECTION:KEY=VALUE)."
-            )
-
-        target, value = raw_item.split("=", 1)
-        target = target.strip()
-        value = value.strip()
-
-        if not target or ":" not in target:
-            raise Exception(
-                f"Invalid -S/--set value '{item}' (expected format SECTION:KEY=VALUE)."
-            )
+        target, value = _split_cli_assignment(item, "-S/--set", "SECTION:KEY=VALUE")
+        if ":" not in target:
+            raise Exception(f"Invalid -S/--set value '{item}' (expected format SECTION:KEY=VALUE).")
 
         section, key = target.split(":", 1)
         section = section.strip()
         key = key.strip().lower()
-
         if not section or not key:
-            raise Exception(
-                f"Invalid -S/--set value '{item}' (expected non-empty SECTION and KEY)."
-            )
+            raise Exception(f"Invalid -S/--set value '{item}' (expected non-empty SECTION and KEY).")
 
         section_overrides = overrides.setdefault(section, {})
         if key in section_overrides:
             _logger.warning("CLI override for [%s].%s redefined; using last value.", section, key)
-
         section_overrides[key] = value
 
     return overrides
@@ -932,6 +950,37 @@ def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str],
     return max_python_version, list(build_constraints), list(requirements)
 
 
+def _require_ini_option(cp: configparser.ConfigParser, section: str, option: str) -> str:
+    if not cp.has_section(section):
+        raise Exception(f"Missing INI section: [{section}]")
+    if not cp.has_option(section, option):
+        raise Exception(f"Missing option '{option}' in section [{section}]")
+    return cp.get(section, option)
+
+
+def _get_ini_list(cp: configparser.ConfigParser, section: str, option: str) -> list[str]:
+    if not cp.has_section(section) or not cp.has_option(section, option):
+        return []
+    # Multi-line INI values represent lists. Empty value means empty list.
+    return [line.strip() for line in cp.get(section, option).splitlines() if line.strip()]
+
+
+def _get_ini_bool(
+        cp: configparser.ConfigParser,
+        section: str,
+        option: str,
+        default: bool = False,
+) -> bool:
+    if not cp.has_section(section) or not cp.has_option(section, option):
+        return default
+    try:
+        return cp.getboolean(section, option)
+    except ValueError as e:
+        raise Exception(
+            f"Invalid value for option '{option}' in section [{section}] (expected a boolean like true/false)."
+        ) from e
+
+
 def load_project_config(
         ini_path: Path,
         vars_overrides: Optional[Dict[str, str]] = None,
@@ -952,30 +1001,6 @@ def load_project_config(
     if log_resolved:
         _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
 
-    def _require_option(section: str, option: str) -> str:
-        if not cp.has_section(section):
-            raise Exception(f"Missing INI section: [{section}]")
-        if not cp.has_option(section, option):
-            raise Exception(f"Missing option '{option}' in section [{section}]")
-        return cp.get(section, option)
-
-    def _get_list(section: str, option: str) -> list[str]:
-        if not cp.has_section(section) or not cp.has_option(section, option):
-            return []
-        raw = cp.get(section, option)
-        # Multi-line INI values are used to represent lists. Empty value => empty list.
-        return [ln.strip() for ln in raw.splitlines() if ln.strip()]
-
-    def _get_bool(section: str, option: str, default: bool = False) -> bool:
-        if not cp.has_section(section) or not cp.has_option(section, option):
-            return default
-        try:
-            return cp.getboolean(section, option)
-        except ValueError as e:
-            raise Exception(
-                f"Invalid value for option '{option}' in section [{section}] (expected a boolean like true/false)."
-            ) from e
-
     # Sections expected:
     #   [virtualenv] (optional)
     #   [odoo]
@@ -983,7 +1008,7 @@ def load_project_config(
     #   [docker] (optional)
     #   [config] (optional)
 
-    odoo_version = _require_option("odoo", "version").strip()
+    odoo_version = _require_ini_option(cp, "odoo", "version").strip()
     default_python_version, default_build_constraints, default_requirements = _get_default_virtualenv_settings(
         odoo_version
     )
@@ -992,8 +1017,8 @@ def load_project_config(
     if not python_version:
         python_version = default_python_version
 
-    ini_build_constraints = _get_list("virtualenv", "build_constraints")
-    ini_requirements = _get_list("virtualenv", "requirements")
+    ini_build_constraints = _get_ini_list(cp, "virtualenv", "build_constraints")
+    ini_requirements = _get_ini_list(cp, "virtualenv", "requirements")
 
     build_constraints = list(dict.fromkeys([
         *default_build_constraints,
@@ -1005,7 +1030,7 @@ def load_project_config(
     ]))
 
     explicit_requirements = list(ini_requirements)
-    explicit_requirements_ignore = _get_list("virtualenv", "requirements_ignore")
+    explicit_requirements_ignore = _get_ini_list(cp, "virtualenv", "requirements_ignore")
 
     requirements_ignore = list(explicit_requirements_ignore)
     for spec in requirements:
@@ -1020,7 +1045,7 @@ def load_project_config(
         requirements_ignore=requirements_ignore,
         explicit_requirements=explicit_requirements,
         explicit_requirements_ignore=explicit_requirements_ignore,
-        managed_python=_get_bool("virtualenv", "managed_python", default=True),
+        managed_python=_get_ini_bool(cp, "virtualenv", "managed_python", default=True),
     )
 
     has_odoo_path = cp.has_option("odoo", "path")
@@ -1057,7 +1082,7 @@ def load_project_config(
             branch=odoo_branch,
             commit=odoo_commit,
             version=odoo_version,
-            shallow=_get_bool("odoo", "shallow", default=True),
+            shallow=_get_ini_bool(cp, "odoo", "shallow", default=True),
         )
 
     # Addons are optional. If there are no [addons.<name>] sections, keep addons empty.
@@ -1088,10 +1113,10 @@ def load_project_config(
                 continue
 
             addons[name] = AddonSpec(
-                repo=_require_option(sec, "repo"),
-                branch=_require_option(sec, "branch"),
+                repo=_require_ini_option(cp, sec, "repo"),
+                branch=_require_ini_option(cp, sec, "branch"),
                 commit=cp.get(sec, "commit", fallback="").strip() or None,
-                shallow=_get_bool(sec, "shallow", default=True),
+                shallow=_get_ini_bool(cp, sec, "shallow", default=True),
             )
 
     docker = DockerConfig(base_image=f"odoo:{odoo_version}")
@@ -1170,10 +1195,7 @@ def require_venv(
     if not (python_version or "").strip():
         raise Exception("Missing required uv python version (python_version).")
 
-    # Validate that 'uv' exists in PATH before doing anything else.
-    if shutil.which("uv") is None:
-        _logger.error("ERROR: 'uv' command not found in PATH.", file=sys.stderr)
-        raise SystemExit(1)
+    _ensure_command("uv")
 
     if venv_dir.exists() and not venv_dir.is_dir():
         raise Exception(f"venv path exists but is not a directory: {venv_dir}")
@@ -1188,17 +1210,11 @@ def require_venv(
                 cpy_tag = f"cpython-{python_version}-linux-x86_64-gnu"
             cmd = ["uv", "python", "install", cpy_tag]
             _logger.info(f"Installing managed python {python_version} (x64) with uv: {cpy_tag}")
-            p = subprocess.run(
+            _run_checked(
                 cmd,
-                cwd=str(layout.root),
-                text=True,
-                capture_output=True,
+                cwd=layout.root,
+                err_msg=f"Failed to install managed python {python_version} (x64) with uv: {cpy_tag}",
             )
-            _handle_process_output(p, err_msg=(
-                f"Failed to install managed python {python_version} (x64) with uv: {cpy_tag}\n"
-                f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-                f"{p.stdout}\n{p.stderr}"
-            ))
 
         # Create virtualenv
         _logger.info("Creating virtualenv with uv: %s (python=%s)", venv_dir, python_version)
@@ -1211,17 +1227,11 @@ def require_venv(
             cmd.extend([
                 "--no-managed-python",
             ])
-        p = subprocess.run(
+        _run_checked(
             cmd,
-            cwd=str(layout.root),
-            text=True,
-            capture_output=True,
+            cwd=layout.root,
+            err_msg=f"Failed to create virtualenv at: {venv_dir}",
         )
-        _handle_process_output(p, err_msg=(
-            f"Failed to create virtualenv at: {venv_dir}\n"
-            f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-            f"{p.stdout}\n{p.stderr}"
-        ))
 
         # Install seed packages into virtualenv
         if not reuse_wheelhouse:
@@ -1235,17 +1245,11 @@ def require_venv(
             ]
             _logger.info("Installing seed packages into venv: %s", venv_dir)
             cmd = ["uv", "pip", "install", "-p", str(venv_py), *seed_packages]
-            p = subprocess.run(
+            _run_checked(
                 cmd,
-                cwd=str(layout.root),
-                text=True,
-                capture_output=True,
+                cwd=layout.root,
+                err_msg="Failed to install seed packages into venv.",
             )
-            _handle_process_output(p, err_msg=(
-                "Failed to install seed packages into venv.\n"
-                f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-                f"{p.stdout}\n{p.stderr}"
-            ))
 
 
 # -----------------------------
@@ -1342,6 +1346,64 @@ def _filter_requirements_file(
     return out_lines
 
 
+def _requirements_ignore_set(requirements_ignore: list[str]) -> set[str]:
+    ignore_set: set[str] = set()
+    for spec in requirements_ignore or []:
+        spec = spec.strip()
+        if not spec:
+            continue
+        ignore_set.add(_extract_req_name_from_spec(spec) or _canonicalize_project_name(spec))
+    return ignore_set
+
+
+def _path_label(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except Exception:
+        return str(path)
+
+
+def _collect_requirement_file_lines(
+        workspace_root: Path,
+        requirement_files: list[Path],
+        ignore_set: set[str],
+) -> list[str]:
+    lines: list[str] = []
+    for req_path in requirement_files:
+        if not req_path.exists():
+            # Skip silently; callers may include optional files.
+            continue
+
+        resolved_req_path = req_path.resolve()
+        lines.append(f"# --- from {_path_label(resolved_req_path, workspace_root)} ---")
+        lines.extend(
+            _filter_requirements_file(
+                resolved_req_path,
+                ignore_set,
+                visited={resolved_req_path},
+            )
+        )
+        lines.append("")
+    return lines
+
+
+def _write_requirements_input(path: Path, lines: list[str]) -> None:
+    _write_text_file(path, "\n".join(lines).rstrip("\n") + "\n")
+
+
+def _add_requirements_section(lines: list[str], title: str, requirements: list[str]) -> None:
+    if not requirements:
+        return
+    lines.append(title)
+    lines.extend(requirements)
+    lines.append("")
+
+
+def _add_build_constraints(cmd: list[str], build_constraints_path: Path) -> None:
+    if build_constraints_path.is_file():
+        cmd.extend(["--build-constraints", str(build_constraints_path)])
+
+
 def compile_all_requirements_lock(
         venv_python: Path,
         workspace_root: Path,
@@ -1352,97 +1414,48 @@ def compile_all_requirements_lock(
         wheelhouse_dir: Path,
         build_constraints_path: Path,
 ) -> Path:
-    """Compile a single lock file from multiple requirements sources using `uv pip compile`.
-
-    - Collects `base_requirements` (packages listed in INI + odt-env defaults)
-    - Inlines and filters each requirements.txt (supports nested -r includes)
-    - Applies `requirements_ignore` consistently before compilation
-    - Writes:
-        - ROOT/wheelhouse/all-requirements.in.txt   (input)
-        - ROOT/wheelhouse/all-requirements.lock.txt (lock output)
-    - Reads:
-        - ROOT/wheelhouse/build-constraints.txt
-
-    Returns the path to the generated lock file.
-    """
-    if shutil.which("uv") is None:
-        raise Exception("Required command not found in PATH: uv")
-
-    ignore_set: set[str] = set()
-    for spec in requirements_ignore or []:
-        spec = spec.strip()
-        if not spec:
-            continue
-        name = _extract_req_name_from_spec(spec)
-        if name:
-            ignore_set.add(name)
-        else:
-            ignore_set.add(_canonicalize_project_name(spec))
+    """Compile a single lock file from all Python requirement sources."""
+    _ensure_command("uv")
     wheelhouse_dir.mkdir(parents=True, exist_ok=True)
     in_path = wheelhouse_dir / "all-requirements.in.txt"
-
-    req_lines: list[str] = []
-    for req_path in requirement_files:
-        if not req_path.exists():
-            # Skip silently; the caller may include optional files.
-            continue
-
-        try:
-            rel = req_path.resolve().relative_to(workspace_root.resolve())
-            rel_label = rel.as_posix()
-        except Exception:
-            rel_label = str(req_path)
-
-        req_lines.append(f"# --- from {rel_label} ---")
-        visited = {req_path.resolve()}
-        filtered_lines = _filter_requirements_file(req_path.resolve(), ignore_set, visited=visited)
-        req_lines.extend(filtered_lines)
-        req_lines.append("")
 
     lines: list[str] = [
         "# This file is generated by odt-env (DO NOT EDIT).",
         "# Source: Odoo + addon repository requirements, plus [virtualenv].requirements and odt-env defaults.",
         "",
     ]
+    _add_requirements_section(
+        lines,
+        "# --- base requirements (from INI + odt-env defaults) ---",
+        base_requirements,
+    )
+    lines.extend(
+        _collect_requirement_file_lines(
+            workspace_root,
+            requirement_files,
+            _requirements_ignore_set(requirements_ignore),
+        )
+    )
+    _write_requirements_input(in_path, lines)
 
-    if base_requirements:
-        lines.append("# --- base requirements (from INI + odt-env defaults) ---")
-        for spec in base_requirements:
-            lines.append(spec)
-        lines.append("")
-
-    lines.extend(req_lines)
-
-    in_path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
-
-    _logger.info("Compiling lock file with uv: %s -> %s", in_path, output_lock_path)
     cmd = [
         "uv", "pip", "compile",
         "-p", str(venv_python),
         str(in_path),
         "-o", str(output_lock_path),
     ]
+    _add_build_constraints(cmd, build_constraints_path)
 
-    if build_constraints_path.is_file():
-        cmd.extend([
-            '--build-constraints', str(build_constraints_path),
-        ])
-
-    p = subprocess.run(
+    _logger.info("Compiling lock file with uv: %s -> %s", in_path, output_lock_path)
+    _run_checked(
         cmd,
-        cwd=str(workspace_root),
-        text=True,
-        capture_output=True,
+        cwd=workspace_root,
+        err_msg=(
+            "Failed to compile requirements lock file.\n"
+            f"Input: {in_path}\n"
+            f"Output: {output_lock_path}"
+        ),
     )
-
-    _handle_process_output(p, err_msg=(
-        "Failed to compile requirements lock file.\n"
-        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-        f"Input: {in_path}\n"
-        f"Output: {output_lock_path}\n"
-        f"{p.stdout}\n{p.stderr}"
-    ))
-
     return output_lock_path
 
 
@@ -1454,53 +1467,29 @@ def build_wheelhouse_from_requirements(
         build_constraints_path: Path,
         clear_pip_wheel_cache: bool = True,
 ) -> None:
-    """Build wheelhouse."""
+    """Build an offline wheelhouse from a requirements lock file."""
     if not requirements_path.exists():
         raise Exception(f"Requirements file not found: {requirements_path}")
 
-    if shutil.which("uv") is None:
-        raise Exception("Required command not found in PATH: uv")
-
+    _ensure_command("uv")
     wheelhouse_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clear pip's wheel cache
     if clear_pip_wheel_cache:
-        cmd = [
-            str(venv_python), "-m", "pip", "cache", "purge",
-        ]
         _logger.info("Clearing pip's wheel cache")
-        p = subprocess.run(
-            cmd,
-            cwd=str(workspace_root),
-            text=True,
-            capture_output=True,
+        _run_checked(
+            [str(venv_python), "-m", "pip", "cache", "purge"],
+            cwd=workspace_root,
+            err_msg="Failed to clear pip's wheel cache.",
         )
-        _handle_process_output(p, err_msg=(
-            "Failed to clear pip's wheel cache.\n"
-            f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-            f"{p.stdout}\n{p.stderr}"
-        ))
 
-    # Install build constraints to virtualenv before creating wheelhouse
     if build_constraints_path.is_file():
-        _logger.info(f"Installing build constraints to virtualenv: {build_constraints_path}")
-        cmd = [
-            "uv", "pip", "install", "-p", str(venv_python),
-            "-U", "-r", str(build_constraints_path),
-        ]
-        p = subprocess.run(
-            cmd,
-            cwd=str(workspace_root),
-            text=True,
-            capture_output=True,
+        _logger.info("Installing build constraints to virtualenv: %s", build_constraints_path)
+        _run_checked(
+            ["uv", "pip", "install", "-p", str(venv_python), "-U", "-r", str(build_constraints_path)],
+            cwd=workspace_root,
+            err_msg=f"Failed to install build constraints to virtualenv: {build_constraints_path}",
         )
-        _handle_process_output(p, err_msg=(
-            f"Failed to install build constraints to virtualenv: {build_constraints_path}\n"
-            f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-            f"{p.stdout}\n{p.stderr}"
-        ))
 
-    # Create wheelhouse
     cmd = [
         str(venv_python), "-m", "pip", "wheel",
         "-r", str(requirements_path),
@@ -1508,17 +1497,7 @@ def build_wheelhouse_from_requirements(
         "--no-deps",
     ]
     _logger.info("Creating wheelhouse: %s -> %s", requirements_path, wheelhouse_dir)
-    p = subprocess.run(
-        cmd,
-        cwd=str(workspace_root),
-        text=True,
-        capture_output=True,
-    )
-    _handle_process_output(p, err_msg=(
-        "Failed to create wheelhouse.\n"
-        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-        f"{p.stdout}\n{p.stderr}"
-    ))
+    _run_checked(cmd, cwd=workspace_root, err_msg="Failed to create wheelhouse.")
 
 
 def pip_install_requirements_file(
@@ -1527,15 +1506,12 @@ def pip_install_requirements_file(
         requirements_path: Path,
         wheelhouse_dir: Path,
 ) -> None:
-    """Install a requirements.txt file (via `uv pip`). Optionally (re)build wheelhouse first."""
+    """Install a requirements lock from the local wheelhouse using uv pip sync."""
     if not requirements_path.exists():
         raise Exception(f"Requirements file not found: {requirements_path}")
 
-    if shutil.which("uv") is None:
-        raise Exception("Required command not found in PATH: uv")
-
-    # Installing requirements from wheelhouse (always offline)
-    pip_cmd: list[str] = [
+    _ensure_command("uv")
+    cmd = [
         "uv", "pip", "sync", "-p", str(venv_python),
         "--offline", "--no-index",
         "-f", str(wheelhouse_dir),
@@ -1543,17 +1519,7 @@ def pip_install_requirements_file(
     ]
 
     _logger.info("Installing requirements from wheelhouse: %s", requirements_path)
-    p = subprocess.run(
-        pip_cmd,
-        cwd=str(workspace_root),
-        text=True,
-        capture_output=True,
-    )
-    _handle_process_output(p, err_msg=(
-        "Failed to install requirements from wheelhouse.\n"
-        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-        f"{p.stdout}\n{p.stderr}"
-    ))
+    _run_checked(cmd, cwd=workspace_root, err_msg="Failed to install requirements from wheelhouse.")
 
 
 # -----------------------------
@@ -1854,64 +1820,50 @@ def _format_conf_value(value: Any) -> str:
     return str(value)
 
 
-def _resolve_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
-    if spec.is_local:
-        odoo_path = Path((spec.path or "").strip()).expanduser()
-        if not odoo_path.is_absolute():
-            odoo_path = layout.root / odoo_path
-        try:
-            return odoo_path.resolve()
-        except Exception:
-            return odoo_path.absolute()
+def _resolve_workspace_path(layout: Layout, raw_path: str, fallback: Path) -> Path:
+    path_text = (raw_path or "").strip()
+    if not path_text:
+        return fallback
 
-    return layout.odoo_dir
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = layout.root / path
+    try:
+        return path.resolve()
+    except Exception:
+        return path.absolute()
+
+
+def _validate_existing_dir(path: Path, label: str) -> Path:
+    if not path.exists():
+        raise Exception(f"{label} does not exist: {path}")
+    if not path.is_dir():
+        raise Exception(f"{label} is not a directory: {path}")
+    return path
+
+
+def _resolve_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
+    return _resolve_workspace_path(layout, spec.path or "", layout.odoo_dir)
 
 
 def _validate_local_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
     """Validate a local Odoo path lazily, right before it is used."""
     odoo_path = _resolve_odoo_path(layout, spec)
-
     if not spec.is_local:
         return odoo_path
-
-    if not odoo_path.exists():
-        raise Exception(f"Local Odoo path for [odoo] does not exist: {odoo_path}")
-    if not odoo_path.is_dir():
-        raise Exception(f"Local Odoo path for [odoo] is not a directory: {odoo_path}")
-
-    return odoo_path
+    return _validate_existing_dir(odoo_path, "Local Odoo path for [odoo]")
 
 
 def _resolve_addon_path(layout: Layout, addon_name: str, spec: AddonSpec) -> Path:
-    if spec.is_local:
-        addon_path = Path((spec.path or "").strip()).expanduser()
-        if not addon_path.is_absolute():
-            addon_path = layout.root / addon_path
-        try:
-            return addon_path.resolve()
-        except Exception:
-            return addon_path.absolute()
-
-    return layout.addons_root / addon_name
+    return _resolve_workspace_path(layout, spec.path or "", layout.addons_root / addon_name)
 
 
 def _validate_local_addon_path(layout: Layout, addon_name: str, spec: AddonSpec) -> Path:
     """Validate one local addon path lazily, right before that addon is processed."""
     addon_path = _resolve_addon_path(layout, addon_name, spec)
-
     if not spec.is_local:
         return addon_path
-
-    if not addon_path.exists():
-        raise Exception(
-            f"Local addon path for [addons.{addon_name}] does not exist: {addon_path}"
-        )
-    if not addon_path.is_dir():
-        raise Exception(
-            f"Local addon path for [addons.{addon_name}] is not a directory: {addon_path}"
-        )
-
-    return addon_path
+    return _validate_existing_dir(addon_path, f"Local addon path for [addons.{addon_name}]")
 
 
 def render_odoo_conf(cfg: Dict[str, Any], layout: Layout, addon_paths: list[Path]) -> str:
@@ -1970,7 +1922,7 @@ def _script_odoo_bin_bat(layout: Layout) -> str:
         return str(odoo_bin)
 
 
-def write_run_sh(layout: Layout) -> None:
+def _write_odoo_command_sh(layout: Layout, name: str, info_message: str, command: str) -> None:
     content = """#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1996,18 +1948,66 @@ if [[ ! -f "${ODOO_BIN}" ]]; then
   exit 1
 fi
 
-echo "INFO: Starting Odoo server using config ${CONF}. Passing through any extra arguments."
-exec "${PY}" "${ODOO_BIN}" -c "${CONF}" "$@"
+echo "INFO: __INFO_MESSAGE__"
+__COMMAND__
 """
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("run", "sh").write_text(content, encoding="utf-8")
+    content = (
+        content
+        .replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
+        .replace("__INFO_MESSAGE__", info_message)
+        .replace("__COMMAND__", command)
+    )
+    _write_script(layout, name, "sh", content)
 
-    try:
-        mode = layout.script("run", "sh").stat().st_mode
-        layout.script("run", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+
+def _write_odoo_command_bat(layout: Layout, name: str, info_message: str, command: str) -> None:
+    content = r"""@echo off
+setlocal enabledelayedexpansion
+
+REM Resolve ROOT directory (parent of this script directory)
+set SCRIPT_DIR=%~dp0
+if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
+for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
+
+set VENV_DIR=%ROOT_DIR%\venv
+set PY=%VENV_DIR%\Scripts\python.exe
+set ODOO_BIN=__ODOO_BIN__
+set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
+
+if not exist "%VENV_DIR%" (
+  echo ERROR: required venv directory not found at %VENV_DIR%
+  exit /b 1
+)
+if not exist "%PY%" (
+  echo ERROR: venv python not found at %PY%
+  exit /b 1
+)
+if not exist "%ODOO_BIN%" (
+  echo ERROR: odoo-bin not found at %ODOO_BIN%
+  exit /b 1
+)
+
+echo INFO: __INFO_MESSAGE__
+__COMMAND__
+
+endlocal
+"""
+    content = (
+        content
+        .replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
+        .replace("__INFO_MESSAGE__", info_message)
+        .replace("__COMMAND__", command)
+    )
+    _write_script(layout, name, "bat", content)
+
+
+def write_run_sh(layout: Layout) -> None:
+    _write_odoo_command_sh(
+        layout,
+        "run",
+        "Starting Odoo server using config ${CONF}. Passing through any extra arguments.",
+        'exec "${PY}" "${ODOO_BIN}" -c "${CONF}" "$@"',
+    )
 
 
 def write_instance_sh(layout: Layout) -> None:
@@ -2143,205 +2143,52 @@ case "${cmd}" in
 esac
 """
     content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("instance", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("instance", "sh").stat().st_mode
-        layout.script("instance", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_script(layout, "instance", "sh", content)
 
 
 def write_run_bat(layout: Layout) -> None:
-    content = r"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=__ODOO_BIN__
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%PY%" (
-  echo ERROR: venv python not found at %PY%
-  exit /b 1
-)
-if not exist "%ODOO_BIN%" (
-  echo ERROR: odoo-bin not found at %ODOO_BIN%
-  exit /b 1
-)
-
-echo INFO: Starting Odoo server using config %CONF%. Passing through any extra arguments.
-"%PY%" "%ODOO_BIN%" -c "%CONF%" %*
-
-endlocal
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("run", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_odoo_command_bat(
+        layout,
+        "run",
+        "Starting Odoo server using config %CONF%. Passing through any extra arguments.",
+        '"%PY%" "%ODOO_BIN%" -c "%CONF%" %*',
+    )
 
 
 def write_test_sh(layout: Layout) -> None:
-    content = """#!/usr/bin/env bash
-set -euo pipefail
-
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-VENV_DIR="${ROOT_DIR}/venv"
-PY="${VENV_DIR}/bin/python"
-ODOO_BIN="__ODOO_BIN__"
-CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
-
-if [[ ! -d "${VENV_DIR}" ]]; then
-  echo "ERROR: required venv directory not found at ${VENV_DIR}" >&2
-  exit 1
-fi
-if [[ ! -x "${PY}" ]]; then
-  echo "ERROR: venv python not found/executable at ${PY}" >&2
-  exit 1
-fi
-if [[ ! -f "${ODOO_BIN}" ]]; then
-  echo "ERROR: odoo-bin not found at ${ODOO_BIN}" >&2
-  exit 1
-fi
-
-echo "INFO: Running Odoo tests using config ${CONF}. Passing through any extra arguments."
-exec "${PY}" "${ODOO_BIN}" -c "${CONF}" --test-enable --stop-after-init "$@"
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("test", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("test", "sh").stat().st_mode
-        layout.script("test", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_odoo_command_sh(
+        layout,
+        "test",
+        "Running Odoo tests using config ${CONF}. Passing through any extra arguments.",
+        'exec "${PY}" "${ODOO_BIN}" -c "${CONF}" --test-enable --stop-after-init "$@"',
+    )
 
 
 def write_test_bat(layout: Layout) -> None:
-    content = r"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=__ODOO_BIN__
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%PY%" (
-  echo ERROR: venv python not found at %PY%
-  exit /b 1
-)
-if not exist "%ODOO_BIN%" (
-  echo ERROR: odoo-bin not found at %ODOO_BIN%
-  exit /b 1
-)
-
-echo INFO: Running Odoo tests using config %CONF%. Passing through any extra arguments.
-"%PY%" "%ODOO_BIN%" -c "%CONF%" --test-enable --stop-after-init %*
-
-endlocal
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("test", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_odoo_command_bat(
+        layout,
+        "test",
+        "Running Odoo tests using config %CONF%. Passing through any extra arguments.",
+        '"%PY%" "%ODOO_BIN%" -c "%CONF%" --test-enable --stop-after-init %*',
+    )
 
 
 def write_shell_sh(layout: Layout) -> None:
-    content = """#!/usr/bin/env bash
-set -euo pipefail
-
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-VENV_DIR="${ROOT_DIR}/venv"
-PY="${VENV_DIR}/bin/python"
-ODOO_BIN="__ODOO_BIN__"
-CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
-
-if [[ ! -d "${VENV_DIR}" ]]; then
-  echo "ERROR: required venv directory not found at ${VENV_DIR}" >&2
-  exit 1
-fi
-if [[ ! -x "${PY}" ]]; then
-  echo "ERROR: venv python not found/executable at ${PY}" >&2
-  exit 1
-fi
-if [[ ! -f "${ODOO_BIN}" ]]; then
-  echo "ERROR: odoo-bin not found at ${ODOO_BIN}" >&2
-  exit 1
-fi
-
-echo "INFO: Starting Odoo shell using config ${CONF}. Passing through any extra arguments."
-exec "${PY}" "${ODOO_BIN}" shell -c "${CONF}" "$@"
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("shell", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("shell", "sh").stat().st_mode
-        layout.script("shell", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_odoo_command_sh(
+        layout,
+        "shell",
+        "Starting Odoo shell using config ${CONF}. Passing through any extra arguments.",
+        'exec "${PY}" "${ODOO_BIN}" shell -c "${CONF}" "$@"',
+    )
 
 
 def write_shell_bat(layout: Layout) -> None:
-    content = r"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=__ODOO_BIN__
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%PY%" (
-  echo ERROR: venv python not found at %PY%
-  exit /b 1
-)
-if not exist "%ODOO_BIN%" (
-  echo ERROR: odoo-bin not found at %ODOO_BIN%
-  exit /b 1
-)
-
-echo INFO: Starting Odoo shell using config %CONF%. Passing through any extra arguments.
-"%PY%" "%ODOO_BIN%" shell -c "%CONF%" %*
-
-endlocal
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("shell", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_odoo_command_bat(
+        layout,
+        "shell",
+        "Starting Odoo shell using config %CONF%. Passing through any extra arguments.",
+        '"%PY%" "%ODOO_BIN%" shell -c "%CONF%" %*',
+    )
 
 
 def write_backup_sh(layout: Layout, db_name: str) -> None:
@@ -2382,14 +2229,7 @@ fi
 echo "INFO: Creating new backup '${{FULL_BACKUP_PATH}}' using config ${{CONF}}. Passing through any extra arguments."
 exec "${{BACKUP_BIN}}" -c "${{CONF}}" --format zip "{db_name}" "${{FULL_BACKUP_PATH}}" --log-level debug "$@"
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("backup", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("backup", "sh").stat().st_mode
-        layout.script("backup", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_script(layout, "backup", "sh", content)
 
 
 def write_backup_bat(layout: Layout, db_name: str) -> None:
@@ -2435,8 +2275,7 @@ echo INFO: Creating new backup "%FULL_BACKUP_PATH%" using config %CONF%. Passing
 
 endlocal
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("backup", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_script(layout, "backup", "bat", content)
 
 
 def write_restore_sh(layout: Layout, db_name: str) -> None:
@@ -2473,14 +2312,7 @@ fi
 echo "INFO: Restoring Odoo database '{db_name}' using config ${{CONF}}. Passing through any extra arguments."
 exec "${{RESTORE_BIN}}" -c "${{CONF}}" --copy --neutralize --log-level debug "{db_name}" "$@"
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("restore", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("restore", "sh").stat().st_mode
-        layout.script("restore", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_script(layout, "restore", "sh", content)
 
 
 def write_restore_bat(layout: Layout, db_name: str) -> None:
@@ -2520,8 +2352,7 @@ echo INFO: Restoring Odoo database "{db_name}" using config %CONF%. Passing thro
 
 endlocal
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("restore", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_script(layout, "restore", "bat", content)
 
 
 def write_update_sh(layout: Layout) -> None:
@@ -2552,14 +2383,7 @@ fi
 echo "INFO: Updating Odoo addons using config ${{CONF}}. Passing through any extra arguments."
 exec "${{UPDATE_BIN}}" -c "${{CONF}}" --log-level debug "$@"
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("update", "sh").write_text(content, encoding="utf-8")
-
-    try:
-        mode = layout.script("update", "sh").stat().st_mode
-        layout.script("update", "sh").chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
+    _write_script(layout, "update", "sh", content)
 
 
 def write_update_bat(layout: Layout) -> None:
@@ -2593,8 +2417,7 @@ echo INFO: Updating Odoo addons using config %CONF%. Passing through any extra a
 
 endlocal
 """
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.script("update", "bat").write_text(content.replace("\n", "\r\n"), encoding="utf-8")
+    _write_script(layout, "update", "bat", content)
 
 
 # -----------------------------
@@ -2717,47 +2540,10 @@ def compile_docker_addons_requirements_lock(
         requirements_dir: Path,
         build_constraints_path: Path,
 ) -> Path:
-    """Compile an addon-only lock file for the generated Docker image.
-
-    The Docker image is based on the official Odoo image, so Odoo core requirements
-    are intentionally excluded here. The lock contains:
-      - odt-env Docker default requirements
-      - requirements.txt files from configured addon sources
-      - explicit [virtualenv].requirements entries from the project INI
-    """
-    if shutil.which("uv") is None:
-        raise Exception("Required command not found in PATH: uv")
-
+    """Compile an addon-only requirements lock for the generated Docker image."""
+    _ensure_command("uv")
     requirements_dir.mkdir(parents=True, exist_ok=True)
     in_path = requirements_dir / "addons-requirements.in.txt"
-
-    ignore_set: set[str] = set()
-    for spec in requirements_ignore or []:
-        spec = spec.strip()
-        if not spec:
-            continue
-        name = _extract_req_name_from_spec(spec)
-        if name:
-            ignore_set.add(name)
-        else:
-            ignore_set.add(_canonicalize_project_name(spec))
-
-    req_lines: list[str] = []
-    for req_path in requirement_files:
-        if not req_path.exists():
-            continue
-
-        try:
-            rel = req_path.resolve().relative_to(workspace_root.resolve())
-            rel_label = rel.as_posix()
-        except Exception:
-            rel_label = str(req_path)
-
-        req_lines.append(f"# --- from {rel_label} ---")
-        visited = {req_path.resolve()}
-        filtered_lines = _filter_requirements_file(req_path.resolve(), ignore_set, visited=visited)
-        req_lines.extend(filtered_lines)
-        req_lines.append("")
 
     lines: list[str] = [
         "# This file is generated by odt-env (DO NOT EDIT).",
@@ -2765,30 +2551,37 @@ def compile_docker_addons_requirements_lock(
         "# Odoo core requirements are intentionally excluded for official Odoo Docker images.",
         "",
     ]
-
-    if _DEFAULT_DOCKER_REQUIREMENTS:
-        lines.append("# --- odt-env Docker default requirements ---")
-        lines.extend(_DEFAULT_DOCKER_REQUIREMENTS)
-        lines.append("")
-
-    if explicit_requirements:
-        lines.append("# --- explicit requirements from [virtualenv].requirements ---")
-        lines.extend(explicit_requirements)
-        lines.append("")
-
-    lines.extend(req_lines)
-
-    input_text = "\n".join(lines).rstrip("\n") + "\n"
-    in_path.write_text(input_text, encoding="utf-8")
+    _add_requirements_section(lines, "# --- odt-env Docker default requirements ---", _DEFAULT_DOCKER_REQUIREMENTS)
+    _add_requirements_section(
+        lines,
+        "# --- explicit requirements from [virtualenv].requirements ---",
+        explicit_requirements,
+    )
+    lines.extend(
+        _collect_requirement_file_lines(
+            workspace_root,
+            requirement_files,
+            _requirements_ignore_set(requirements_ignore),
+        )
+    )
+    _write_requirements_input(in_path, lines)
 
     if not _has_active_requirements(lines):
-        output_lock_path.write_text(
+        _write_text_file(
+            output_lock_path,
             "# This file is generated by odt-env (DO NOT EDIT).\n"
             "# No addon Python requirements were collected.\n",
-            encoding="utf-8",
         )
         _logger.info("No Docker addon requirements collected; wrote empty lock marker: %s", output_lock_path)
         return output_lock_path
+
+    cmd = [
+        "uv", "pip", "compile",
+        "--python-version", python_version,
+        str(in_path),
+        "-o", str(output_lock_path),
+    ]
+    _add_build_constraints(cmd, build_constraints_path)
 
     _logger.info(
         "Compiling Docker addon lock file with uv for Python %s: %s -> %s",
@@ -2796,32 +2589,15 @@ def compile_docker_addons_requirements_lock(
         in_path,
         output_lock_path,
     )
-    cmd = [
-        "uv", "pip", "compile",
-        "--python-version", python_version,
-        str(in_path),
-        "-o", str(output_lock_path),
-    ]
-
-    if build_constraints_path.is_file():
-        cmd.extend([
-            "--build-constraints", str(build_constraints_path),
-        ])
-
-    p = subprocess.run(
+    _run_checked(
         cmd,
-        cwd=str(workspace_root),
-        text=True,
-        capture_output=True,
+        cwd=workspace_root,
+        err_msg=(
+            "Failed to compile Docker addon requirements lock file.\n"
+            f"Input: {in_path}\n"
+            f"Output: {output_lock_path}"
+        ),
     )
-    _handle_process_output(p, err_msg=(
-        "Failed to compile Docker addon requirements lock file.\n"
-        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-        f"Input: {in_path}\n"
-        f"Output: {output_lock_path}\n"
-        f"{p.stdout}\n{p.stderr}"
-    ))
-
     return output_lock_path
 
 
@@ -3218,8 +2994,7 @@ def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str 
             f"Docker addon staging directory not found: {addons_dir}. "
             "Generate Docker artifacts before building the image."
         )
-    if shutil.which("docker") is None:
-        raise Exception("Required command not found in PATH: docker")
+    _ensure_command("docker")
 
     cmd = [
         "docker", "build",
@@ -3228,17 +3003,7 @@ def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str 
         str(layout.docker_dir),
     ]
     _logger.info("Building Docker image: %s", image_name)
-    p = subprocess.run(
-        cmd,
-        cwd=str(layout.root),
-        text=True,
-        capture_output=True,
-    )
-    _handle_process_output(p, err_msg=(
-        "Failed to build Docker image.\n"
-        f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-        f"{p.stdout}\n{p.stderr}"
-    ))
+    _run_checked(cmd, cwd=layout.root, err_msg="Failed to build Docker image.")
     return image_name
 
 
@@ -3595,17 +3360,11 @@ def _sync_project_impl(
                 # Legacy editable install of odoo
                 "--config-settings", "editable_mode=compat",
             ]
-            p = subprocess.run(
+            _run_checked(
                 cmd,
-                cwd=str(layout.root),
-                text=True,
-                capture_output=True,
+                cwd=layout.root,
+                err_msg="Failed to install Odoo in editable mode.",
             )
-            _handle_process_output(p, err_msg=(
-                "Failed to install Odoo in editable mode.\n"
-                f"Command: {' '.join(p.args if isinstance(p.args, list) else [str(p.args)])}\n"
-                f"{p.stdout}\n{p.stderr}"
-            ))
 
     docker_artifacts: Optional[dict[str, Any]] = None
     docker_image_built: Optional[str] = None

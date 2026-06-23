@@ -105,14 +105,6 @@ After provisioning, the workspace has the following structure:
 ROOT/
 ├── odoo-project.ini      # project definition
 ├── compose.yml           # generated sample Docker Compose file when --build-docker-image is used
-├── .odt-env/             # provisioning metadata and project snapshots
-│   ├── last-provisioning.json
-│   ├── last-source-project.ini
-│   ├── last-resolved-project.ini
-│   └── history/
-│       ├── <run_id>-provisioning.json
-│       ├── <run_id>.source-project.ini
-│       └── <run_id>.resolved-project.ini
 ├── odoo/                 # Git-managed Odoo source repository
 ├── odoo-addons/          # addon repositories from [addons.<name>] sections
 ├── odoo-backups/         # backups created by helper scripts
@@ -130,6 +122,14 @@ ROOT/
 │   ├── update.sh         # update modules, auto-detecting addons to update using file-content hashes stored in the DB
 ├── venv/                 # Python virtual environment
 └── wheelhouse/           # wheelhouse for offline installs
+├── .odt-env/             # provisioning metadata and project snapshots
+│   ├── last-provisioning.json
+│   ├── last-source-project.ini
+│   ├── last-resolved-project.ini
+│   └── history/
+│       ├── <run_id>-provisioning.json
+│       ├── <run_id>.source-project.ini
+│       └── <run_id>.resolved-project.ini
 ```
 
 #### 1.3. Start Odoo
