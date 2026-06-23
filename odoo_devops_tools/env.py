@@ -3971,7 +3971,7 @@ def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    epilog = """If no options are specified, odt-env only regenerates configs and helper scripts.
+    epilog = """If no arguments are specified, odt-env prints help and exits.
 
 Examples:
   odt-env --root ./odoo18-workspace --sync-all --create-venv
@@ -4182,6 +4182,10 @@ def main() -> None:
     )
 
     parser = build_parser()
+
+    if len(sys.argv) == 1:
+        parser.print_help()
+        return
 
     args = parser.parse_args()
 

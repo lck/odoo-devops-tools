@@ -597,7 +597,7 @@ docker compose up -d --force-recreate odoo
 odt-env [OPTIONS] [INI]
 ```
 
-If no options are specified, `odt-env` only regenerates configuration files and helper scripts.
+If no arguments are specified, `odt-env` prints help and exits.
 
 ### Positional arguments
 
