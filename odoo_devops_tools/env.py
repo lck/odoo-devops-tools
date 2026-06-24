@@ -4207,19 +4207,23 @@ def build_parser() -> argparse.ArgumentParser:
     epilog = """If no arguments are specified, odt-env prints help and exits.
 
 Examples:
-  odt-env --root ./odoo18-workspace --sync-all --create-venv
-  odt-env /path/to/odoo-project.ini --sync-all --create-venv
-  odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /full/path/to/workspace-root
-  odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
-  odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
-  odt-env https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini --sync-all --create-venv
-  odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
-  odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
-  odt-env --root ./odoo19-workspace --sync-all --create-venv --set odoo:version=19.0
-  odt-env /path/to/odoo-project.ini --sync-all --create-venv -e odoo_version=19.0
-  odt-env /path/to/odoo-project.ini --sync-all --create-venv --set odoo:version=19.0
-  odt-env --show-last-run
-  odt-env --root /full/path/to/workspace-root --show-last-run
+
+  Creating or syncing a workspace:
+    odt-env --root ./odoo18-workspace --sync-all --create-venv
+    odt-env /path/to/odoo-project.ini --sync-all --create-venv
+
+  Using multiple project files:
+    odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
+
+  Using a remote project file:
+    odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
+
+  Building a Docker image:
+    odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
+
+  Additional commands:
+    odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
+    odt-env --show-last-run
 """
 
     parser = argparse.ArgumentParser(
