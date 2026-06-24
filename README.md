@@ -594,19 +594,22 @@ docker compose up -d --force-recreate odoo
 ### Syntax
 
 ```text
-odt-env [OPTIONS] [INI]
+odt-env [INI] [OPTIONS]
 ```
 
 If no arguments are specified, `odt-env` prints help and exits.
 
 ### Positional arguments
 
-- `INI` — optional project file. If omitted, `odt-env` uses `ROOT/odoo-project.ini`; if that file is missing, it creates it from the bundled default template. `INI` can also be:
+- `INI` — optional project file. If omitted and no `-i/--include` is provided, `odt-env` uses `ROOT/odoo-project.ini`; if that file is missing, it creates it from the bundled default template. `INI` can also be:
   - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
   - a remote INI loaded from a Git repository, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
   - a remote INI loaded from a URL, for example:
     - `https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini`
     - `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
+
+When a remote positional `INI` is used, it is materialized into the workspace as `ROOT/odoo-project.ini`.
+The original source and the resolved effective project file are kept under `ROOT/.odt-env/`.
 
 Git-backed remote INI files use this syntax:
 
@@ -616,9 +619,22 @@ git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
 
 The `?ref=REF` part is optional and can point to a branch, tag, or commit.
 
+### INI includes
+
+Use `-i INI` / `--include INI` to include additional project INI layers. The option can be repeated.
+
+```bash
+odt-env base-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
+```
+
+INI layers are processed from left to right. Later layers override earlier layers.
+Validation is performed only after all layers have been merged.
+The merged project file is saved as `ROOT/odoo-project.ini`.
+
 ### Paths and outputs
 
-- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a remote INI.
+- `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a remote INI. In include mode, the default is the directory of the first local source, or the current working directory when the first source is remote.
+- `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated
 - `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — override a value that is already present in the INI file; can be repeated. New options are allowed only in the `[config]` section.
 - `--no-configs` — do not generate config files
@@ -672,8 +688,9 @@ The following sections are supported:
 
 ### General rules
 
-- The project file can have any filename when passed explicitly. When `INI` is omitted, `odt-env` uses `ROOT/odoo-project.ini`.
+- The project file can have any filename when passed explicitly. When `INI` is omitted, `odt-env` uses `ROOT/odoo-project.ini`. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
+- Multiple INI layers can be composed with `-i/--include`. Later layers override earlier layers; multi-line values are replaced as whole option values, not appended.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
 - Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
 - Values that already exist in the INI file can be overridden directly with `-S section:key=value` / `--set section:key=value`.

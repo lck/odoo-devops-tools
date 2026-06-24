@@ -389,6 +389,20 @@ def _ini_for_effective_file(cp: configparser.ConfigParser) -> str:
     return _render_resolved_ini(cp, redact=False)
 
 
+def _ini_for_merged_source_file(cp: configparser.ConfigParser) -> str:
+    """Return merged INI content without resolving interpolation placeholders."""
+    rendered = configparser.ConfigParser(interpolation=None)
+
+    for section in cp.sections():
+        rendered.add_section(section)
+        for option in cp._sections.get(section, {}).keys():
+            rendered.set(section, option, cp.get(section, option, raw=True))
+
+    buf = io.StringIO()
+    rendered.write(buf)
+    return buf.getvalue()
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -3793,7 +3807,11 @@ def _clone_git_ini_repo(source: GitIniSource, dest: Path) -> None:
     _run(["git", "clone", "--depth", "1", source.repo, str(dest)])
 
 
-def _copy_git_ini_to_root(source: GitIniSource, root: Path) -> Path:
+def _copy_git_ini_to_root(
+        source: GitIniSource,
+        root: Path,
+        target_name: str = _DEFAULT_PROJECT_INI_NAME,
+) -> Path:
     """Fetch a Git-backed remote INI, copy it into ``root``, and return that local copy."""
     with tempfile.TemporaryDirectory(prefix="odt-env-git-ini-") as tmp_dir:
         repo_dir = Path(tmp_dir) / "repo"
@@ -3811,7 +3829,7 @@ def _copy_git_ini_to_root(source: GitIniSource, root: Path) -> Path:
                 f"{source.path.as_posix()}"
             )
 
-        copied_ini_path = root / source.path.name
+        copied_ini_path = root / target_name
         try:
             shutil.copy2(source_ini_path, copied_ini_path)
         except OSError as e:
@@ -3900,7 +3918,12 @@ def _safe_url_ini_filename(source_url: str) -> str:
     return safe_name or "odoo-project.ini"
 
 
-def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
+def _copy_url_ini_to_root(
+        source: UrlIniSource,
+        root: Path,
+        target_name: str = _DEFAULT_PROJECT_INI_NAME,
+        require_odoo_section: bool = True,
+) -> Path:
     """Download a URL-backed remote INI into ``root`` and return that local copy."""
     request = Request(
         source.url,
@@ -3945,13 +3968,13 @@ def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
         probe.read_string(text)
     except configparser.Error as e:
         raise Exception(f"Downloaded URL INI is not a valid INI file: {source.url} ({e})") from e
-    if not probe.has_section("odoo"):
+    if require_odoo_section and not probe.has_section("odoo"):
         raise Exception(f"Downloaded URL INI is missing required [odoo] section: {source.url}")
 
     if content_type:
         _logger.info("Downloaded URL INI content type: %s", content_type)
 
-    copied_ini_path = root / _safe_url_ini_filename(source.url)
+    copied_ini_path = root / target_name
     try:
         copied_ini_path.write_text(text, encoding="utf-8")
     except OSError as e:
@@ -3970,6 +3993,216 @@ def _copy_url_ini_to_root(source: UrlIniSource, root: Path) -> Path:
     return copied_ini_path
 
 
+def _resolve_local_ini_path(parser: argparse.ArgumentParser, raw_ini: str) -> Path:
+    """Resolve and validate a local INI path supplied on the command line."""
+    ini_path = Path(raw_ini).expanduser().resolve()
+    if not ini_path.exists():
+        parser.error(f'INI file does not exist: {ini_path}')
+    if not ini_path.is_file():
+        parser.error(f'INI path is not a file: {ini_path}')
+    return ini_path
+
+
+def _parse_remote_ini_sources(parser: argparse.ArgumentParser, raw_ini: str) -> tuple[Optional[GitIniSource], Optional[UrlIniSource]]:
+    """Parse a CLI INI value as a Git or URL source, returning (git, url)."""
+    try:
+        git_ini_source = _parse_git_ini_source(raw_ini)
+        url_ini_source = None if git_ini_source is not None else _parse_url_ini_source(raw_ini)
+    except Exception as e:
+        parser.error(str(e))
+    return git_ini_source, url_ini_source
+
+
+def _materialize_cli_ini_source(
+        parser: argparse.ArgumentParser,
+        raw_ini: str,
+        destination_root: Path,
+        *,
+        require_odoo_section: bool = True,
+        target_name: str = _DEFAULT_PROJECT_INI_NAME,
+) -> Path:
+    """Materialize a local, Git-backed, or URL-backed CLI INI source as a local file."""
+    raw_value = (raw_ini or "").strip()
+    if not raw_value:
+        parser.error("Empty INI source.")
+
+    git_ini_source, url_ini_source = _parse_remote_ini_sources(parser, raw_value)
+    if git_ini_source is not None:
+        destination_root.mkdir(parents=True, exist_ok=True)
+        return _copy_git_ini_to_root(git_ini_source, destination_root, target_name=target_name)
+    if url_ini_source is not None:
+        destination_root.mkdir(parents=True, exist_ok=True)
+        return _copy_url_ini_to_root(
+            url_ini_source,
+            destination_root,
+            target_name=target_name,
+            require_odoo_section=require_odoo_section,
+        )
+    return _resolve_local_ini_path(parser, raw_value)
+
+
+def _source_kind_for_cli_ini(parser: argparse.ArgumentParser, raw_ini: str) -> str:
+    git_ini_source, url_ini_source = _parse_remote_ini_sources(parser, raw_ini)
+    if git_ini_source is not None:
+        return "Git"
+    if url_ini_source is not None:
+        return "URL"
+    return "local"
+
+
+def _workspace_root_for_explicit_sources(
+        parser: argparse.ArgumentParser,
+        raw_sources: list[str],
+        raw_root: Optional[str],
+) -> Optional[Path]:
+    """Resolve ROOT for an explicit positional INI and/or -i/--include stack."""
+    if raw_root:
+        return _validate_root_override(parser, raw_root)
+
+    if not raw_sources:
+        return None
+
+    first_source = raw_sources[0]
+    source_kind = _source_kind_for_cli_ini(parser, first_source)
+    if source_kind == "local":
+        first_path = _resolve_local_ini_path(parser, first_source)
+        root = first_path.parent.resolve()
+        _logger.info('Workspace ROOT default (first local INI directory): %s', root)
+        return root
+
+    try:
+        cwd = Path.cwd()
+    except OSError as e:
+        parser.error(f'Failed to resolve current working directory for {source_kind} INI ROOT: {e}')
+
+    try:
+        root = cwd.resolve()
+    except Exception:
+        root = cwd.absolute()
+
+    if not root.is_dir():
+        parser.error(f'Current working directory for {source_kind} INI ROOT is not a directory: {root}')
+
+    _logger.info(
+        'Workspace ROOT default for %s INI (current working directory): %s',
+        source_kind,
+        root,
+    )
+    return root
+
+
+def _read_merged_ini_layers(layer_paths: list[Path]) -> configparser.ConfigParser:
+    """Read INI layers from left to right; later layers override earlier layers."""
+    if not layer_paths:
+        raise Exception("At least one INI layer is required.")
+
+    cp = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    try:
+        read_ok = cp.read(layer_paths, encoding="utf-8")
+    except configparser.Error as e:
+        raise Exception(f"Failed to read merged INI layers: {e}") from e
+
+    read_ok_paths = set()
+    for filename in read_ok:
+        try:
+            read_ok_paths.add(Path(filename).resolve())
+        except Exception:
+            read_ok_paths.add(Path(filename).absolute())
+
+    missing = []
+    for path in layer_paths:
+        try:
+            resolved_path = path.resolve()
+        except Exception:
+            resolved_path = path.absolute()
+        if resolved_path not in read_ok_paths:
+            missing.append(str(path))
+
+    if missing:
+        raise Exception(f"Failed to read INI layer(s): {', '.join(missing)}")
+
+    return cp
+
+
+def _merge_ini_layers_to_workspace_ini(layer_paths: list[Path], output_path: Path) -> Path:
+    """Merge INI layers and write the merged project file into the workspace root."""
+    cp = _read_merged_ini_layers(layer_paths)
+    merged_ini = _ini_for_merged_source_file(cp)
+    _write_text_file(
+        output_path,
+        merged_ini,
+        private=True,
+        atomic=True,
+    )
+    _logger.info(
+        "Merged %s INI layer(s) into workspace project file: %s",
+        len(layer_paths),
+        output_path,
+    )
+    return output_path
+
+
+def _safe_source_copy_name(index: int, source_path: Path) -> str:
+    raw_name = source_path.name or "project.ini"
+    safe_name = raw_name.replace("/", "_").replace("\\", "_")
+    return f"{index:02d}-{safe_name or 'project.ini'}"
+
+
+def _save_ini_layer_source_copies(root: Path, layer_paths: list[Path]) -> Optional[Path]:
+    """Keep individual source INI layers under ROOT/.odt-env for audit/debugging."""
+    if not layer_paths:
+        return None
+
+    source_dir = root / ".odt-env" / "last-source-project.d"
+    if source_dir.exists():
+        _rmtree(source_dir)
+    source_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, source_path in enumerate(layer_paths, start=1):
+        target = source_dir / _safe_source_copy_name(index, source_path)
+        shutil.copy2(source_path, target)
+        _chmod_private(target)
+
+    _logger.info("Saved INI layer source copies: %s", source_dir)
+    return source_dir
+
+
+def _prepare_included_project_ini(
+        parser: argparse.ArgumentParser,
+        raw_sources: list[str],
+        root: Path,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        config_defaults: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Materialize and merge positional INI + -i/--include layers into ROOT/odoo-project.ini."""
+    with tempfile.TemporaryDirectory(prefix="odt-env-ini-layers-") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        layer_paths: list[Path] = []
+
+        for index, raw_source in enumerate(raw_sources, start=1):
+            layer_root = tmp_root / f"layer-{index:02d}"
+            layer_path = _materialize_cli_ini_source(
+                parser,
+                raw_source,
+                layer_root,
+                require_odoo_section=False,
+                target_name=f"{index:02d}-{_DEFAULT_PROJECT_INI_NAME}",
+            )
+            layer_paths.append(layer_path)
+
+        output_path = root / _DEFAULT_PROJECT_INI_NAME
+        _save_ini_layer_source_copies(root, layer_paths)
+        _merge_ini_layers_to_workspace_ini(layer_paths, output_path)
+        _save_effective_ini_copy(
+            output_path,
+            vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
+            config_defaults=config_defaults,
+        )
+        return output_path
+
+
 def build_parser() -> argparse.ArgumentParser:
     epilog = """If no arguments are specified, odt-env prints help and exits.
 
@@ -3977,6 +4210,7 @@ Examples:
   odt-env --root ./odoo18-workspace --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --sync-all --create-venv --root /full/path/to/workspace-root
+  odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
   odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
   odt-env https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-minimal.ini --sync-all --create-venv
   odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
@@ -4009,7 +4243,22 @@ Examples:
         help=(
             "Optional local path to odoo-project.ini, Git-backed remote INI "
             "git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-            "If omitted, odt-env uses ROOT/odoo-project.ini, creating it from the bundled default template when missing."
+            "If omitted and no -i/--include is provided, odt-env uses ROOT/odoo-project.ini, "
+            "creating it from the bundled default template when missing."
+        ),
+    )
+
+    parser.add_argument(
+        "-i",
+        "--include",
+        dest="include_inis",
+        action="append",
+        default=[],
+        metavar="INI",
+        help=(
+            "Include an additional project INI layer. Can be passed multiple times; "
+            "layers are processed in CLI order and later layers override earlier layers. "
+            "When a positional INI is also provided, it is used as the base layer before includes."
         ),
     )
 
@@ -4019,7 +4268,8 @@ Examples:
         default=None,
         help=(
             "Override workspace ROOT directory. By default, local INI uses its containing directory; "
-            "Remote INI sources use the current working directory. "
+            "remote INI sources use the current working directory. In include mode, the default is the "
+            "directory of the first local source, or the current working directory when the first source is remote. "
             "Explicit ROOT is created automatically if needed, except for --show-last-run, which is read-only."
         ),
     )
@@ -4231,7 +4481,10 @@ def main() -> None:
         _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
 
     root_override: Optional[Path] = None
-    implicit_ini = not bool((args.ini or "").strip())
+    include_inis = [item for item in (getattr(args, 'include_inis', []) or []) if (item or "").strip()]
+    has_positional_ini = bool((args.ini or "").strip())
+    raw_explicit_sources = ([args.ini] if has_positional_ini else []) + include_inis
+    implicit_ini = not raw_explicit_sources
 
     if implicit_ini:
         if args.root:
@@ -4274,6 +4527,22 @@ def main() -> None:
                     ini_overrides=ini_overrides,
                     config_defaults=config_defaults,
                 )
+        except Exception as e:
+            _logger.error('%s', e)
+            raise SystemExit(1)
+    elif include_inis:
+        root_override = _workspace_root_for_explicit_sources(parser, raw_explicit_sources, args.root)
+        if root_override is None:
+            parser.error("Internal error: failed to determine workspace ROOT for included INI layers.")
+
+        try:
+            ini_path = _prepare_included_project_ini(
+                parser,
+                raw_explicit_sources,
+                root_override,
+                vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
+            )
         except Exception as e:
             _logger.error('%s', e)
             raise SystemExit(1)
@@ -4323,11 +4592,7 @@ def main() -> None:
                 _logger.error('%s', e)
                 raise SystemExit(1)
         else:
-            ini_path = Path(args.ini).expanduser().resolve()
-            if not ini_path.exists():
-                parser.error(f'INI file does not exist: {ini_path}')
-            if not ini_path.is_file():
-                parser.error(f'INI path is not a file: {ini_path}')
+            ini_path = _resolve_local_ini_path(parser, args.ini)
 
             if args.root:
                 root_override = _validate_root_override(parser, args.root)
