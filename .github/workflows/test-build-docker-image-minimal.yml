@@ -1,0 +1,103 @@
+name: Test Build Docker Image Minimal
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-docker-image-minimal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Create workspace root folder
+        run: mkdir -p odoo-workspace
+
+      - name: Build Docker image from bundled project INI
+        working-directory: ./odoo-workspace
+        run: |
+          uv run odt-env --init-project --build-docker-image --set odoo:version=18.0
+
+      - name: Check generated Docker artifacts and image
+        run: |
+          test -f odoo-workspace/compose.yml
+          test -f odoo-workspace/odoo-docker/Dockerfile
+          test -f odoo-workspace/odoo-docker/.dockerignore
+          test -f odoo-workspace/odoo-docker/configs/odoo.conf
+
+          image="$(awk '
+            $1 == "odoo:" { in_odoo = 1 }
+            in_odoo && $1 == "image:" { print $2; exit }
+          ' odoo-workspace/compose.yml)"
+          test -n "${image}"
+          docker image inspect "${image}" >/dev/null
+
+      - name: Start the PostgreSQL service
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose up -d db
+
+      - name: Init database with fleet addon
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose run --rm odoo \
+            -- \
+            -c /etc/odoo/odoo.conf \
+            -d odoo \
+            -i fleet \
+            --without-demo=all \
+            --stop-after-init
+
+      - name: Verify fleet addon installed
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose exec -T db psql -U odoo -d odoo -c \
+            "SELECT name, state
+             FROM ir_module_module
+             WHERE name IN ('fleet')
+             ORDER BY name;"
+
+          missing="$(docker compose -f compose.yml exec -T db psql -U odoo -d odoo -tAc \
+            "SELECT string_agg(name, ',')
+             FROM ir_module_module
+             WHERE name IN ('fleet')
+               AND state <> 'installed';")"
+
+          test -z "${missing}"
+
+      - name: Stop Docker Compose services
+        if: always()
+        working-directory: ./odoo-workspace
+        run: docker compose down -v --remove-orphans
+
+      - name: Show generated Docker workspace and config
+        if: always()
+        run: |
+          echo "Workspace tree:"
+          find odoo-workspace -maxdepth 3 | sort
+          echo
+          echo "Docker Compose:"
+          cat odoo-workspace/compose.yml || true
+          echo
+          echo "Dockerfile:"
+          cat odoo-workspace/odoo-docker/Dockerfile || true
+          echo
+          echo "Docker Odoo config:"
+          cat odoo-workspace/odoo-docker/configs/odoo.conf || true
+          echo
+          echo "Docker images:"
+          docker images || true
+          echo
+          echo "Docker Compose logs:"
+          cd odoo-workspace && docker compose -f compose.yml logs --no-color || true
