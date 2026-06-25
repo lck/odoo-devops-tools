@@ -4208,17 +4208,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 Examples:
 
-  Initializing a default project file:
-    odt-env --root ./odoo18-workspace --init-project
-
   Creating a workspace:
-    odt-env --root ./odoo18-workspace --init-project --sync-all --create-venv
-    odt-env /path/to/odoo-project.ini --sync-all --create-venv
+    odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \\
+      --set odoo:version=18.0 \\
+      --set config:db_host=127.0.0.1 \\
+      --set config:db_name=odoo \\
+      --set config:db_user=odoo \\
+      --set config:db_password=odoo
 
-  Updating an existing workspace using the default project file:
-    odt-env --root ./existing-workspace --sync-all --create-venv
-    cd /path/to/existing-workspace
-    odt-env --sync-all --create-venv
+  Creating a workspace from an existing project file:
+    odt-env /path/to/odoo-project.ini --sync-all --create-venv
 
   Using multiple project files:
     odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
@@ -4233,7 +4232,7 @@ Examples:
     odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
 
   Inspecting provisioning history:
-    odt-env --show-last-run
+    odt-env /path/to/odoo-project.ini --show-last-run
 """
 
     parser = argparse.ArgumentParser(
@@ -4393,8 +4392,7 @@ Examples:
         "--show-last-run",
         action="store_true",
         help=(
-            "Print ROOT/.odt-env/last-provisioning.json to stdout and exit without provisioning. "
-            "ROOT is --root when provided, otherwise the current working directory."
+            "Print ROOT/.odt-env/last-provisioning.json to stdout and exit without provisioning."
         ),
     )
 
@@ -4451,6 +4449,45 @@ def _show_last_run(root: Path) -> None:
         sys.stdout.write("\n")
 
 
+def _root_for_show_last_run(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Path:
+    """Resolve ROOT for --show-last-run without materializing or parsing project INI sources."""
+    if getattr(args, "include_inis", None):
+        parser.error(
+            "--include/-i cannot be used together with --show-last-run; "
+            "use --root or a local positional INI path."
+        )
+
+    raw_root = getattr(args, "root", None)
+    if raw_root:
+        root_candidate = Path(raw_root).expanduser()
+    else:
+        raw_ini = (getattr(args, "ini", None) or "").strip()
+        if raw_ini:
+            git_ini_source, url_ini_source = _parse_remote_ini_sources(parser, raw_ini)
+            if git_ini_source is not None or url_ini_source is not None:
+                parser.error(
+                    "Remote INI sources cannot be used with --show-last-run; "
+                    "use --root to select the workspace."
+                )
+
+            ini_path = _resolve_local_ini_path(parser, raw_ini)
+            root_candidate = ini_path.parent
+        else:
+            root_candidate = Path.cwd()
+
+    try:
+        root = root_candidate.resolve()
+    except Exception:
+        root = root_candidate.absolute()
+
+    if not root.exists():
+        parser.error(f"ROOT path does not exist: {root}")
+    if not root.is_dir():
+        parser.error(f"ROOT path is not a directory: {root}")
+
+    return root
+
+
 def main() -> None:
     # Standard logging to stdout only.
     logging.basicConfig(
@@ -4471,17 +4508,7 @@ def main() -> None:
         parser.error("--init-project cannot be used together with --show-last-run.")
 
     if bool(getattr(args, 'show_last_run', False)):
-        root_candidate = Path(args.root).expanduser() if args.root else Path.cwd()
-        try:
-            root = root_candidate.resolve()
-        except Exception:
-            root = root_candidate.absolute()
-
-        if not root.exists():
-            parser.error(f"ROOT path does not exist: {root}")
-        if not root.is_dir():
-            parser.error(f"ROOT path is not a directory: {root}")
-
+        root = _root_for_show_last_run(parser, args)
         try:
             _show_last_run(root)
         except Exception as e:
