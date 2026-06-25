@@ -4208,9 +4208,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 Examples:
 
-  Creating or syncing a workspace:
-    odt-env --root ./odoo18-workspace --sync-all --create-venv
+  Initializing a default project file:
+    odt-env --root ./odoo18-workspace --init-project
+
+  Creating a workspace:
+    odt-env --root ./odoo18-workspace --init-project --sync-all --create-venv
     odt-env /path/to/odoo-project.ini --sync-all --create-venv
+
+  Updating an existing workspace using the default project file:
+    odt-env --root ./existing-workspace --sync-all --create-venv
+    cd /path/to/existing-workspace
+    odt-env --sync-all --create-venv
 
   Using multiple project files:
     odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
@@ -4221,8 +4229,10 @@ Examples:
   Building a Docker image:
     odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
 
-  Additional commands:
+  Offline deployment from a prebuilt wheelhouse:
     odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
+
+  Inspecting provisioning history:
     odt-env --show-last-run
 """
 
@@ -4247,8 +4257,9 @@ Examples:
         help=(
             "Optional local path to odoo-project.ini, Git-backed remote INI "
             "git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-            "If omitted and no -i/--include is provided, odt-env uses ROOT/odoo-project.ini, "
-            "creating it from the bundled default template when missing."
+            "If omitted and no -i/--include is provided, odt-env uses existing ROOT/odoo-project.ini. "
+            "If it is missing, odt-env exits with an error; use --init-project to create it "
+            "from the bundled default template."
         ),
     )
 
@@ -4274,7 +4285,18 @@ Examples:
             "Override workspace ROOT directory. By default, local INI uses its containing directory; "
             "remote INI sources use the current working directory. In include mode, the default is the "
             "directory of the first local source, or the current working directory when the first source is remote. "
+            "When INI is omitted, ROOT defaults to the current working directory. "
             "Explicit ROOT is created automatically if needed, except for --show-last-run, which is read-only."
+        ),
+    )
+
+    parser.add_argument(
+        "--init-project",
+        action="store_true",
+        help=(
+            "Create ROOT/odoo-project.ini from the bundled default template if it does not already exist. "
+            "This option is only valid when INI is omitted and no -i/--include is provided. "
+            "Without --init-project, an omitted INI requires an existing ROOT/odoo-project.ini."
         ),
     )
 
@@ -4324,7 +4346,9 @@ Examples:
         "--create-venv-from-wheelhouse",
         action="store_true",
         help=(
-            "Recreate ROOT/venv from existing ROOT/wheelhouse (and all-requirements.lock.txt) and install offline only. "
+            "Offline deployment helper: recreate ROOT/venv from existing ROOT/wheelhouse "
+            "and all-requirements.lock.txt, then install strictly offline. "
+            "Useful after copying a prepared workspace to a target machine without internet access. "
             "Implies --create-venv and skips lock compilation and wheelhouse build."
         ),
     )
@@ -4443,6 +4467,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if bool(getattr(args, 'show_last_run', False)) and bool(getattr(args, 'init_project', False)):
+        parser.error("--init-project cannot be used together with --show-last-run.")
+
     if bool(getattr(args, 'show_last_run', False)):
         root_candidate = Path(args.root).expanduser() if args.root else Path.cwd()
         try:
@@ -4462,6 +4489,7 @@ def main() -> None:
             raise SystemExit(1)
         return
 
+    init_project = bool(getattr(args, 'init_project', False))
     clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
     create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
     reuse_wheelhouse = create_venv_from_wheelhouse
@@ -4490,6 +4518,18 @@ def main() -> None:
     raw_explicit_sources = ([args.ini] if has_positional_ini else []) + include_inis
     implicit_ini = not raw_explicit_sources
 
+    if init_project and not implicit_ini:
+        parser.error("--init-project can only be used when INI is omitted and no -i/--include is provided.")
+
+    provisioning_requested = bool(
+        args.all
+        or args.odoo
+        or args.addons
+        or create_venv
+        or clear_pip_wheel_cache
+        or build_docker_image_requested
+    )
+
     if implicit_ini:
         if args.root:
             root_override = _validate_root_override(parser, args.root)
@@ -4516,8 +4556,23 @@ def main() -> None:
         config_defaults = None if build_docker_image_requested else _IMPLICIT_LOCAL_CONFIG_DEFAULTS
 
         try:
-            created_default_ini = not ini_path.exists()
-            _write_default_project_ini_template(ini_path)
+            created_default_ini = False
+            if init_project:
+                created_default_ini = not ini_path.exists()
+                _write_default_project_ini_template(ini_path)
+                if not created_default_ini:
+                    _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
+            elif not ini_path.is_file():
+                suggested_cmd = ["odt-env"]
+                if args.root:
+                    suggested_cmd.extend(["--root", str(root_override)])
+                suggested_cmd.append("--init-project")
+                parser.error(
+                    f"Default project file not found: {ini_path}\n"
+                    "Create it manually, pass an explicit INI file, or run:\n"
+                    f"  {_format_cmd(suggested_cmd)}"
+                )
+
             if _implicit_ini_needs_effective_save(
                 ini_path,
                 vars_overrides=vars_overrides,
@@ -4531,6 +4586,12 @@ def main() -> None:
                     ini_overrides=ini_overrides,
                     config_defaults=config_defaults,
                 )
+
+            if init_project and not provisioning_requested:
+                _logger.info("Initialized project INI: %s", ini_path)
+                return
+        except SystemExit:
+            raise
         except Exception as e:
             _logger.error('%s', e)
             raise SystemExit(1)
