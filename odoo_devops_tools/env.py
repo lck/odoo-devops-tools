@@ -65,12 +65,6 @@ odoo_service = odoo
 [config]
 """
 
-_IMPLICIT_LOCAL_CONFIG_DEFAULTS = {
-    "db_host": "127.0.0.1",
-    "db_name": "odoo",
-    "db_user": "odoo",
-    "db_password": "odoo",
-}
 
 _DEFAULT_REQUIREMENTS = [
     "pip",
@@ -94,6 +88,11 @@ _DOCKER_ADDONS_MODE_DEV = "dev"
 _DOCKER_ADDONS_MODES = {_DOCKER_ADDONS_MODE_DEPLOY, _DOCKER_ADDONS_MODE_DEV}
 _DOCKER_ADDONS_CONTAINER_ROOT = PurePosixPath("/mnt/extra-addons")
 _DOCKER_HOST_PORT_CONFIG_KEYS = {"http_port", "gevent_port", "longpolling_port"}
+_DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS = {
+    "addons_path",
+    "data_dir",
+    *_DOCKER_HOST_PORT_CONFIG_KEYS,
+}
 
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
 
@@ -560,32 +559,6 @@ def _write_provisioning_record(layout: Layout, run_id: str, record: dict[str, An
     _write_json_atomic(last_path, record)
 
 
-def _apply_missing_config_defaults(
-        cp: configparser.ConfigParser,
-        defaults: Optional[Dict[str, str]],
-        log_defaults: bool = True,
-) -> bool:
-    """Apply missing [config] defaults and return True if the INI changed."""
-    if not defaults:
-        return False
-
-    changed = False
-    if not cp.has_section("config"):
-        cp.add_section("config")
-        changed = True
-
-    for key, value in defaults.items():
-        if cp.has_option("config", key):
-            continue
-        if log_defaults:
-            log_value = "******" if _is_sensitive_key(key) else value
-            _logger.info("Applying implicit default to [config].%s=%s", key, log_value)
-        cp.set("config", key, value)
-        changed = True
-
-    return changed
-
-
 def _write_default_project_ini_template(ini_path: Path) -> None:
     """Create the bundled default project INI template at ``ini_path``."""
     if ini_path.exists():
@@ -604,27 +577,12 @@ def _write_default_project_ini_template(ini_path: Path) -> None:
 
 
 def _implicit_ini_needs_effective_save(
-        ini_path: Path,
         vars_overrides: Optional[Dict[str, str]],
         ini_overrides: Optional[Dict[str, Dict[str, str]]],
-        config_defaults: Optional[Dict[str, str]],
         force: bool = False,
 ) -> bool:
     """Return True when implicit-INI mode should persist an effective project file."""
-    if force or vars_overrides or ini_overrides:
-        return True
-    if not config_defaults:
-        return False
-
-    cp = _read_ini(
-        ini_path,
-        vars_overrides=None,
-        ini_overrides=None,
-        log_overrides=False,
-    )
-    if not cp.has_section("config"):
-        return True
-    return any(not cp.has_option("config", key) for key in config_defaults)
+    return bool(force or vars_overrides or ini_overrides)
 
 
 def _resolved_ini_for_manifest(
@@ -714,11 +672,10 @@ def _save_effective_ini_copy(
     ini_path: Path,
     vars_overrides: Optional[Dict[str, str]],
     ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
-    config_defaults: Optional[Dict[str, str]] = None,
 ) -> None:
     """
     Rewrite a workspace-root INI with the values actually used after CLI
-    overrides and optional implicit defaults.
+    overrides.
 
     The original template/source file is kept under ROOT/.odt-env/last-source-project.ini,
     and the resolved/effective copy is kept under ROOT/.odt-env/last-resolved-project.ini.
@@ -729,7 +686,6 @@ def _save_effective_ini_copy(
         ini_overrides=ini_overrides,
         log_overrides=False,
     )
-    _apply_missing_config_defaults(cp, config_defaults, log_defaults=False)
     source_ini_path = _save_remote_ini_source_copy(ini_path)
     resolved_ini = _ini_for_effective_file(cp)
 
@@ -2764,7 +2720,7 @@ def render_docker_odoo_conf(cfg: ProjectConfig) -> str:
     # published ports only; Odoo inside the container keeps the official Docker
     # image defaults (8069 and 8072).
     for key, value in cfg.config.items():
-        if key in {"addons_path", "data_dir", *_DOCKER_HOST_PORT_CONFIG_KEYS}:
+        if key in _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS:
             continue
         lines.append(f"{key} = {_format_conf_value(value)}")
 
@@ -4173,7 +4129,6 @@ def _prepare_included_project_ini(
         root: Path,
         vars_overrides: Optional[Dict[str, str]],
         ini_overrides: Optional[Dict[str, Dict[str, str]]],
-        config_defaults: Optional[Dict[str, str]] = None,
 ) -> Path:
     """Materialize and merge positional INI + -i/--include layers into ROOT/odoo-project.ini."""
     with tempfile.TemporaryDirectory(prefix="odt-env-ini-layers-") as tmp_dir:
@@ -4198,7 +4153,6 @@ def _prepare_included_project_ini(
             output_path,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
-            config_defaults=config_defaults,
         )
         return output_path
 
@@ -4209,6 +4163,10 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
 
   Creating a workspace:
+    odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \\
+      --set odoo:version=18.0
+
+  Creating a workspace with explicit database settings:
     odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0 \\
       --set config:db_host=127.0.0.1 \\
@@ -4256,9 +4214,7 @@ Examples:
         help=(
             "Optional local path to odoo-project.ini, Git-backed remote INI "
             "git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-            "If omitted and no -i/--include is provided, odt-env uses existing ROOT/odoo-project.ini. "
-            "If it is missing, odt-env exits with an error; use --init-project to create it "
-            "from the bundled default template."
+            "If omitted and no -i/--include is provided, odt-env uses existing ROOT/odoo-project.ini."
         ),
     )
 
@@ -4270,9 +4226,8 @@ Examples:
         default=[],
         metavar="INI",
         help=(
-            "Include an additional project INI layer. Can be passed multiple times; "
-            "layers are processed in CLI order and later layers override earlier layers. "
-            "When a positional INI is also provided, it is used as the base layer before includes."
+            "Include an additional project layer. Can be passed multiple times; "
+            "layers are processed in CLI order and later layers override earlier layers."
         ),
     )
 
@@ -4281,11 +4236,9 @@ Examples:
         metavar="ROOT",
         default=None,
         help=(
-            "Override workspace ROOT directory. By default, local INI uses its containing directory; "
-            "remote INI sources use the current working directory. In include mode, the default is the "
-            "directory of the first local source, or the current working directory when the first source is remote. "
+            "Override workspace ROOT directory. "
             "When INI is omitted, ROOT defaults to the current working directory. "
-            "Explicit ROOT is created automatically if needed, except for --show-last-run, which is read-only."
+            "Explicit ROOT is created automatically if needed."
         ),
     )
 
@@ -4294,8 +4247,7 @@ Examples:
         action="store_true",
         help=(
             "Create ROOT/odoo-project.ini from the bundled default template if it does not already exist. "
-            "This option is only valid when INI is omitted and no -i/--include is provided. "
-            "Without --init-project, an omitted INI requires an existing ROOT/odoo-project.ini."
+            "Without --init-project, an existing ROOT/odoo-project.ini is required."
         ),
     )
 
@@ -4337,18 +4289,14 @@ Examples:
         help=(
             "Enable virtualenv provisioning by recreating ROOT/venv and refreshing wheelhouse. "
             "If ROOT/venv already exists, it is deleted and created again. "
-            "Without this flag, odt-env will not touch venv/wheelhouse. "
-            "Wheelhouse is always rebuilt together with --create-venv."
         ),
     )
     parser.add_argument(
         "--create-venv-from-wheelhouse",
         action="store_true",
         help=(
-            "Offline deployment helper: recreate ROOT/venv from existing ROOT/wheelhouse "
-            "and all-requirements.lock.txt, then install strictly offline. "
-            "Useful after copying a prepared workspace to a target machine without internet access. "
-            "Implies --create-venv and skips lock compilation and wheelhouse build."
+            "Offline deployment helper: recreate ROOT/venv from existing ROOT/wheelhouse, then install strictly offline. "
+            "Useful after copying a prepared workspace to a target machine without internet access."
         ),
     )
     parser.add_argument(
@@ -4362,8 +4310,6 @@ Examples:
         action="store_true",
         help=(
             "Build the Docker image configured by [docker].target_image by extending the configured base Docker image. "
-            "In [docker].addons_mode=deploy, addons are copied into the image. "
-            "In [docker].addons_mode=dev, addons are bind-mounted in ROOT/compose.yml. "
             "Also generates ROOT/compose.yml."
         ),
     )
@@ -4580,7 +4526,6 @@ def main() -> None:
             )
 
         ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
-        config_defaults = None if build_docker_image_requested else _IMPLICIT_LOCAL_CONFIG_DEFAULTS
 
         try:
             created_default_ini = False
@@ -4601,17 +4546,14 @@ def main() -> None:
                 )
 
             if _implicit_ini_needs_effective_save(
-                ini_path,
                 vars_overrides=vars_overrides,
                 ini_overrides=ini_overrides,
-                config_defaults=config_defaults,
                 force=created_default_ini,
             ):
                 _save_effective_ini_copy(
                     ini_path,
                     vars_overrides=vars_overrides,
                     ini_overrides=ini_overrides,
-                    config_defaults=config_defaults,
                 )
 
             if init_project and not provisioning_requested:
