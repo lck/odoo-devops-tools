@@ -61,7 +61,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env "git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons.ini?ref=${ODT_REF}" \
+          uv run odt-env "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons.ini?ref=${ODT_REF}" \
             --sync-all \
             --create-venv
 

@@ -601,20 +601,33 @@ If no arguments are specified, `odt-env` prints help and exits.
 
 ### Positional arguments
 
-- `INI` — optional project file. If omitted and no `-i/--include` is provided, `odt-env` uses the existing `ROOT/odoo-project.ini` by convention. If that file is missing, `odt-env` exits with an error. Use `--init-project` to create it explicitly from the bundled default template. `INI` can also be:
-  - a local filesystem path, for example `odoo-project.ini` or `/path/to/odoo-project.ini`
-  - a remote INI loaded from a Git repository, for example `git::https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main`
+- `INI` — project definition file. It can be:
+
+  - a local filesystem path, for example:
+
+    ```bash
+    odt-env /path/to/odoo-project.ini --sync-all --create-venv
+    ```
+
+  - a remote INI loaded from a Git repository, for example:
+
+    ```bash
+    odt-env 'git+https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main' --sync-all --create-venv
+    odt-env 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main' --sync-all --create-venv
+    ```
+
+    Syntax:
+
+    ```text
+    git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF
+    ```
+
   - a remote INI loaded from a URL, for example:
-    - `https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini`
-    - `https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini`
 
-INI files loaded from a Git repository use this syntax:
-
-```text
-git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF
-```
-
-The `?ref=REF` part is optional and can point to a branch, tag, or commit.
+    ```bash
+    odt-env 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini' --sync-all --create-venv
+    odt-env 'https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini' --sync-all --create-venv
+    ```
 
 #### Default project file convention
 
@@ -638,7 +651,7 @@ odt-env ./existing-workspace/odoo-project.ini --sync-all --create-venv
 Use `-i INI` / `--include INI` to include additional project layers. The option can be repeated.
 
 ```bash
-odt-env base-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
+odt-env odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
 ```
 
 Project layers are processed from left to right. Later layers override earlier layers.

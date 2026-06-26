@@ -33,7 +33,7 @@ from . import __version__
 
 _logger = logging.getLogger("odt-env")
 
-_GIT_INI_PREFIX = "git::"
+_GIT_INI_PREFIX = "git+"
 _URL_INI_TIMEOUT_SECONDS = 30
 _URL_INI_MAX_BYTES = 1024 * 1024
 
@@ -3688,23 +3688,31 @@ def sync_project(
 # CLI
 # -----------------------------
 
+def _match_git_ini_prefix(raw_value: str) -> Optional[str]:
+    """Return the supported Git-backed INI prefix used by ``raw_value``."""
+    if raw_value.startswith(_GIT_INI_PREFIX):
+        return _GIT_INI_PREFIX
+    return None
+
+
 def _parse_git_ini_source(raw_ini: str) -> Optional[GitIniSource]:
     """Parse a Git-backed remote INI source.
 
     Supported syntax:
-      git::REPO_URL//PATH/TO/PROJECT.ini?ref=BRANCH_OR_TAG_OR_COMMIT
+      git+REPO_URL//PATH/TO/PROJECT.ini?ref=BRANCH_OR_TAG_OR_COMMIT
 
     The path after ``//`` is a repository-internal path and therefore uses
     POSIX separators on every operating system.
     """
     raw_value = (raw_ini or "").strip()
-    if not raw_value.startswith(_GIT_INI_PREFIX):
+    git_prefix = _match_git_ini_prefix(raw_value)
+    if git_prefix is None:
         return None
 
-    source_value = raw_value[len(_GIT_INI_PREFIX):].strip()
+    source_value = raw_value[len(git_prefix):].strip()
     if not source_value:
         raise Exception(
-            "Invalid Git INI source: missing repository URL after 'git::'."
+            "Invalid Git INI source: missing repository URL after 'git+'."
         )
 
     source_without_query, query_sep, query = source_value.partition("?")
@@ -3732,7 +3740,7 @@ def _parse_git_ini_source(raw_ini: str) -> Optional[GitIniSource]:
 
     if "//" not in source_without_query:
         raise Exception(
-            "Invalid Git INI source: expected 'git::REPO_URL//PATH/TO/PROJECT.ini'."
+            "Invalid Git INI source: expected 'git+REPO_URL//PATH/TO/PROJECT.ini'."
         )
 
     repo, raw_path = source_without_query.rsplit("//", 1)
@@ -3743,7 +3751,7 @@ def _parse_git_ini_source(raw_ini: str) -> Optional[GitIniSource]:
     # split at the URL scheme separator and look superficially valid.
     if not repo or repo.endswith(":") or not raw_path:
         raise Exception(
-            "Invalid Git INI source: expected 'git::REPO_URL//PATH/TO/PROJECT.ini'."
+            "Invalid Git INI source: expected 'git+REPO_URL//PATH/TO/PROJECT.ini'."
         )
 
     if "\\" in raw_path:
@@ -3950,9 +3958,10 @@ def _copy_url_ini_to_root(
 
     # Fail early for common copy/paste mistakes where a web UI HTML page is
     # downloaded instead of the raw INI file.
-    if re.search(r"<\s*!doctype\s+html|<\s*html[\s>]", text[:2048], flags=re.IGNORECASE):
+    if re.search(r"<\s*!doctype\s+html|<\s*html[\s>]", text[:1024], flags=re.IGNORECASE):
+        _logger.info("Downloaded INI (first 1024 chars): %s", text[:1024])
         raise Exception(
-            "Downloaded URL INI looks like an HTML page, not a raw INI file. "
+            "Downloaded INI looks like an HTML page, not a raw INI file. "
             "Use a raw file URL instead."
         )
 
@@ -4046,8 +4055,9 @@ def _source_kind_for_cli_ini(parser: argparse.ArgumentParser, raw_ini: str) -> s
 def _redact_ini_source_for_report(raw_source: str) -> str:
     """Redact secrets in local/URL/Git INI source labels shown in logs and manifests."""
     raw_value = (raw_source or "").strip()
-    if raw_value.startswith(_GIT_INI_PREFIX):
-        source_value = raw_value[len(_GIT_INI_PREFIX):]
+    git_prefix = _match_git_ini_prefix(raw_value)
+    if git_prefix is not None:
+        source_value = raw_value[len(git_prefix):]
         source_without_query, query_sep, query = source_value.partition("?")
         if "//" in source_without_query:
             repo, raw_path = source_without_query.rsplit("//", 1)
@@ -4260,7 +4270,7 @@ Examples:
     odt-env -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
 
   Using a remote project file:
-    odt-env git::https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
+    odt-env git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
 
   Building a Docker image:
     odt-env /path/to/odoo-project.ini --sync-addons --build-docker-image
@@ -4292,7 +4302,7 @@ Examples:
         nargs="?",
         help=(
             "Optional local path to odoo-project.ini, Git-backed remote INI "
-            "git::REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
+            "git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
             "If omitted and no -i/--include is provided, odt-env uses existing ROOT/odoo-project.ini."
         ),
     )
