@@ -26,7 +26,7 @@ Why use `odt-env`?
 Using `uv`:
 
 ```bash
-uv tool install odoo-devops-tools
+uv tool install -U odoo-devops-tools
 ```
 
 Verify:
