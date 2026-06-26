@@ -535,6 +535,22 @@ def _json_default(value: Any) -> str:
     return str(value)
 
 
+def _path_for_report(path: Path) -> str:
+    """Return a stable absolute path for human-readable reports."""
+    try:
+        return str(path.resolve())
+    except Exception:
+        return str(path.absolute())
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """Best-effort path comparison used only for reporting decisions."""
+    try:
+        return left.resolve() == right.resolve()
+    except Exception:
+        return left.absolute() == right.absolute()
+
+
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     _write_text_file(
         path,
@@ -2995,6 +3011,8 @@ def _sync_project_impl(
         build_docker_image_requested: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        source_ini_layers: Optional[list[str]] = None,
+        project_ini_status: Optional[str] = None,
 ) -> None:
     root = (root_override or ini_path.parent).resolve()
     if root.exists() and not root.is_dir():
@@ -3486,6 +3504,16 @@ def _sync_project_impl(
             _logger.info(f"  - restore:          {layout.script("restore", "sh")}")
             _logger.info(f"  - update:           {layout.script("update", "sh")}")
 
+    if project_ini_status:
+        _logger.info("  Project INI:")
+        _logger.info("  - %s", project_ini_status)
+
+    effective_source_ini_layers = list(source_ini_layers or [str(ini_path)])
+    if effective_source_ini_layers:
+        _logger.info("  Source INI:")
+        for layer_idx, source_ini_layer in enumerate(effective_source_ini_layers):
+            _logger.info("  - layer #%s: %s", layer_idx+1, source_ini_layer)
+
 
 def sync_project(
         ini_path: Path,
@@ -3503,6 +3531,8 @@ def sync_project(
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         no_provisioning_log: bool = False,
         cli_argv: Optional[list[str]] = None,
+        source_ini_layers: Optional[list[str]] = None,
+        project_ini_status: Optional[str] = None,
 ) -> None:
     if no_provisioning_log:
         _sync_project_impl(
@@ -3519,6 +3549,8 @@ def sync_project(
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
+            source_ini_layers=source_ini_layers,
+            project_ini_status=project_ini_status,
         )
         return
 
@@ -3528,6 +3560,7 @@ def sync_project(
     started_at = _utc_now_iso()
     argv = _redact_cli_args(cli_argv or sys.argv)
     run_path, source_ini_path, resolved_ini_path, last_path = _provisioning_paths(layout, run_id)
+    effective_source_ini_layers = list(source_ini_layers or [_path_for_report(ini_path)])
 
     record: dict[str, Any] = {
         "version": f"odt-env-{__version__}",
@@ -3544,6 +3577,8 @@ def sync_project(
         "workspace": {
             "root": str(layout.root),
             "ini_path": str(ini_path),
+            "project_ini_status": project_ini_status,
+            "source_ini_layers": _redact_mapping(effective_source_ini_layers),
         },
         "options": {
             "sync_odoo": sync_odoo,
@@ -3607,6 +3642,8 @@ def sync_project(
             build_docker_image_requested=build_docker_image_requested,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
+            source_ini_layers=effective_source_ini_layers,
+            project_ini_status=project_ini_status,
         )
     except Exception as e:
         record["status"] = "failed"
@@ -4004,6 +4041,48 @@ def _source_kind_for_cli_ini(parser: argparse.ArgumentParser, raw_ini: str) -> s
     if url_ini_source is not None:
         return "URL"
     return "local"
+
+
+def _redact_ini_source_for_report(raw_source: str) -> str:
+    """Redact secrets in local/URL/Git INI source labels shown in logs and manifests."""
+    raw_value = (raw_source or "").strip()
+    if raw_value.startswith(_GIT_INI_PREFIX):
+        source_value = raw_value[len(_GIT_INI_PREFIX):]
+        source_without_query, query_sep, query = source_value.partition("?")
+        if "//" in source_without_query:
+            repo, raw_path = source_without_query.rsplit("//", 1)
+            redacted = f"{_GIT_INI_PREFIX}{_redact_url_secret(repo)}//{raw_path}"
+            if query_sep:
+                redacted = f"{redacted}?{query}"
+            return redacted
+    return _redact_url_secret(raw_value)
+
+
+def _describe_cli_ini_source_for_report(parser: argparse.ArgumentParser, raw_ini: str) -> str:
+    """Return the human-facing INI source label, preserving source order."""
+    raw_value = (raw_ini or "").strip()
+    source_kind = _source_kind_for_cli_ini(parser, raw_value)
+    if source_kind == "local":
+        return _path_for_report(_resolve_local_ini_path(parser, raw_value))
+    return _redact_ini_source_for_report(raw_value)
+
+
+def _explicit_source_uses_default_project_ini(
+        parser: argparse.ArgumentParser,
+        raw_sources: list[str],
+        default_ini_path: Path,
+) -> Optional[int]:
+    """Return 1-based layer index if ROOT/odoo-project.ini is explicitly listed."""
+    for index, raw_source in enumerate(raw_sources, start=1):
+        raw_value = (raw_source or "").strip()
+        if not raw_value:
+            continue
+        if _source_kind_for_cli_ini(parser, raw_value) != "local":
+            continue
+        source_path = _resolve_local_ini_path(parser, raw_value)
+        if _same_path(source_path, default_ini_path):
+            return index
+    return None
 
 
 def _workspace_root_for_explicit_sources(
@@ -4490,6 +4569,8 @@ def main() -> None:
     has_positional_ini = bool((args.ini or "").strip())
     raw_explicit_sources = ([args.ini] if has_positional_ini else []) + include_inis
     implicit_ini = not raw_explicit_sources
+    source_ini_layers: list[str] = []
+    project_ini_status: Optional[str] = None
 
     if init_project and not implicit_ini:
         parser.error("--init-project can only be used when INI is omitted and no -i/--include is provided.")
@@ -4526,13 +4607,17 @@ def main() -> None:
             )
 
         ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+        source_ini_layers = [_path_for_report(ini_path)]
 
         try:
             created_default_ini = False
             if init_project:
                 created_default_ini = not ini_path.exists()
                 _write_default_project_ini_template(ini_path)
-                if not created_default_ini:
+                if created_default_ini:
+                    project_ini_status = f"created and used ROOT/{_DEFAULT_PROJECT_INI_NAME}"
+                else:
+                    project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                     _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
             elif not ini_path.is_file():
                 suggested_cmd = ["odt-env"]
@@ -4544,6 +4629,9 @@ def main() -> None:
                     "Create it manually, pass an explicit INI file, or run:\n"
                     f"  {_format_cmd(suggested_cmd)}"
                 )
+
+            if project_ini_status is None:
+                project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
 
             if _implicit_ini_needs_effective_save(
                 vars_overrides=vars_overrides,
@@ -4568,6 +4656,33 @@ def main() -> None:
         root_override = _workspace_root_for_explicit_sources(parser, raw_explicit_sources, args.root)
         if root_override is None:
             parser.error("Internal error: failed to determine workspace ROOT for included INI layers.")
+
+        default_ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+        default_ini_existed = default_ini_path.is_file()
+        default_ini_layer_index = _explicit_source_uses_default_project_ini(
+            parser,
+            raw_explicit_sources,
+            default_ini_path,
+        )
+        source_ini_layers = [
+            _describe_cli_ini_source_for_report(parser, raw_source)
+            for raw_source in raw_explicit_sources
+        ]
+        if default_ini_layer_index is not None:
+            project_ini_status = (
+                f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME} as explicit source layer "
+                f"#{default_ini_layer_index}"
+            )
+        elif default_ini_existed:
+            project_ini_status = (
+                f"ignored existing ROOT/{_DEFAULT_PROJECT_INI_NAME}; "
+                "explicit INI layer(s) were applied and the merged result was written there"
+            )
+        else:
+            project_ini_status = (
+                f"no existing ROOT/{_DEFAULT_PROJECT_INI_NAME}; "
+                "explicit INI layer(s) were applied and the merged result was written there"
+            )
 
         try:
             ini_path = _prepare_included_project_ini(
@@ -4611,6 +4726,17 @@ def main() -> None:
                     root_override,
                 )
 
+            default_ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+            default_ini_existed = default_ini_path.is_file()
+            source_ini_layers = [_describe_cli_ini_source_for_report(parser, args.ini)]
+            if default_ini_existed:
+                project_ini_status = (
+                    f"ignored existing ROOT/{_DEFAULT_PROJECT_INI_NAME}; "
+                    f"{source_kind} INI source was copied there"
+                )
+            else:
+                project_ini_status = f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from {source_kind} INI source"
+
             try:
                 if git_ini_source is not None:
                     ini_path = _copy_git_ini_to_root(git_ini_source, root_override)
@@ -4627,11 +4753,26 @@ def main() -> None:
                 raise SystemExit(1)
         else:
             ini_path = _resolve_local_ini_path(parser, args.ini)
+            source_ini_layers = [_path_for_report(ini_path)]
 
             if args.root:
                 root_override = _validate_root_override(parser, args.root)
             else:
                 _logger.info('Workspace ROOT default (INI directory): %s', ini_path.parent.resolve())
+
+            effective_root = root_override or ini_path.parent.resolve()
+            default_ini_path = effective_root / _DEFAULT_PROJECT_INI_NAME
+            if _same_path(ini_path, default_ini_path):
+                project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
+            elif default_ini_path.is_file():
+                project_ini_status = (
+                    f"ignored existing ROOT/{_DEFAULT_PROJECT_INI_NAME}; "
+                    "explicit local INI source was used"
+                )
+            else:
+                project_ini_status = (
+                    f"explicit local INI source was used; no existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
+                )
 
     if args.all:
         sync_odoo, sync_addons = True, True
@@ -4660,6 +4801,8 @@ def main() -> None:
             ini_overrides=ini_overrides,
             no_provisioning_log=no_provisioning_log,
             cli_argv=sys.argv,
+            source_ini_layers=source_ini_layers,
+            project_ini_status=project_ini_status,
         )
     except Exception as e:
         _logger.error(f'{e}')
