@@ -1,35 +1,48 @@
 # odoo-devops-tools
 
-A small set of utilities for **local Odoo development** and **simple Odoo deployments**.
+**Generate reproducible Odoo workspaces.**
 
-At the center of the toolkit is **`odt-env`**: a declarative CLI that turns one INI project file into a ready-to-use Odoo workspace for local development or simple deployment.
+`odoo-devops-tools` is a small toolkit for local Odoo development, testing, and simple deployment workflows.
+Its main command, **`odt-env`**, reads a project definition and generates an inspectable workspace:
 
-Why use `odt-env`?
+```text
+ROOT/
+├── odoo/                 # Odoo source
+├── odoo-addons/          # Git or local addon sources
+├── odoo-configs/         # generated Odoo configuration
+├── odoo-scripts/         # run, test, shell, backup, restore, update
+├── odoo-data/            # Odoo data directory
+├── odoo-logs/            # runtime logs
+├── odoo-backups/         # backups created by helper scripts
+├── odoo-docker/          # generated Docker build context
+├── wheelhouse/           # offline Python wheelhouse
+├── venv/                 # Python virtual environment
+├── compose.yml           # generated Docker Compose file, when requested
+├── odoo-project.ini      # project definition
+└── .odt-env/             # provisioning metadata and project snapshots
+```
 
-- One project file defines your full Odoo workspace.
-- `uv` handles the virtual environment, dependency locking, and offline wheelhouse.
-- `odt-env` generates configuration and helper scripts, and can also build Docker images and Compose files, without starting any services.
-- You stay in control: review what was generated, then run Odoo, scripts, or Docker Compose yourself.
+Use it when you want a repeatable Odoo setup for custom or third-party addons, onboarding new developers, offline installs, or lightweight deployment artifacts without introducing a full orchestration platform.
 
 ---
 
 ## System requirements
 
 - **git**: https://git-scm.com/install/
-- **uv** (Python package & project manager): https://docs.astral.sh/uv/getting-started/installation/
-- **Docker**: https://docs.docker.com/get-docker/ — optional, needed for Docker image and Compose workflows.
+- **uv**: https://docs.astral.sh/uv/getting-started/installation/
+- **Docker**: https://docs.docker.com/get-docker/ — optional, needed only for Docker image and Compose workflows.
 
 ---
 
 ## Installation
 
-Using `uv`:
+Install the CLI with `uv`:
 
 ```bash
 uv tool install -U odoo-devops-tools
 ```
 
-Verify:
+Verify the installation:
 
 ```bash
 odt-env --help
@@ -39,7 +52,7 @@ odt-env --help
 
 ## Quick start
 
-Create a new Odoo 18 workspace:
+Create `odoo-project.ini` from the default template and provision a new Odoo 18 workspace in one step:
 
 ```bash
 odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \
@@ -53,36 +66,45 @@ odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \
 > **Note**
 > Make sure PostgreSQL is running at the configured host and the configured database user exists.
 
-When the workspace is ready, start Odoo:
+Start Odoo with the generated script:
 
 ```bash
 cd odoo18-workspace
 ./odoo-scripts/run.sh
 ```
 
-The server starts with the generated configuration from `./odoo-configs/odoo-server.conf`.
-
-After the server starts, Odoo is available at http://localhost:8069.
+Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
 
 ---
 
 ## Usage
 
-### 1. Basic example
+The examples below continue from the workspace created in the Quick start section.
 
-This example shows how to provision an Odoo 18 workspace from a local project file.
-
-#### 1.1. Create a project file
-
-Create a file named `odoo-project.ini`.
-
-> **Note**
-> odoo-project.ini is only an example filename used in this README.
-> The project file can have a different name.
+The generated `odoo-project.ini` is the main project definition:
 
 ```ini
+[virtualenv]
+managed_python = true
+python_version =
+build_constraints =
+requirements =
+requirements_ignore =
+
 [odoo]
 version = 18.0
+repo = https://github.com/odoo/odoo.git
+branch = 18.0
+commit =
+shallow = true
+
+[docker]
+target_image = local/odoo:18.0
+base_image = odoo:18.0
+addons_mode = deploy
+compose_project_name =
+db_service = db
+odoo_service = odoo
 
 [config]
 db_host = 127.0.0.1
@@ -91,81 +113,19 @@ db_user = odoo
 db_password = odoo
 ```
 
-#### 1.2. Create the workspace from the project file
+Edit this file when you want to add extra addons, change configuration values, pin repositories or adjust Python dependency handling.
 
-Run `odt-env` against the project file:
+### 1. Adding extra addons
 
-```bash
-odt-env odoo-project.ini --sync-all --create-venv
-```
+To extend Odoo with additional functionality, add extra addons through `[addons.<name>]` sections in `odoo-project.ini`.
 
-After provisioning, the workspace has the following structure:
+In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`.
 
-```text
-ROOT/
-├── odoo-project.ini      # project definition
-├── compose.yml           # generated sample Docker Compose file when --build-docker-image is used
-├── odoo/                 # Git-managed Odoo source repository
-├── odoo-addons/          # addon repositories from [addons.<name>] sections
-├── odoo-backups/         # backups created by helper scripts
-├── odoo-configs/         # generated configuration, including odoo-server.conf
-├── odoo-data/            # Odoo data directory
-├── odoo-docker/          # generated Docker build context
-├── odoo-logs/            # runtime logs
-├── odoo-scripts/         # generated helper scripts
-│   ├── run.sh            # start Odoo in the foreground
-│   ├── instance.sh       # manage Odoo as a background service (start|stop|restart|status)
-│   ├── test.sh           # run Odoo tests
-│   ├── shell.sh          # open an Odoo shell
-│   ├── backup.sh         # create a timestamped ZIP backup in ROOT/odoo-backups/
-│   ├── restore.sh        # restore a backup into the configured database
-│   ├── update.sh         # update modules, auto-detecting addons to update using file-content hashes stored in the DB
-├── venv/                 # Python virtual environment
-└── wheelhouse/           # wheelhouse for offline installs
-├── .odt-env/             # provisioning metadata and project snapshots
-│   ├── last-provisioning.json
-│   ├── last-source-project.ini
-│   ├── last-resolved-project.ini
-│   └── history/
-│       ├── <run_id>-provisioning.json
-│       ├── <run_id>.source-project.ini
-│       └── <run_id>.resolved-project.ini
-```
+#### 1.1. Update the project file
 
-#### 1.3. Start Odoo
-
-When the workspace is ready, start Odoo:
-
-```bash
-./odoo-scripts/run.sh
-```
-
-On Windows, use the `.bat` variants instead:
-
-```bat
-odoo-scripts\run.bat
-```
-
-The server starts with the generated configuration from `ROOT/odoo-configs/odoo-server.conf`.
-
-After the server starts, Odoo is available at http://localhost:8069.
-
----
-
-### 2. Adding extra addons from Git and local folders
-
-To extend Odoo with additional functionality, you can add extra addons through `[addons.<name>]` sections.
-
-In this example, we add two addon repositories, `OCA/web` and `OCA/helpdesk`, and one local folder, `odoo-addons/my-custom-addons`, containing custom Odoo addons.
-
-#### 2.1. Update the project file
-
-Add the extra addons to the `odoo-project.ini` file.
+Edit `odoo-project.ini` in the workspace root and add these addon sections:
 
 ```ini
-[odoo]
-version = 18.0
-
 [addons.oca-web]
 repo = https://github.com/OCA/web.git
 branch = ${odoo:version}
@@ -173,123 +133,41 @@ branch = ${odoo:version}
 [addons.oca-helpdesk]
 repo = https://github.com/OCA/helpdesk.git
 branch = ${odoo:version}
-
-[addons.my-custom-addons]
-path = odoo-addons/my-custom-addons
-
-[config]
-db_host = 127.0.0.1
-db_name = odoo
-db_user = odoo
-db_password = odoo
 ```
 
-#### 2.2. Update the workspace
+The rest of the generated project file can stay unchanged.
 
-After changing the project file, run `odt-env` again to update the workspace:
+#### 1.2. Update the workspace
+
+After changing the project file, run `odt-env` again from the workspace root:
 
 ```bash
-odt-env odoo-project.ini --sync-all --create-venv
+odt-env --sync-all --create-venv
 ```
 
-This clones the Git-based addons into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`.
+This clones the addons into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`.
 
-Both Git-based addon directories and the local folder `ROOT/odoo-addons/my-custom-addons/` are then added to the generated `addons_path`.
+Addon directories are then added to the generated `addons_path`.
 
 If any of these addon sources contains a `requirements.txt` file, `odt-env` automatically installs the listed dependencies into the Python virtual environment.
 
-#### 2.3. Optional: Use full clones instead of shallow clones
+#### 1.3. Install modules and run Odoo
 
-By default, `odt-env` uses shallow, single-branch clones for Git repositories.
-
-In most cases, shallow clones are the right choice, especially for third-party addons and for the main Odoo repository.
-
-A full clone usually only makes sense for custom addons that are actively being developed, where access to the full Git history is useful.
-
-If you need the full Git history, set `shallow = false` in the relevant section and run `odt-env` again with a sync option.
-
-If you set `commit`, `odt-env` automatically ignores `shallow` and fetches enough history to check out the requested commit.
-
-Example:
-
-```ini
-[addons.my-custom-addons]
-repo = https://github.com/example/my-custom-addons.git
-branch = 18.0
-shallow = false
-```
-
-#### 2.4. Optional: Pin Odoo or an addon to a specific commit
-
-By default, git repositories are tracked by branch.
-
-If you need a reproducible workspace tied to an exact Git revision, you can also specify `commit` in the relevant `[odoo]` or `[addons.<name>]` section.
-
-Example for Odoo:
-
-```ini
-[odoo]
-version = 18.0
-repo = https://github.com/odoo/odoo.git
-branch = 18.0
-commit = e6ec487
-```
-
-Example for an addon repository:
-
-```ini
-[addons.oca-web]
-repo = https://github.com/OCA/web.git
-branch = ${odoo:version}
-commit = abcdef1
-```
-
-> **Note**
-> when `commit` is set, `shallow` is ignored automatically, because a shallow clone may not contain the requested commit.
-
-After changing the project file, run `odt-env` again to update the workspace:
+After updating the workspace, start Odoo with modules from the newly added addon repositories:
 
 ```bash
-odt-env odoo-project.ini --sync-all --create-venv
+./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt
 ```
-
-#### 2.5. Update database and run Odoo
-
-Once the workspace has been updated, refresh installed modules:
-
-```bash
-./odoo-scripts/update.sh
-```
-
-Then start Odoo:
-
-```bash
-./odoo-scripts/run.sh
-```
-
-#### 2.6. Optional: Use an existing local Odoo checkout
-
-If you already maintain the Odoo source code locally, point `[odoo]` to that directory with `path`.
-
-```ini
-[odoo]
-version = 18.0
-path = ../odoo
-```
-
-Relative paths are resolved relative to `ROOT/`. When `path` is set, `odt-env` uses that directory as the Odoo source for dependency collection, editable installation, generated helper scripts, and generated `addons_path`. Git sync for Odoo is skipped, including when `--sync-odoo` or `--sync-all` is used.
-
-Use `path` only with `version`; do not combine it with `repo`, `branch`, `commit`, or `shallow`.
 
 ---
 
-### 3. Using system Python instead of managed Python
+### 2. Using system Python instead of managed Python
 
 By default, `odt-env` uses `uv` to install and manage the requested Python version.
 
 If you already have a suitable system Python installed, you can disable managed Python.
 
-#### 3.1. Update the project file
+#### 2.1. Update the project file
 
 Disable managed Python by adding `python_version = 3.11` and `managed_python = false` to the `odoo-project.ini` file.
 
@@ -301,30 +179,21 @@ Disable managed Python by adding `python_version = 3.11` and `managed_python = f
 [virtualenv]
 managed_python = false
 python_version = 3.11
-
-[odoo]
-version = 18.0
-
-[config]
-db_host = 127.0.0.1
-db_name = odoo
-db_user = odoo
-db_password = odoo
 ```
 
-#### 3.2. Update the workspace
+#### 2.2. Update the workspace
 
-After changing the project file, run `odt-env` again to update the workspace:
+After changing the project file, run `odt-env` again from the workspace root:
 
 ```bash
-odt-env odoo-project.ini --sync-all --create-venv
+odt-env --sync-all --create-venv
 ```
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
 
 ---
 
-### 4. Managing Python requirements
+### 3. Managing Python requirements
 
 The `[virtualenv]` section can be used to add new Python packages, pin specific versions, and override packages collected from Odoo or addon repository `requirements.txt` files.
 
@@ -335,7 +204,7 @@ Use:
 
 When a package is listed in `requirements`, `odt-env` automatically gives that package priority by ignoring the same package name from collected repository requirements. This means you can usually pin a package version just by adding it to `requirements`.
 
-#### 4.1. Add or pin packages
+#### 3.1. Add or pin packages
 
 Use `requirements` to install additional packages or to force a specific version:
 
@@ -344,20 +213,11 @@ Use `requirements` to install additional packages or to force a specific version
 requirements =
   requests==2.32.3
   boto3==1.35.99
-
-[odoo]
-version = 18.0
-
-[config]
-db_host = 127.0.0.1
-db_name = odoo
-db_user = odoo
-db_password = odoo
 ```
 
 In this example, both packages are added to the virtual environment and pinned to the specified versions.
 
-#### 4.2. Override a package with a different one
+#### 3.2. Override a package with a different one
 
 If you want to replace a package with a different distribution name, add the replacement to `requirements` and skip the original package with `requirements_ignore`.
 
@@ -369,22 +229,13 @@ requirements =
   psycopg2-binary==2.9.9
 requirements_ignore =
   psycopg2
-
-[odoo]
-version = 18.0
-
-[config]
-db_host = 127.0.0.1
-db_name = odoo
-db_user = odoo
-db_password = odoo
 ```
 
 In this example, `odt-env` installs `psycopg2-binary==2.9.9` and skips `psycopg2` when collecting repository requirements.
 
 ---
 
-### 5. Simple offline deployment using a prebuilt wheelhouse
+### 4. Simple offline deployment using a prebuilt wheelhouse
 
 This example shows a simple deployment workflow:
 
@@ -392,71 +243,61 @@ This example shows a simple deployment workflow:
 2. Copy the prepared workspace to the target machine.
 3. On the target machine, recreate the virtual environment strictly offline from the existing wheelhouse.
 
-#### 5.1. Prepare the workspace on the build machine
+#### 4.1. Prepare the workspace on the build machine
 
-On the build machine, run `odt-env` normally:
+On the build machine, run `odt-env` from the workspace root:
 
 ```bash
-odt-env odoo-project.ini --sync-all --create-venv
+odt-env --sync-all --create-venv
 ```
 
 This syncs Odoo and addon repositories, resolves and locks Python dependencies, and builds `ROOT/wheelhouse/` for offline installation.
 
 After that, transfer the prepared workspace to the target machine. The simplest approach is to copy the entire `ROOT/` directory.
 
-#### 5.2. Recreate the virtual environment on the target machine
+#### 4.2. Recreate the virtual environment on the target machine
 
-On the target machine, run:
+On the target machine, from the copied workspace root, run:
 
 ```bash
-odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
+odt-env --create-venv-from-wheelhouse
 ```
 
 This recreates `ROOT/venv`, skips lock compilation and wheelhouse build, and performs a strict offline install from the existing `ROOT/wheelhouse/`.
 
-This is useful for simple deployments where Python dependencies are prepared on a connected build machine, while the target machine creates the virtual environment without internet access.
+### 5. Building a custom Docker image
 
----
+This example shows how `odt-env` builds a custom image by extending the standard [`Odoo Docker`](https://hub.docker.com/_/odoo/) image.
 
-### 6. Building custom Docker image
+> **Note**
+> If your project file contains local database connection settings such as `db_host`, `db_name`, `db_user`, or `db_password` in `[config]`,
+> remove them before generating Docker artifacts.
 
-This example shows how `odt-env` builds a custom image by extending the standard [`Odoo Docker`](https://hub.docker.com/_/odoo/) images.
+#### 5.1. Update the project file
 
-#### 6.1. Create a project file
-
-Create a sample project file that demonstrates how to extend the [`Odoo Docker`](https://hub.docker.com/_/odoo/) image with extra addons.
+Edit `odoo-project.ini` and set the Docker image name:
 
 ```ini
-[odoo]
-version = 18.0
-
 [docker]
 target_image = mycompany/odoo:${odoo:version}
-# Optional: deploy is the default. In deploy mode, addon modules are copied into the image.
-addons_mode = deploy
-
-# Optional: publish Odoo on custom host ports in the generated compose.yml.
-# These values are used as host-side Docker Compose ports only; Odoo inside
-# the container keeps the standard Odoo Docker ports 8069 and 8072.
-[config]
-http_port = 18169
-gevent_port = 18172
-
-[addons.oca-web]
-repo = https://github.com/OCA/web.git
-branch = ${odoo:version}
-
-[addons.oca-helpdesk]
-repo = https://github.com/OCA/helpdesk.git
-branch = ${odoo:version}
 ```
 
-#### 6.2. Build the image
+For this Docker Compose example, comment out local database connection settings from `[config]`:
 
-Run `odt-env` against the project file:
+```ini
+[config]
+# db_host = 127.0.0.1
+# db_name = odoo
+# db_user = odoo
+# db_password = odoo
+```
+
+#### 5.2. Build the image
+
+From the workspace root, run:
 
 ```bash
-odt-env odoo-project.ini --sync-addons --build-docker-image
+odt-env --sync-addons --build-docker-image
 ```
 
 After the command completes, the new Docker image is available under the name configured by `[docker].target_image`.
@@ -483,8 +324,8 @@ services:
     depends_on:
       - db
     ports:
-      - "18169:8069"
-      - "18172:8072"
+      - "8069:8069"
+      - "8072:8072"
     environment:
       HOST: db
       PORT: 5432
@@ -499,7 +340,7 @@ volumes:
   odoo-data:
 ```
 
-#### 6.3. Docker dev mode with bind-mounted addons
+#### 5.3. Docker dev mode with bind-mounted addons
 
 For local Docker development, set `[docker].addons_mode = dev`.
 
@@ -511,32 +352,22 @@ and `ROOT/odoo-docker/configs/odoo.conf` gets a Docker-specific `addons_path` th
 Example:
 
 ```ini
-[odoo]
-version = 18.0
-
 [docker]
 target_image = mycompany/odoo-dev:${odoo:version}
 addons_mode = dev
-
-[addons.oca-web]
-repo = https://github.com/OCA/web.git
-branch = ${odoo:version}
-
-[addons.my-custom-addons]
-path = odoo-addons/my-custom-addons
 ```
 
-Generate the image and Compose file:
+Generate the image and Compose file from the workspace root:
 
 ```bash
-odt-env odoo-project.ini --sync-addons --build-docker-image
+odt-env --sync-addons --build-docker-image
 ```
 
 The generated Docker Odoo config contains addon paths similar to:
 
 ```ini
 [options]
-addons_path = /mnt/extra-addons/oca-web,/mnt/extra-addons/my-custom-addons
+addons_path = /mnt/extra-addons/oca-web,/mnt/extra-addons/oca-helpdesk
 data_dir = /var/lib/odoo
 ```
 
@@ -552,14 +383,14 @@ services:
         source: ./odoo-addons/oca-web
         target: /mnt/extra-addons/oca-web
       - type: bind
-        source: ./odoo-addons/my-custom-addons
-        target: /mnt/extra-addons/my-custom-addons
+        source: ./odoo-addons/oca-helpdesk
+        target: /mnt/extra-addons/oca-helpdesk
       - odoo-data:/var/lib/odoo
 ```
 
 When addon source files change on the host, the running container sees those changes through the bind mounts. Rebuild the image only when addon Python requirements or Docker-level dependencies change.
 
-#### 6.4. Use the image with Docker Compose
+#### 5.4. Use the image with Docker Compose
 
 The custom image can be used in the same way as a regular Odoo image.
 
