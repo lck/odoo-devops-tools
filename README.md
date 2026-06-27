@@ -2,7 +2,7 @@
 
 **Generate reproducible Odoo workspaces.**
 
-`odoo-devops-tools` is a small toolkit for local Odoo development, testing, and simple deployment workflows.
+`odoo-devops-tools` is a small toolkit for Odoo development, testing, and simple deployment workflows.
 Its main command, **`odt-env`**, reads a project definition and generates an inspectable workspace:
 
 ```text
