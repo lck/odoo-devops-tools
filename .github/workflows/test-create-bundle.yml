@@ -1,0 +1,363 @@
+name: Test Create Bundle
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  create-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U odoo -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Install Odoo system requirements
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git \
+            postgresql-client \
+            build-essential \
+            libffi-dev \
+            libjpeg-dev \
+            libldap2-dev \
+            libpq-dev \
+            libsasl2-dev \
+            libxml2-dev \
+            libxslt1-dev \
+            zlib1g-dev
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Generate project INI
+        shell: bash
+        run: |
+          cat > odoo-project.ini <<'EOF'
+          [virtualenv]
+          managed_python = true
+          python_version =
+          build_constraints =
+          requirements =
+          requirements_ignore =
+
+          [odoo]
+          version = 18.0
+
+          [addons.oca-web]
+          repo = https://github.com/OCA/web.git
+          branch = ${odoo:version}
+
+          [addons.oca-helpdesk]
+          repo = https://github.com/OCA/helpdesk.git
+          branch = ${odoo:version}
+
+          [config]
+          db_host = 127.0.0.1
+          db_port = 5432
+          db_user = odoo
+          db_password = bundle-build-secret
+          db_name = bundle_source
+          EOF
+
+          echo "Generated odoo-project.ini:"
+          cat odoo-project.ini
+
+      - name: Provision source workspace and wheelhouse
+        shell: bash
+        run: |
+          uv run odt-env ./odoo-project.ini \
+            --sync-all \
+            --create-venv \
+            --root source-workspace
+
+      - name: Make one addon repository dirty
+        shell: bash
+        run: |
+          marker="source-workspace/odoo-addons/oca-web/odt-bundle-dirty-marker.txt"
+          echo "included by --allow-dirty-bundle" > "$marker"
+
+          git -C source-workspace/odoo-addons/oca-web status --short
+          test -n "$(git -C source-workspace/odoo-addons/oca-web status --porcelain)"
+
+      - name: Reject dirty bundle without opt-in
+        shell: bash
+        run: |
+          set +e
+          uv run odt-env ./odoo-project.ini \
+            --root source-workspace \
+            --create-bundle \
+            > dirty-bundle-rejected.log 2>&1
+          status=$?
+          set -e
+
+          cat dirty-bundle-rejected.log
+          test "$status" -ne 0
+          grep -F -- "--allow-dirty-bundle" dirty-bundle-rejected.log
+          test ! -e source-workspace/dist/source-workspace.odt.zip
+
+      - name: Create portable bundle from dirty workspace
+        shell: bash
+        run: |
+          uv run odt-env ./odoo-project.ini \
+            --root source-workspace \
+            --create-bundle \
+            --allow-dirty-bundle
+
+          test -f source-workspace/dist/source-workspace.odt.zip
+          mkdir -p bundle-artifacts
+          mv source-workspace/dist/source-workspace.odt.zip \
+            bundle-artifacts/source-workspace.odt.zip
+
+          ls -lh bundle-artifacts/source-workspace.odt.zip
+
+      - name: Validate bundle manifest and contents
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import configparser
+          import hashlib
+          import io
+          import json
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          bundle_path = Path("bundle-artifacts/source-workspace.odt.zip")
+          assert bundle_path.is_file(), bundle_path
+
+          with zipfile.ZipFile(bundle_path) as archive:
+              names = archive.namelist()
+              normalized_names = [name.rstrip("/") for name in names]
+
+              assert "manifest.json" in names
+              assert "odoo-project.ini" in names
+              assert "odoo/" in names
+              assert "odoo-addons/" in names
+              assert "wheelhouse/" in names
+              assert "wheelhouse/all-requirements.lock.txt" in names
+              assert any(name.startswith("wheelhouse/") and name.endswith(".whl") for name in names)
+
+              forbidden_parts = {".git", "venv", "odoo-data", "odoo-logs", "odoo-backups"}
+              for name in normalized_names:
+                  parts = set(Path(name).parts)
+                  assert not parts.intersection(forbidden_parts), name
+
+              marker = "odoo-addons/oca-web/odt-bundle-dirty-marker.txt"
+              assert marker in names
+
+              manifest = json.loads(archive.read("manifest.json"))
+              assert manifest["format"] == "odt-env-workspace-bundle", manifest
+              assert manifest["format_version"] == 1, manifest
+              assert manifest["compatibility"]["sys_platform"] == sys.platform, manifest
+              assert manifest["project"]["odoo_version"] == "18.0", manifest
+
+              sources = manifest["sources"]
+              assert sources["odoo"]["snapshot"]["dirty"] is False, sources
+              assert sources["addons"]["oca-web"]["snapshot"]["dirty"] is True, sources
+              assert sources["addons"]["oca-helpdesk"]["snapshot"]["dirty"] is False, sources
+
+              expected_files = {item["path"]: item for item in manifest["files"]}
+              actual_files = {
+                  name
+                  for name in names
+                  if not name.endswith("/") and name != "manifest.json"
+              }
+              assert actual_files == set(expected_files), (
+                  sorted(set(expected_files) - actual_files),
+                  sorted(actual_files - set(expected_files)),
+              )
+
+              for relative, item in expected_files.items():
+                  digest = hashlib.sha256()
+                  size = 0
+                  with archive.open(relative) as source:
+                      while True:
+                          chunk = source.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          size += len(chunk)
+                          digest.update(chunk)
+                  assert size == item["size"], relative
+                  assert digest.hexdigest() == item["sha256"], relative
+
+              portable_ini = archive.read("odoo-project.ini").decode("utf-8")
+              assert "bundle-build-secret" not in portable_ini
+
+              parser = configparser.ConfigParser(interpolation=None)
+              parser.read_file(io.StringIO(portable_ini))
+              assert parser.get("odoo", "path") == "odoo"
+              assert parser.get("addons.oca-web", "path") == "odoo-addons/oca-web"
+              assert parser.get("addons.oca-helpdesk", "path") == "odoo-addons/oca-helpdesk"
+              assert parser.get("config", "db_password") == ""
+
+          print(f"Bundle validation OK: {bundle_path}")
+          PY
+
+      - name: Create a bundle with a broken checksum
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          source_path = Path("bundle-artifacts/source-workspace.odt.zip")
+          target_path = Path("bundle-artifacts/tampered.odt.zip")
+
+          with zipfile.ZipFile(source_path, "r") as source, zipfile.ZipFile(
+              target_path,
+              "w",
+              compression=zipfile.ZIP_DEFLATED,
+              compresslevel=6,
+          ) as target:
+              for info in source.infolist():
+                  data = source.read(info.filename)
+                  if info.filename == "odoo-project.ini":
+                      data += b"\n# checksum tampering test\n"
+                  target.writestr(info, data)
+
+          print(f"Created tampered bundle: {target_path}")
+          PY
+
+      - name: Reject bundle with a broken checksum
+        shell: bash
+        run: |
+          set +e
+          UV_OFFLINE=1 uv run odt-env \
+            --create-from-bundle bundle-artifacts/tampered.odt.zip \
+            --root tampered-workspace \
+            > tampered-bundle-rejected.log 2>&1
+          status=$?
+          set -e
+
+          cat tampered-bundle-rejected.log
+          test "$status" -ne 0
+          grep -E "size check failed|checksum failed" tampered-bundle-rejected.log
+          test -d tampered-workspace
+          test -z "$(find tampered-workspace -mindepth 1 -maxdepth 1 -print -quit)"
+
+      - name: Remove original workspace
+        shell: bash
+        run: |
+          rm -rf source-workspace
+          test ! -e source-workspace
+
+      - name: Restore workspace from bundle strictly offline
+        shell: bash
+        run: |
+          UV_OFFLINE=1 uv run odt-env \
+            --create-from-bundle bundle-artifacts/source-workspace.odt.zip \
+            --root restored-workspace \
+            --set config:db_password=odoo \
+            --set config:db_name=odoo_bundle
+
+      - name: Validate restored workspace
+        shell: bash
+        run: |
+          test -f restored-workspace/odoo-project.ini
+          test -f restored-workspace/.odt-env/imported-bundle-manifest.json
+          test -f restored-workspace/.odt-env/last-provisioning.json
+          test -d restored-workspace/odoo
+          test -d restored-workspace/odoo-addons/oca-web
+          test -d restored-workspace/odoo-addons/oca-helpdesk
+          test -d restored-workspace/wheelhouse
+          test -x restored-workspace/venv/bin/python
+          test -x restored-workspace/odoo-scripts/run.sh
+          test ! -e restored-workspace/odoo/.git
+          test ! -e restored-workspace/odoo-addons/oca-web/.git
+          test ! -e restored-workspace/odoo-addons/oca-helpdesk/.git
+          test -f restored-workspace/odoo-addons/oca-web/odt-bundle-dirty-marker.txt
+
+          grep -F "path = odoo" restored-workspace/odoo-project.ini
+          grep -F "path = odoo-addons/oca-web" restored-workspace/odoo-project.ini
+          grep -F "db_password = odoo" restored-workspace/odoo-project.ini
+          grep -F "db_name = odoo_bundle" restored-workspace/odoo-project.ini
+          grep -F "db_password = odoo" restored-workspace/odoo-configs/odoo-server.conf
+          grep -F "db_name = odoo_bundle" restored-workspace/odoo-configs/odoo-server.conf
+
+          python3 <<'PY'
+          import json
+          from pathlib import Path
+
+          provisioning_path = Path("restored-workspace/.odt-env/last-provisioning.json")
+          provisioning = json.loads(provisioning_path.read_text(encoding="utf-8"))
+          assert provisioning.get("status") == "success", provisioning
+
+          imported_path = Path("restored-workspace/.odt-env/imported-bundle-manifest.json")
+          imported = json.loads(imported_path.read_text(encoding="utf-8"))
+          assert imported["format"] == "odt-env-workspace-bundle", imported
+          assert imported["sources"]["addons"]["oca-web"]["snapshot"]["dirty"] is True, imported
+
+          print("Restored workspace metadata OK")
+          PY
+
+      - name: Initialize database from restored bundle
+        working-directory: restored-workspace
+        run: ./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt --stop-after-init
+
+      - name: Verify OCA addons installed from restored bundle
+        env:
+          PGPASSWORD: odoo
+        shell: bash
+        run: |
+          psql -h 127.0.0.1 -U odoo -d odoo_bundle -c \
+            "SELECT name, state
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+             ORDER BY name;"
+
+          missing="$(psql -h 127.0.0.1 -U odoo -d odoo_bundle -tAc \
+            "SELECT string_agg(name, ',')
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+               AND state <> 'installed';")"
+
+          test -z "$missing"
+
+      - name: Show bundle and restored workspace diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "Bundle files:"
+          ls -lh bundle-artifacts || true
+          echo
+          echo "Restored workspace tree:"
+          find restored-workspace -maxdepth 2 -print | sort || true
+          echo
+          echo "Restored Odoo config:"
+          cat restored-workspace/odoo-configs/odoo-server.conf || true
+          echo
+          echo "Imported bundle manifest:"
+          cat restored-workspace/.odt-env/imported-bundle-manifest.json || true
+          echo
+          echo "Last provisioning manifest:"
+          cat restored-workspace/.odt-env/last-provisioning.json || true
+          echo
+          echo "Dirty bundle rejection log:"
+          cat dirty-bundle-rejected.log || true
+          echo
+          echo "Tampered bundle rejection log:"
+          cat tampered-bundle-rejected.log || true

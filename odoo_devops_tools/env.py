@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import hashlib
 import io
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -21,6 +23,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -38,6 +41,26 @@ _URL_INI_TIMEOUT_SECONDS = 30
 _URL_INI_MAX_BYTES = 1024 * 1024
 
 _DEFAULT_PROJECT_INI_NAME = "odoo-project.ini"
+
+_BUNDLE_FORMAT = "odt-env-workspace-bundle"
+_BUNDLE_FORMAT_VERSION = 1
+_BUNDLE_MANIFEST_NAME = "manifest.json"
+_BUNDLE_DEFAULT_SUFFIX = ".odt.zip"
+_BUNDLE_ALLOWED_TOP_LEVEL = {
+    _BUNDLE_MANIFEST_NAME,
+    _DEFAULT_PROJECT_INI_NAME,
+    "odoo",
+    "odoo-addons",
+    "wheelhouse",
+}
+_BUNDLE_IGNORED_NAMES = {
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+}
+_BUNDLE_IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 _DEFAULT_PROJECT_INI_TEMPLATE = r"""
 [virtualenv]
@@ -2994,6 +3017,625 @@ def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str 
 
 
 # -----------------------------
+# Portable workspace bundles
+# -----------------------------
+
+def _normalized_machine(value: Optional[str] = None) -> str:
+    machine = (value or platform.machine() or "unknown").strip().lower()
+    aliases = {
+        "amd64": "x86_64",
+        "x64": "x86_64",
+        "aarch64": "arm64",
+    }
+    return aliases.get(machine, machine)
+
+
+def _is_path_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_bundle_addon_name(name: str) -> str:
+    value = (name or "").strip()
+    if not value or value in {".", ".."} or Path(value).name != value or "/" in value or "\\" in value:
+        raise Exception(
+            f"Invalid addon name for workspace bundle: {name!r}. "
+            "Addon section names must not contain path separators."
+        )
+    return value
+
+
+def _bundle_ignore_entry(path: Path) -> bool:
+    return path.name in _BUNDLE_IGNORED_NAMES or path.suffix.lower() in _BUNDLE_IGNORED_SUFFIXES
+
+
+def _resolve_bundle_symlink(path: Path, source_root: Path, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as e:
+        raise Exception(f"Cannot resolve symlink in {label}: {path} ({e})") from e
+
+    if not _is_path_within(resolved, source_root):
+        raise Exception(
+            f"Cannot create a portable bundle because {label} contains a symlink "
+            f"that points outside its source tree: {path} -> {resolved}"
+        )
+    return resolved
+
+
+def _copy_tree_for_bundle(source: Path, destination: Path, label: str) -> None:
+    source = _validate_existing_dir(source, label)
+    source_root = source.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    def copy_directory(current: Path, target_dir: Path, active_directories: set[Path]) -> None:
+        try:
+            resolved_current = current.resolve(strict=True)
+        except (OSError, RuntimeError) as e:
+            raise Exception(f"Cannot resolve directory in {label}: {current} ({e})") from e
+
+        if not _is_path_within(resolved_current, source_root):
+            raise Exception(
+                f"Cannot create a portable bundle because {label} resolves outside its source tree: "
+                f"{current} -> {resolved_current}"
+            )
+        if resolved_current in active_directories:
+            raise Exception(
+                f"Cannot create a portable bundle because {label} contains a cyclic directory symlink: {current}"
+            )
+        if not resolved_current.is_dir():
+            raise Exception(f"Expected a directory in {label}: {current}")
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        next_active = {*active_directories, resolved_current}
+
+        try:
+            entries = sorted(current.iterdir(), key=lambda item: item.name)
+        except OSError as e:
+            raise Exception(f"Failed to list directory in {label}: {current} ({e})") from e
+
+        for entry in entries:
+            if _bundle_ignore_entry(entry):
+                continue
+
+            target = target_dir / entry.name
+            if entry.is_symlink():
+                resolved_entry = _resolve_bundle_symlink(entry, source_root, label)
+                if resolved_entry.is_dir():
+                    # Store a real directory tree in the bundle rather than a
+                    # symlink. This supports common OCA setup/odoo/addons links
+                    # and keeps the resulting ZIP portable across platforms.
+                    copy_directory(resolved_entry, target, next_active)
+                elif resolved_entry.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(resolved_entry, target)
+                else:
+                    raise Exception(f"Unsupported symlink target in {label}: {entry} -> {resolved_entry}")
+                continue
+
+            if entry.is_dir():
+                copy_directory(entry, target, next_active)
+            elif entry.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(entry, target)
+            else:
+                raise Exception(f"Unsupported non-regular file in {label}: {entry}")
+
+    copy_directory(source_root, destination, set())
+
+
+def _git_snapshot(path: Path, label: str, allow_dirty: bool) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "is_git_repository": False,
+        "head": None,
+        "branch": None,
+        "dirty": None,
+    }
+
+    if shutil.which("git") is None:
+        return metadata
+
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(path),
+        text=True,
+        capture_output=True,
+    )
+    if probe.returncode != 0 or (probe.stdout or "").strip().lower() != "true":
+        return metadata
+
+    metadata["is_git_repository"] = True
+    metadata["head"] = _run(["git", "rev-parse", "HEAD"], cwd=path)
+    branch = subprocess.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=str(path),
+        text=True,
+        capture_output=True,
+    )
+    metadata["branch"] = (branch.stdout or "").strip() or None
+    status = _run(["git", "status", "--porcelain", "--", "."], cwd=path)
+    metadata["dirty"] = bool(status.strip())
+
+    if metadata["dirty"] and not allow_dirty:
+        raise Exception(
+            f"Cannot create workspace bundle: {label} has uncommitted changes: {path}\n"
+            "Commit, stash, or discard the changes, or pass --allow-dirty-bundle to bundle the current snapshot."
+        )
+
+    return metadata
+
+
+def _portable_project_ini(
+        ini_path: Path,
+        cfg: ProjectConfig,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+) -> str:
+    source = _read_ini(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+        log_overrides=False,
+    )
+    portable = configparser.ConfigParser(interpolation=None)
+
+    for section in source.sections():
+        if section == "odoo" or section.startswith("addons."):
+            continue
+        portable.add_section(section)
+        for option in source._sections.get(section, {}).keys():
+            value = source.get(section, option, raw=False)
+            if _is_sensitive_key(option):
+                value = ""
+            elif _redact_url_secret(value) != value:
+                value = ""
+            elif section == "config" and option == "data_dir":
+                value = ""
+            portable.set(section, option, value)
+
+    portable.add_section("odoo")
+    portable.set("odoo", "version", cfg.odoo.version)
+    portable.set("odoo", "path", "odoo")
+
+    for addon_name in cfg.addons:
+        safe_name = _safe_bundle_addon_name(addon_name)
+        section = f"addons.{safe_name}"
+        portable.add_section(section)
+        portable.set(section, "path", f"odoo-addons/{safe_name}")
+
+    buf = io.StringIO()
+    portable.write(buf)
+    return buf.getvalue()
+
+
+def _source_manifest_entry(
+        *,
+        configured_type: str,
+        repo: Optional[str],
+        branch: Optional[str],
+        commit: Optional[str],
+        git_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "configured_type": configured_type,
+        "repo": _redact_url_secret(repo) if repo else None,
+        "branch": branch,
+        "configured_commit": commit,
+        "snapshot": git_snapshot,
+    }
+
+
+def _bundle_file_manifest(staging_root: Path) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    for path in sorted(staging_root.rglob("*"), key=lambda item: item.as_posix()):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(staging_root).as_posix()
+        if relative == _BUNDLE_MANIFEST_NAME:
+            continue
+        files.append({
+            "path": relative,
+            "size": path.stat().st_size,
+            "sha256": _sha256_file(path),
+            "mode": stat.S_IMODE(path.stat().st_mode),
+        })
+    return files
+
+
+def create_workspace_bundle(
+        *,
+        layout: Layout,
+        cfg: ProjectConfig,
+        ini_path: Path,
+        output_path: Path,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        allow_dirty: bool,
+) -> Path:
+    output_path = output_path.expanduser()
+    try:
+        output_path = output_path.resolve()
+    except Exception:
+        output_path = output_path.absolute()
+
+    if output_path.exists() and output_path.is_dir():
+        raise Exception(f"Workspace bundle output is a directory: {output_path}")
+
+    odoo_source = _validate_local_odoo_path(layout, cfg.odoo)
+    addon_sources: dict[str, Path] = {}
+    for addon_name, spec in cfg.addons.items():
+        safe_name = _safe_bundle_addon_name(addon_name)
+        addon_sources[safe_name] = _validate_local_addon_path(layout, addon_name, spec)
+
+    wheelhouse = _validate_existing_dir(layout.wheelhouse_dir, "Wheelhouse directory")
+    lock_path = wheelhouse / "all-requirements.lock.txt"
+    if not lock_path.is_file():
+        raise Exception(
+            f"Cannot create workspace bundle because the dependency lock is missing: {lock_path}\n"
+            "Run odt-env with --create-venv first to build a complete wheelhouse."
+        )
+    build_constraints_path = wheelhouse / "build-constraints.txt"
+    if cfg.virtualenv.build_constraints and not build_constraints_path.is_file():
+        raise Exception(
+            f"Cannot create workspace bundle because build constraints are missing: {build_constraints_path}\n"
+            "Run odt-env with --create-venv first to build a complete wheelhouse."
+        )
+
+    included_roots = [odoo_source, wheelhouse, *addon_sources.values()]
+    for included_root in included_roots:
+        if _is_path_within(output_path, included_root):
+            raise Exception(
+                f"Workspace bundle output must not be written inside bundled content: {output_path}\n"
+                f"Conflicting source: {included_root}"
+            )
+
+    odoo_git = _git_snapshot(odoo_source, "Odoo source", allow_dirty)
+    addons_git: dict[str, dict[str, Any]] = {}
+    for addon_name, source in addon_sources.items():
+        addons_git[addon_name] = _git_snapshot(source, f"addon [{addon_name}]", allow_dirty)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_output = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    if temporary_output.exists():
+        temporary_output.unlink()
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="odt-env-bundle-") as temp_dir:
+            staging_root = Path(temp_dir)
+            _write_text_file(
+                staging_root / _DEFAULT_PROJECT_INI_NAME,
+                _portable_project_ini(
+                    ini_path,
+                    cfg,
+                    vars_overrides=vars_overrides,
+                    ini_overrides=ini_overrides,
+                ),
+                private=True,
+            )
+            _copy_tree_for_bundle(odoo_source, staging_root / "odoo", "Odoo source")
+            for addon_name, source in addon_sources.items():
+                _copy_tree_for_bundle(
+                    source,
+                    staging_root / "odoo-addons" / addon_name,
+                    f"addon [{addon_name}]",
+                )
+            (staging_root / "odoo-addons").mkdir(parents=True, exist_ok=True)
+            _copy_tree_for_bundle(wheelhouse, staging_root / "wheelhouse", "wheelhouse")
+
+            files = _bundle_file_manifest(staging_root)
+            manifest = {
+                "format": _BUNDLE_FORMAT,
+                "format_version": _BUNDLE_FORMAT_VERSION,
+                "created_at": _utc_now_iso(),
+                "created_by": {
+                    "odt_env_version": __version__,
+                    "host": socket.gethostname(),
+                },
+                "compatibility": {
+                    "sys_platform": sys.platform,
+                    "machine": _normalized_machine(),
+                    "python_implementation": "cpython",
+                    "python_version": cfg.virtualenv.python_version,
+                },
+                "project": {
+                    "odoo_version": cfg.odoo.version,
+                    "managed_python": cfg.virtualenv.managed_python,
+                },
+                "sources": {
+                    "odoo": _source_manifest_entry(
+                        configured_type="local" if cfg.odoo.is_local else "git",
+                        repo=cfg.odoo.repo if not cfg.odoo.is_local else None,
+                        branch=cfg.odoo.branch if not cfg.odoo.is_local else None,
+                        commit=cfg.odoo.commit if not cfg.odoo.is_local else None,
+                        git_snapshot=odoo_git,
+                    ),
+                    "addons": {
+                        addon_name: _source_manifest_entry(
+                            configured_type="local" if cfg.addons[addon_name].is_local else "git",
+                            repo=cfg.addons[addon_name].repo,
+                            branch=cfg.addons[addon_name].branch,
+                            commit=cfg.addons[addon_name].commit,
+                            git_snapshot=addons_git[addon_name],
+                        )
+                        for addon_name, source in addon_sources.items()
+                    },
+                },
+                "files": files,
+            }
+            _write_text_file(
+                staging_root / _BUNDLE_MANIFEST_NAME,
+                json.dumps(manifest, indent=2, sort_keys=False) + "\n",
+                private=True,
+            )
+
+            with zipfile.ZipFile(
+                    temporary_output,
+                    mode="w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    compresslevel=6,
+            ) as archive:
+                for path in sorted(staging_root.rglob("*"), key=lambda item: item.as_posix()):
+                    arcname = path.relative_to(staging_root).as_posix()
+                    if path.is_dir():
+                        arcname = f"{arcname}/"
+                    archive.write(path, arcname)
+
+        os.replace(temporary_output, output_path)
+    except Exception:
+        try:
+            temporary_output.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    _logger.info("Created portable workspace bundle: %s", output_path)
+    return output_path
+
+
+def _validate_bundle_member(info: zipfile.ZipInfo) -> PurePosixPath:
+    raw_name = info.filename
+    if not raw_name or "\\" in raw_name or raw_name.startswith("/"):
+        raise Exception(f"Unsafe path in workspace bundle: {raw_name!r}")
+
+    path = PurePosixPath(raw_name)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise Exception(f"Unsafe path in workspace bundle: {raw_name!r}")
+    if path.parts[0] not in _BUNDLE_ALLOWED_TOP_LEVEL:
+        raise Exception(f"Unsupported top-level path in workspace bundle: {raw_name!r}")
+
+    unix_mode = info.external_attr >> 16
+    if unix_mode and stat.S_ISLNK(unix_mode):
+        raise Exception(f"Symbolic links are not allowed in workspace bundles: {raw_name!r}")
+    return path
+
+
+def _read_bundle_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
+    manifest_entries = [info for info in archive.infolist() if info.filename == _BUNDLE_MANIFEST_NAME]
+    if len(manifest_entries) != 1:
+        raise Exception(
+            f"Invalid workspace bundle: expected exactly one {_BUNDLE_MANIFEST_NAME}, "
+            f"found {len(manifest_entries)}."
+        )
+    try:
+        payload = json.loads(archive.read(manifest_entries[0]).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise Exception(f"Invalid workspace bundle manifest: {e}") from e
+    if not isinstance(payload, dict):
+        raise Exception("Invalid workspace bundle manifest: expected a JSON object.")
+    return payload
+
+
+def _validate_bundle_manifest(manifest: dict[str, Any]) -> None:
+    if manifest.get("format") != _BUNDLE_FORMAT:
+        raise Exception(f"Unsupported workspace bundle format: {manifest.get('format')!r}")
+    if manifest.get("format_version") != _BUNDLE_FORMAT_VERSION:
+        raise Exception(
+            f"Unsupported workspace bundle version: {manifest.get('format_version')!r}; "
+            f"supported version is {_BUNDLE_FORMAT_VERSION}."
+        )
+
+    compatibility = manifest.get("compatibility")
+    if not isinstance(compatibility, dict):
+        raise Exception("Invalid workspace bundle manifest: missing compatibility metadata.")
+
+    raw_platform = compatibility.get("sys_platform")
+    raw_machine = compatibility.get("machine")
+    if not isinstance(raw_platform, str) or not raw_platform.strip():
+        raise Exception("Invalid workspace bundle manifest: missing target platform.")
+    if not isinstance(raw_machine, str) or not raw_machine.strip():
+        raise Exception("Invalid workspace bundle manifest: missing target CPU architecture.")
+
+    bundle_platform = raw_platform.strip()
+    bundle_machine = _normalized_machine(raw_machine)
+    current_machine = _normalized_machine()
+    if bundle_platform != sys.platform or bundle_machine != current_machine:
+        raise Exception(
+            "Workspace bundle is not compatible with this machine.\n"
+            f"Bundle: platform={bundle_platform or '<missing>'}, machine={bundle_machine or '<missing>'}\n"
+            f"Current: platform={sys.platform}, machine={current_machine}"
+        )
+
+
+def _extract_bundle_to_staging(
+        archive: zipfile.ZipFile,
+        staging_root: Path,
+) -> None:
+    seen: set[str] = set()
+    for info in archive.infolist():
+        path = _validate_bundle_member(info)
+        normalized = path.as_posix().rstrip("/")
+        if normalized in seen:
+            raise Exception(f"Duplicate path in workspace bundle: {normalized}")
+        seen.add(normalized)
+
+        target = staging_root.joinpath(*path.parts)
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(info, "r") as source, target.open("wb") as destination:
+            shutil.copyfileobj(source, destination)
+
+        unix_mode = stat.S_IMODE(info.external_attr >> 16)
+        if unix_mode and not sys.platform.startswith("win"):
+            try:
+                target.chmod(unix_mode)
+            except OSError:
+                pass
+
+
+def _verify_extracted_bundle(staging_root: Path, manifest: dict[str, Any]) -> None:
+    raw_files = manifest.get("files")
+    if not isinstance(raw_files, list):
+        raise Exception("Invalid workspace bundle manifest: 'files' must be a list.")
+
+    expected: dict[str, dict[str, Any]] = {}
+    for item in raw_files:
+        if not isinstance(item, dict):
+            raise Exception("Invalid workspace bundle manifest: each file entry must be an object.")
+        relative = item.get("path")
+        if not isinstance(relative, str):
+            raise Exception("Invalid workspace bundle manifest: file path must be a string.")
+        pseudo_info = zipfile.ZipInfo(relative)
+        _validate_bundle_member(pseudo_info)
+        if relative == _BUNDLE_MANIFEST_NAME or relative in expected:
+            raise Exception(f"Invalid or duplicate file path in workspace bundle manifest: {relative}")
+        expected[relative] = item
+
+    actual = {
+        path.relative_to(staging_root).as_posix()
+        for path in staging_root.rglob("*")
+        if path.is_file() and path.relative_to(staging_root).as_posix() != _BUNDLE_MANIFEST_NAME
+    }
+    if actual != set(expected):
+        missing = sorted(set(expected) - actual)
+        unexpected = sorted(actual - set(expected))
+        raise Exception(
+            "Workspace bundle contents do not match its manifest.\n"
+            f"Missing: {missing or 'none'}\n"
+            f"Unexpected: {unexpected or 'none'}"
+        )
+
+    for relative, item in expected.items():
+        path = staging_root.joinpath(*PurePosixPath(relative).parts)
+        expected_size = item.get("size")
+        expected_hash = item.get("sha256")
+        if not isinstance(expected_size, int) or not isinstance(expected_hash, str):
+            raise Exception(f"Invalid checksum metadata for bundle file: {relative}")
+        if path.stat().st_size != expected_size:
+            raise Exception(f"Workspace bundle size check failed for: {relative}")
+        actual_hash = _sha256_file(path)
+        if actual_hash != expected_hash:
+            raise Exception(f"Workspace bundle checksum failed for: {relative}")
+
+    required = [
+        staging_root / _DEFAULT_PROJECT_INI_NAME,
+        staging_root / "odoo",
+        staging_root / "odoo-addons",
+        staging_root / "wheelhouse",
+        staging_root / "wheelhouse" / "all-requirements.lock.txt",
+    ]
+    for path in required:
+        if not path.exists():
+            raise Exception(f"Workspace bundle is missing required content: {path.relative_to(staging_root)}")
+
+
+def _ensure_empty_bundle_root(root: Path) -> None:
+    if root.exists() and not root.is_dir():
+        raise Exception(f"Workspace ROOT is not a directory: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        first = next(root.iterdir())
+    except StopIteration:
+        return
+    raise Exception(
+        f"Workspace ROOT must be empty when importing a bundle: {root}\n"
+        f"Found existing entry: {first.name}"
+    )
+
+
+def extract_workspace_bundle(bundle_path: Path, root: Path) -> tuple[Path, dict[str, Any]]:
+    bundle_path = bundle_path.expanduser()
+    try:
+        bundle_path = bundle_path.resolve()
+    except Exception:
+        bundle_path = bundle_path.absolute()
+    if not bundle_path.is_file():
+        raise Exception(f"Workspace bundle not found: {bundle_path}")
+
+    _ensure_empty_bundle_root(root)
+    moved: list[Path] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix=".odt-env-import-", dir=str(root.parent)) as temp_dir:
+            staging_root = Path(temp_dir)
+            with zipfile.ZipFile(bundle_path, "r") as archive:
+                manifest = _read_bundle_manifest(archive)
+                _validate_bundle_manifest(manifest)
+                _extract_bundle_to_staging(archive, staging_root)
+            _verify_extracted_bundle(staging_root, manifest)
+
+            for name in sorted(_BUNDLE_ALLOWED_TOP_LEVEL - {_BUNDLE_MANIFEST_NAME}):
+                source = staging_root / name
+                if not source.exists():
+                    continue
+                destination = root / name
+                shutil.move(str(source), str(destination))
+                moved.append(destination)
+
+            imported_manifest = root / ".odt-env" / "imported-bundle-manifest.json"
+            _write_text_file(
+                imported_manifest,
+                json.dumps(manifest, indent=2, sort_keys=False) + "\n",
+                private=True,
+                atomic=True,
+            )
+            moved.append(imported_manifest.parent)
+    except Exception:
+        for path in reversed(moved):
+            try:
+                if path.is_dir():
+                    _rmtree(path)
+                elif path.exists():
+                    path.unlink()
+            except OSError:
+                pass
+        raise
+
+    ini_path = root / _DEFAULT_PROJECT_INI_NAME
+    _logger.info("Imported workspace bundle: %s -> %s", bundle_path, root)
+    return ini_path, manifest
+
+
+def _default_bundle_output(root: Path) -> Path:
+    workspace_name = root.name.strip() or "odoo-workspace"
+    return root / "dist" / f"{workspace_name}{_BUNDLE_DEFAULT_SUFFIX}"
+
+
+def _resolve_bundle_output(raw_output: str, root: Path) -> Path:
+    if raw_output == "":
+        return _default_bundle_output(root)
+    candidate = Path(raw_output).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        return candidate.resolve()
+    except Exception:
+        return candidate.absolute()
+
+
+# -----------------------------
 # Main logic
 # -----------------------------
 
@@ -3009,6 +3651,8 @@ def _sync_project_impl(
         no_scripts: bool = False,
         no_data_dir: bool = False,
         build_docker_image_requested: bool = False,
+        bundle_output: Optional[Path] = None,
+        allow_dirty_bundle: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         source_ini_layers: Optional[list[str]] = None,
@@ -3420,6 +4064,18 @@ def _sync_project_impl(
     else:
         _logger.info("Skipping script generation (--no-scripts).")
 
+    bundle_created: Optional[Path] = None
+    if bundle_output is not None:
+        bundle_created = create_workspace_bundle(
+            layout=layout,
+            cfg=cfg,
+            ini_path=ini_path,
+            output_path=bundle_output,
+            vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
+            allow_dirty=allow_dirty_bundle,
+        )
+
     synced: list[str] = []
     if sync_odoo:
         synced.append("odoo")
@@ -3465,6 +4121,9 @@ def _sync_project_impl(
             bc = layout.wheelhouse_dir / "build-constraints.txt"
             if bc.exists():
                 _logger.info(f"  Build Constraints:  {bc}")
+
+    if bundle_created is not None:
+        _logger.info(f"  Bundle:            {bundle_created}")
 
     if docker_artifacts is not None or build_docker_image_requested:
         _logger.info(f"  Docker Addons Mode:        {cfg.docker.addons_mode}")
@@ -3527,6 +4186,8 @@ def sync_project(
         no_scripts: bool = False,
         no_data_dir: bool = False,
         build_docker_image_requested: bool = False,
+        bundle_output: Optional[Path] = None,
+        allow_dirty_bundle: bool = False,
         vars_overrides: Optional[Dict[str, str]] = None,
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         no_provisioning_log: bool = False,
@@ -3547,6 +4208,8 @@ def sync_project(
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
+            bundle_output=bundle_output,
+            allow_dirty_bundle=allow_dirty_bundle,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             source_ini_layers=source_ini_layers,
@@ -3590,6 +4253,8 @@ def sync_project(
             "no_scripts": no_scripts,
             "no_data_dir": no_data_dir,
             "build_docker_image": build_docker_image_requested,
+            "create_bundle": str(bundle_output) if bundle_output is not None else None,
+            "allow_dirty_bundle": allow_dirty_bundle,
         },
         "vars_overrides": _redact_mapping(vars_overrides or {}),
         "ini_overrides": _redact_mapping(ini_overrides or {}),
@@ -3599,6 +4264,7 @@ def sync_project(
             "last_manifest": str(last_path),
             "source_ini": None,
             "resolved_ini": None,
+            "bundle": str(bundle_output) if bundle_output is not None else None,
         },
         "error": None,
     }
@@ -3640,6 +4306,8 @@ def sync_project(
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
+            bundle_output=bundle_output,
+            allow_dirty_bundle=allow_dirty_bundle,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             source_ini_layers=effective_source_ini_layers,
@@ -4278,6 +4946,12 @@ Examples:
   Offline deployment from a prebuilt wheelhouse:
     odt-env /path/to/odoo-project.ini --create-venv-from-wheelhouse
 
+  Creating a portable workspace bundle:
+    odt-env --root ./odoo18-workspace --create-bundle
+
+  Creating a workspace from a portable bundle:
+    odt-env --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
+
   Inspecting provisioning history:
     odt-env /path/to/odoo-project.ini --show-last-run
 """
@@ -4392,6 +5066,36 @@ Examples:
         "--clear-pip-wheel-cache",
         action="store_true",
         help="Remove all items from the pip's wheel cache.",
+    )
+
+    parser.add_argument(
+        "--create-bundle",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="BUNDLE",
+        help=(
+            "Create a portable ZIP containing Odoo sources, configured addon sources, "
+            "a sanitized project INI, and the offline wheelhouse. When BUNDLE is omitted, "
+            "write ROOT/dist/ROOT-NAME.odt.zip."
+        ),
+    )
+    parser.add_argument(
+        "--allow-dirty-bundle",
+        action="store_true",
+        help=(
+            "Allow --create-bundle to snapshot Git repositories with uncommitted changes. "
+            "The dirty state is recorded in the bundle manifest."
+        ),
+    )
+    parser.add_argument(
+        "--create-from-bundle",
+        metavar="BUNDLE",
+        default=None,
+        help=(
+            "Create an empty workspace from a portable bundle, verify its manifest and checksums, "
+            "then recreate ROOT/venv strictly from the bundled wheelhouse."
+        ),
     )
 
     parser.add_argument(
@@ -4541,6 +5245,10 @@ def main() -> None:
 
     if bool(getattr(args, 'show_last_run', False)) and bool(getattr(args, 'init_project', False)):
         parser.error("--init-project cannot be used together with --show-last-run.")
+    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
+        parser.error("--create-from-bundle cannot be used together with --show-last-run.")
+    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
+        parser.error("--create-bundle cannot be used together with --show-last-run.")
 
     if bool(getattr(args, 'show_last_run', False)):
         root = _root_for_show_last_run(parser, args)
@@ -4561,6 +5269,12 @@ def main() -> None:
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
     build_docker_image_requested = bool(getattr(args, 'build_docker_image', False))
     no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
+    create_bundle_raw = getattr(args, 'create_bundle', None)
+    create_from_bundle_raw = getattr(args, 'create_from_bundle', None)
+    allow_dirty_bundle = bool(getattr(args, 'allow_dirty_bundle', False))
+
+    if allow_dirty_bundle and create_bundle_raw is None:
+        parser.error("--allow-dirty-bundle requires --create-bundle.")
 
     try:
         vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
@@ -4568,11 +5282,94 @@ def main() -> None:
     except Exception as e:
         parser.error(str(e))
 
+    if create_from_bundle_raw:
+        non_config_sections = sorted(section for section in ini_overrides if section != "config")
+        if non_config_sections:
+            parser.error(
+                "--create-from-bundle only allows --set overrides in [config]; "
+                "unsupported sections: " + ", ".join(non_config_sections)
+            )
+
     if vars_overrides:
         _logger.info('CLI [vars] overrides enabled for keys: %s', ', '.join(sorted(vars_overrides)))
     if ini_overrides:
         override_targets = [f"{section}:{key}" for section, options in ini_overrides.items() for key in options]
         _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
+
+    if create_from_bundle_raw:
+        conflicting_options: list[str] = []
+        if (args.ini or "").strip():
+            conflicting_options.append("INI")
+        if getattr(args, 'include_inis', None):
+            conflicting_options.append("--include")
+        if init_project:
+            conflicting_options.append("--init-project")
+        if args.all or args.odoo or args.addons:
+            conflicting_options.append("--sync-*")
+        if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
+            conflicting_options.append("--create-venv*")
+        if clear_pip_wheel_cache:
+            conflicting_options.append("--clear-pip-wheel-cache")
+        if build_docker_image_requested:
+            conflicting_options.append("--build-docker-image")
+        if create_bundle_raw is not None:
+            conflicting_options.append("--create-bundle")
+        if allow_dirty_bundle:
+            conflicting_options.append("--allow-dirty-bundle")
+        if conflicting_options:
+            parser.error(
+                "--create-from-bundle cannot be combined with: "
+                + ", ".join(conflicting_options)
+            )
+
+        if args.root:
+            bundle_root = _validate_root_override(parser, args.root)
+        else:
+            try:
+                bundle_root = Path.cwd().resolve()
+            except Exception:
+                bundle_root = Path.cwd().absolute()
+
+        bundle_path = Path(create_from_bundle_raw).expanduser()
+        if not bundle_path.is_absolute():
+            bundle_path = Path.cwd() / bundle_path
+
+        try:
+            ini_path, _bundle_manifest = extract_workspace_bundle(bundle_path, bundle_root)
+            if vars_overrides or ini_overrides:
+                _save_effective_ini_copy(
+                    ini_path,
+                    vars_overrides=vars_overrides,
+                    ini_overrides=ini_overrides,
+                )
+            sync_project(
+                ini_path,
+                sync_odoo=False,
+                sync_addons=False,
+                root_override=bundle_root,
+                reuse_wheelhouse=True,
+                create_venv=True,
+                clear_pip_wheel_cache=False,
+                no_configs=no_configs,
+                no_scripts=no_scripts,
+                no_data_dir=no_data_dir,
+                build_docker_image_requested=False,
+                bundle_output=None,
+                allow_dirty_bundle=False,
+                vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
+                no_provisioning_log=no_provisioning_log,
+                cli_argv=sys.argv,
+                source_ini_layers=[_path_for_report(bundle_path)],
+                project_ini_status=(
+                    f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from workspace bundle "
+                    f"{_path_for_report(bundle_path)}"
+                ),
+            )
+        except Exception as e:
+            _logger.error('%s', e)
+            raise SystemExit(1)
+        return
 
     root_override: Optional[Path] = None
     include_inis = [item for item in (getattr(args, 'include_inis', []) or []) if (item or "").strip()]
@@ -4592,6 +5389,7 @@ def main() -> None:
         or create_venv
         or clear_pip_wheel_cache
         or build_docker_image_requested
+        or create_bundle_raw is not None
     )
 
     if implicit_ini:
@@ -4794,6 +5592,13 @@ def main() -> None:
         # No sync target selected -> only regenerate configs + helper scripts.
         sync_odoo, sync_addons = False, False
 
+    workspace_root = (root_override or ini_path.parent).resolve()
+    bundle_output = (
+        _resolve_bundle_output(create_bundle_raw, workspace_root)
+        if create_bundle_raw is not None
+        else None
+    )
+
     try:
         sync_project(
             ini_path,
@@ -4807,6 +5612,8 @@ def main() -> None:
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             build_docker_image_requested=build_docker_image_requested,
+            bundle_output=bundle_output,
+            allow_dirty_bundle=allow_dirty_bundle,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             no_provisioning_log=no_provisioning_log,

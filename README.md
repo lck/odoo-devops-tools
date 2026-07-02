@@ -2,8 +2,8 @@
 
 **Generate reproducible Odoo workspaces.**
 
-`odoo-devops-tools` is a small toolkit for Odoo development, testing, and simple deployment workflows.
-Its main command, **`odt-env`**, reads a project definition and generates an inspectable workspace:
+`odoo-devops-tools` is a toolkit for Odoo development and deployment workflows.  
+Its main command, **`odt-env`**, reads a project definition and generates a reproducible workspace:
 
 ```text
 ROOT/
@@ -17,12 +17,14 @@ ROOT/
 ├── odoo-docker/          # generated Docker build context
 ├── wheelhouse/           # offline Python wheelhouse
 ├── venv/                 # Python virtual environment
+├── dist/                 # portable workspace bundles, when requested
 ├── compose.yml           # generated Docker Compose file, when requested
 ├── odoo-project.ini      # project definition
 └── .odt-env/             # provisioning metadata and project snapshots
 ```
 
-Use it when you want a repeatable Odoo setup for custom or third-party addons, onboarding new developers, offline installs, or lightweight deployment artifacts without introducing a full orchestration platform.
+Use it when you want a repeatable Odoo setup with custom or third-party addons, onboarding new developers,
+offline installs, or lightweight deployment artifacts that can be used directly or integrated into existing CI/CD pipelines.
 
 ---
 
@@ -235,35 +237,87 @@ In this example, `odt-env` installs `psycopg2-binary==2.9.9` and skips `psycopg2
 
 ---
 
-### 4. Simple offline deployment using a prebuilt wheelhouse
+### 4. Creating portable workspace bundles
 
-This example shows a simple deployment workflow:
+A portable workspace bundle is a ZIP archive containing everything needed to recreate an Odoo workspace without cloning repositories or downloading Python packages:
 
-1. On an internet-connected build machine, prepare the workspace and build the wheelhouse.
-2. Copy the prepared workspace to the target machine.
-3. On the target machine, recreate the virtual environment strictly offline from the existing wheelhouse.
-
-#### 4.1. Prepare the workspace on the build machine
-
-On the build machine, run `odt-env` from the workspace root:
-
-```bash
-odt-env --sync-all --create-venv
+```text
+odoo/
+odoo-addons/
+wheelhouse/
+manifest.json
+odoo-project.ini
 ```
 
-This syncs Odoo and addon repositories, resolves and locks Python dependencies, and builds `ROOT/wheelhouse/` for offline installation.
+The bundle does not contain the virtual environment, database data, logs, backups, generated scripts, generated configuration files, Docker artifacts, Git metadata, or provisioning history.
+Those machine-specific outputs are recreated on the target machine.
 
-After that, transfer the prepared workspace to the target machine. The simplest approach is to copy the entire `ROOT/` directory.
+#### 4.1. Create a bundle on the build machine
 
-#### 4.2. Recreate the virtual environment on the target machine
+On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
-On the target machine, from the copied workspace root, run:
+```bash
+odt-env --sync-all --create-venv --create-bundle
+```
+
+When no output path is supplied, the bundle is written to:
+
+```text
+ROOT/dist/ROOT-NAME.odt.zip
+```
+
+You can also select an explicit output file:
+
+```bash
+odt-env --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+```
+
+#### 4.1.1. Including uncommitted changes
+
+By default, bundle creation stops when a bundled Git repository has uncommitted changes.
+
+To intentionally include those changes in the bundle, use:
+
+```bash
+odt-env --sync-all --create-venv --create-bundle --allow-dirty-bundle
+```
+
+#### 4.2. Create the workspace on the target machine
+
+Copy the ZIP to the target machine and import it into an empty directory:
+
+```bash
+odt-env --create-from-bundle ./odoo18-production.odt.zip \
+  --root ./odoo18-prod \
+  --set config:db_host=127.0.0.1 \
+  --set config:db_name=odoo \
+  --set config:db_user=odoo \
+  --set config:db_password=odoo
+```
+
+The import operation:
+
+1. verifies the bundle format, platform, and CPU architecture;
+2. rejects unsafe ZIP paths, duplicate entries, and symbolic links;
+3. verifies every bundled file using its size and SHA-256 checksum;
+4. extracts Odoo, addons, the sanitized project INI, and the wheelhouse;
+5. recreates `ROOT/venv` strictly from the bundled wheelhouse;
+6. regenerates configuration files and helper scripts.
+
+`ROOT` must be empty. If `--root` is omitted, the current working directory is used and must be empty. The imported manifest is saved as `ROOT/.odt-env/imported-bundle-manifest.json`.
+
+> **Compatibility note**
+> A wheelhouse is platform- and architecture-dependent. Create and import a bundle on compatible systems, for example Linux x86-64 to Linux x86-64. The target machine must have `uv` and access to the configured Python version. When `[virtualenv].managed_python = true`, `uv` may still need network access if that Python interpreter is not already installed or cached. For a fully disconnected target, install the required Python interpreter beforehand or use `managed_python = false`.
+
+#### 4.3. Manual wheelhouse workflow
+
+The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
 ```bash
 odt-env --create-venv-from-wheelhouse
 ```
 
-This recreates `ROOT/venv`, skips lock compilation and wheelhouse build, and performs a strict offline install from the existing `ROOT/wheelhouse/`.
+This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building, and installs strictly from the existing `ROOT/wheelhouse/` and `all-requirements.lock.txt`.
 
 ### 5. Building a custom Docker image
 
@@ -525,6 +579,12 @@ Offline deployment from a prebuilt wheelhouse:
 Maintenance:
 
 - `--clear-pip-wheel-cache` — remove all items from pip's wheel cache
+
+### Portable workspace bundles
+
+- `--create-bundle [BUNDLE]` — create a verified portable ZIP containing Odoo sources, configured addon sources, a sanitized `odoo-project.ini`, and `ROOT/wheelhouse/`. If `BUNDLE` is omitted, the output is `ROOT/dist/ROOT-NAME.odt.zip`. Relative explicit output paths are resolved from the current working directory.
+- `--allow-dirty-bundle` — allow `--create-bundle` to snapshot Git repositories with uncommitted changes. Without this option, dirty repositories abort bundle creation.
+- `--create-from-bundle BUNDLE` — verify and extract a portable bundle into an empty `ROOT`, then recreate `ROOT/venv` using the bundled wheelhouse.
 
 ### Docker image generation
 
