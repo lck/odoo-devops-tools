@@ -270,23 +270,30 @@ def _run_checked(
         cmd: list[str],
         cwd: Optional[Path] = None,
         err_msg: Optional[str] = None,
+        stream_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     p = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
         text=True,
-        capture_output=True,
+        capture_output=not stream_output,
     )
-    if err_msg is None:
-        failure_message = "Command failed"
-    else:
-        failure_message = err_msg
-    _handle_process_output(
-        p,
-        f"{failure_message}\n"
-        f"Command: {_format_cmd(cmd)}\n"
-        f"{p.stdout}\n{p.stderr}",
-    )
+
+    failure_message = err_msg if err_msg else "Command failed"
+
+    if not stream_output:
+        _handle_process_output(
+            p,
+            f"{failure_message}\n"
+            f"Command: {_format_cmd(cmd)}\n"
+            f"{p.stdout}\n{p.stderr}",
+        )
+    elif p.returncode != 0:
+        raise Exception(
+            f"{failure_message}\n"
+            f"Command: {_format_cmd(cmd)}"
+        )
+
     return p
 
 
@@ -3012,7 +3019,7 @@ def build_docker_image(layout: Layout, image_name: str, docker_addons_mode: str 
         str(layout.docker_dir),
     ]
     _logger.info("Building Docker image: %s", image_name)
-    _run_checked(cmd, cwd=layout.root, err_msg="Failed to build Docker image.")
+    _run_checked(cmd, cwd=layout.root, err_msg="Failed to build Docker image.", stream_output=True)
     return image_name
 
 
