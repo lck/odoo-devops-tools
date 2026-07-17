@@ -31,7 +31,7 @@ jobs:
 
       - name: Check generated Docker artifacts and image
         run: |
-          test -f odoo-workspace/compose.yml
+          test -f odoo-workspace/compose.yaml
           test -f odoo-workspace/odoo-docker/Dockerfile
           test -f odoo-workspace/odoo-docker/.dockerignore
           test -f odoo-workspace/odoo-docker/configs/odoo.conf
@@ -39,7 +39,7 @@ jobs:
           image="$(awk '
             $1 == "odoo:" { in_odoo = 1 }
             in_odoo && $1 == "image:" { print $2; exit }
-          ' odoo-workspace/compose.yml)"
+          ' odoo-workspace/compose.yaml)"
           test -n "${image}"
           docker image inspect "${image}" >/dev/null
 
@@ -68,7 +68,7 @@ jobs:
              WHERE name IN ('fleet')
              ORDER BY name;"
 
-          missing="$(docker compose -f compose.yml exec -T db psql -U odoo -d odoo -tAc \
+          missing="$(docker compose -f compose.yaml exec -T db psql -U odoo -d odoo -tAc \
             "SELECT string_agg(name, ',')
              FROM ir_module_module
              WHERE name IN ('fleet')
@@ -88,7 +88,7 @@ jobs:
           find odoo-workspace -maxdepth 3 | sort
           echo
           echo "Docker Compose:"
-          cat odoo-workspace/compose.yml || true
+          cat odoo-workspace/compose.yaml || true
           echo
           echo "Dockerfile:"
           cat odoo-workspace/odoo-docker/Dockerfile || true
@@ -100,4 +100,4 @@ jobs:
           docker images || true
           echo
           echo "Docker Compose logs:"
-          cd odoo-workspace && docker compose -f compose.yml logs --no-color || true
+          cd odoo-workspace && docker compose -f compose.yaml logs --no-color || true

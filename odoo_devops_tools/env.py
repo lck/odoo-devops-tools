@@ -2477,7 +2477,7 @@ def _docker_odoo_conf_path(layout: Layout) -> Path:
 
 
 def _docker_compose_path(layout: Layout) -> Path:
-    return layout.root / "compose.yml"
+    return layout.root / "compose.yaml"
 
 
 def _docker_safe_addon_mount_name(addon_name: str) -> str:
@@ -2872,7 +2872,7 @@ def write_docker_compose(
         image_name: str,
         cfg: ProjectConfig,
 ) -> Path:
-    """Write ROOT/compose.yml, always overwriting an existing generated file."""
+    """Write ROOT/compose.yaml, always overwriting an existing generated file."""
     path = _docker_compose_path(layout)
 
     if path.exists() and not path.is_file():
@@ -5114,7 +5114,7 @@ Examples:
         action="store_true",
         help=(
             "Build the Docker image configured by [docker].target_image by extending the configured base Docker image. "
-            "Also generates ROOT/compose.yml."
+            "Also generates ROOT/compose.yaml."
         ),
     )
 

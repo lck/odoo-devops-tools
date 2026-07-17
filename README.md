@@ -18,7 +18,7 @@ ROOT/
 ├── wheelhouse/           # offline Python wheelhouse
 ├── venv/                 # Python virtual environment
 ├── dist/                 # portable workspace bundles, when requested
-├── compose.yml           # generated Docker Compose file, when requested
+├── compose.yaml           # generated Docker Compose file, when requested
 ├── odoo-project.ini      # project definition
 └── .odt-env/             # provisioning metadata and project snapshots
 ```
@@ -356,7 +356,7 @@ odt-env --sync-addons --build-docker-image
 
 After the command completes, the new Docker image is available under the name configured by `[docker].target_image`.
 
-`odt-env` also generates a sample `ROOT/compose.yml` file:
+`odt-env` also generates a sample `ROOT/compose.yaml` file:
 
 ```yaml
 name: mycompany-odoo-18.0
@@ -398,7 +398,7 @@ volumes:
 For local Docker development, set `[docker].addons_mode = dev`.
 
 In dev mode, `odt-env` still builds the configured Docker image so addon Python requirements can be installed,
-but addon source directories are not copied into the image. Instead, `ROOT/compose.yml` bind-mounts each configured
+but addon source directories are not copied into the image. Instead, `ROOT/compose.yaml` bind-mounts each configured
 addon source under the standard Odoo Docker addon location `/mnt/extra-addons/`,
 and `ROOT/odoo-docker/configs/odoo.conf` gets a Docker-specific `addons_path` that points to the mounted addon directories.
 
@@ -516,7 +516,7 @@ If no arguments are specified, `odt-env` prints help and exits.
 #### Default project file convention
 
 If no positional `INI` file is provided and no `-i/--include` option is used, `odt-env` looks for `ROOT/odoo-project.ini`.
-This is similar to how Docker Compose uses `compose.yml` by convention.
+This is similar to how Docker Compose uses `compose.yaml` by convention.
 
 For example, this command:
 
@@ -587,7 +587,7 @@ Maintenance:
 
 ### Docker image generation
 
-- `--build-docker-image` — generate `ROOT/odoo-docker/`, generate and overwrite `ROOT/compose.yml`, and build the image configured by `[docker].target_image` by extending `[docker].base_image` (default: `odoo:${odoo:version}`)
+- `--build-docker-image` — generate `ROOT/odoo-docker/`, generate and overwrite `ROOT/compose.yaml`, and build the image configured by `[docker].target_image` by extending `[docker].base_image` (default: `odoo:${odoo:version}`)
 
 ### Other options
 
@@ -750,8 +750,8 @@ This section is optional.
 - `base_image` — Docker image used as the base image in the generated Dockerfile. Default: `odoo:${odoo:version}`.
 - `addons_mode` — Docker addon mode. Supported values: `deploy` and `dev`. Default: `deploy`.
   - `deploy` copies addon modules into the image under `/mnt/extra-addons/`.
-  - `dev` bind-mounts addon source directories in `ROOT/compose.yml` and writes Docker container paths into `ROOT/odoo-docker/configs/odoo.conf`.
-- `compose_project_name` — optional top-level name written to `ROOT/compose.yml`.
+  - `dev` bind-mounts addon source directories in `ROOT/compose.yaml` and writes Docker container paths into `ROOT/odoo-docker/configs/odoo.conf`.
+- `compose_project_name` — optional top-level name written to `ROOT/compose.yaml`.
 - `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
 - `db_service` — Docker Compose service name for PostgreSQL. Default: `db`.
 
