@@ -2749,6 +2749,10 @@ def _render_docker_compose_ports(cfg: Dict[str, Any]) -> str:
         )
 
     host_async_port = host_gevent_port if host_gevent_port is not None else host_longpolling_port
+    workers = int(str(cfg.get("workers", "0")).strip() or "0")
+    if host_async_port is None and workers > 0:
+        host_async_port = _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT
+
     if host_async_port is not None:
         ports.append(
             f'      - "{host_async_port}:{_DEFAULT_DOCKER_GEVENT_CONTAINER_PORT}"'

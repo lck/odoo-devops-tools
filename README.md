@@ -321,7 +321,7 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 
 ### 5. Building a custom Docker image
 
-This example shows how `odt-env` builds a custom image by extending the standard [`Odoo Docker`](https://hub.docker.com/_/odoo/) image.
+This example shows how `odt-env` builds a custom image by extending the [`official Odoo Docker image`](https://hub.docker.com/_/odoo/).
 
 > **Note**
 > If your project file contains local database connection settings such as `db_host`, `db_name`, `db_user`, or `db_password` in `[config]`,
@@ -379,7 +379,6 @@ services:
       - db
     ports:
       - "8069:8069"
-      - "8072:8072"
     environment:
       HOST: db
       PORT: 5432
