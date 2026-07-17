@@ -61,9 +61,6 @@ target/
 # celery beat schedule file
 celerybeat-schedule
 
-# dotenv
-.env
-
 # virtualenv
 .venv
 venv/
@@ -80,3 +77,7 @@ dist/
 
 # tests
 tests
+
+.env
+.env.*
+!.env.example
