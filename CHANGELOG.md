@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Generate and include `odoo.conf` in the Docker deploy context under `docker/deploy/configs`.
+
 ## 1.19.0 (2026-08-27)
 
 ### Added
