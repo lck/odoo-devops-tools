@@ -1,0 +1,136 @@
+name: Test Docker Deploy Context
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docker-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TEST_IMAGE: odt-env-test/odoo-deploy:${{ github.sha }}
+      TEST_NETWORK: odt-env-deploy-test
+      TEST_DB_CONTAINER: odt-env-deploy-db
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Create workspace root folder
+        run: mkdir -p odoo-workspace
+
+      - name: Generate deploy Docker context from project INI
+        working-directory: ./odoo-workspace
+        env:
+          ODT_REF: ${{ github.head_ref || github.ref_name }}
+        run: |
+          uv run odt-env "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
+            --sync-addons \
+            --create-docker-deploy \
+            --no-local-docker
+
+      - name: Check generated deploy Docker artifacts
+        run: |
+          test -d odoo-workspace/odoo-addons/oca-web/.git
+          test -d odoo-workspace/odoo-addons/oca-helpdesk/.git
+
+          test ! -e odoo-workspace/compose.yaml
+          test ! -e odoo-workspace/docker/local
+
+          test -f odoo-workspace/docker/deploy/Dockerfile
+          test -f odoo-workspace/docker/deploy/.dockerignore
+          test -f odoo-workspace/docker/deploy/requirements/addons-requirements.lock.txt
+          test -d odoo-workspace/docker/deploy/addons/web_notify
+          test -d odoo-workspace/docker/deploy/addons/helpdesk_mgmt
+          grep -q '^COPY addons/ /mnt/extra-addons/' odoo-workspace/docker/deploy/Dockerfile
+
+      - name: Build deploy Docker image
+        working-directory: ./odoo-workspace
+        run: docker build -t "${TEST_IMAGE}" docker/deploy
+
+      - name: Verify addons are embedded in deploy image
+        run: |
+          docker run --rm --entrypoint sh "${TEST_IMAGE}" -c \
+            'test -d /mnt/extra-addons/web_notify && test -d /mnt/extra-addons/helpdesk_mgmt'
+
+      - name: Start PostgreSQL for deploy image test
+        run: |
+          docker network create "${TEST_NETWORK}"
+          docker run -d \
+            --name "${TEST_DB_CONTAINER}" \
+            --network "${TEST_NETWORK}" \
+            -e POSTGRES_DB=postgres \
+            -e POSTGRES_USER=odoo \
+            -e POSTGRES_PASSWORD=odoo \
+            postgres:16
+
+          for attempt in $(seq 1 30); do
+            if docker exec "${TEST_DB_CONTAINER}" pg_isready -U odoo -d postgres; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs "${TEST_DB_CONTAINER}"
+          exit 1
+
+      - name: Init database with addons embedded in deploy image
+        run: |
+          docker run --rm \
+            --network "${TEST_NETWORK}" \
+            -e HOST="${TEST_DB_CONTAINER}" \
+            -e PORT=5432 \
+            -e USER=odoo \
+            -e PASSWORD=odoo \
+            "${TEST_IMAGE}" \
+            -- \
+            -d odoo \
+            -i web_notify,helpdesk_mgmt \
+            --without-demo=all \
+            --stop-after-init
+
+      - name: Verify OCA addons installed from deploy image
+        run: |
+          docker exec "${TEST_DB_CONTAINER}" psql -U odoo -d odoo -c \
+            "SELECT name, state
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+             ORDER BY name;"
+
+          missing="$(docker exec "${TEST_DB_CONTAINER}" psql -U odoo -d odoo -tAc \
+            "SELECT string_agg(name, ',')
+             FROM ir_module_module
+             WHERE name IN ('web_notify', 'helpdesk_mgmt')
+               AND state <> 'installed';")"
+
+          test -z "${missing}"
+
+      - name: Clean up Docker deploy test
+        if: always()
+        run: |
+          docker rm -f "${TEST_DB_CONTAINER}" >/dev/null 2>&1 || true
+          docker network rm "${TEST_NETWORK}" >/dev/null 2>&1 || true
+
+      - name: Show generated deploy Docker workspace and diagnostics
+        if: always()
+        run: |
+          echo "Workspace tree:"
+          find odoo-workspace -maxdepth 4 | sort
+          echo
+          echo "Deploy Dockerfile:"
+          cat odoo-workspace/docker/deploy/Dockerfile || true
+          echo
+          echo "Docker images:"
+          docker images || true
+          echo
+          echo "PostgreSQL logs:"
+          docker logs "${TEST_DB_CONTAINER}" 2>/dev/null || true

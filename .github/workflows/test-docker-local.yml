@@ -1,11 +1,11 @@
-name: Test Build Docker Image
+name: Test Local Docker Development
 
 on:
   push:
   pull_request:
 
 jobs:
-  build-docker-image:
+  docker-local:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -24,42 +24,50 @@ jobs:
       - name: Create workspace root folder
         run: mkdir -p odoo-workspace
 
-      - name: Build Docker image from project INI
+      - name: Generate local Docker workspace from project INI
         working-directory: ./odoo-workspace
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
           uv run odt-env "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
-            --sync-addons \
-            --build-docker-image
+            --sync-addons
 
-      - name: Check generated Docker artifacts and image
+      - name: Check generated local Docker artifacts
         run: |
           test -d odoo-workspace/odoo-addons/oca-web/.git
           test -d odoo-workspace/odoo-addons/oca-helpdesk/.git
 
           test -f odoo-workspace/compose.yaml
-          test -f odoo-workspace/odoo-docker/Dockerfile
-          test -f odoo-workspace/odoo-docker/.dockerignore
-          test -f odoo-workspace/odoo-docker/configs/odoo.conf
-          test -f odoo-workspace/odoo-docker/requirements/addons-requirements.lock.txt
+          test -f odoo-workspace/docker/local/Dockerfile
+          test -f odoo-workspace/docker/local/.dockerignore
+          test -f odoo-workspace/docker/local/configs/odoo.conf
+          test -f odoo-workspace/docker/local/requirements/addons-requirements.lock.txt
 
-          test -d odoo-workspace/odoo-docker/addons/web_notify
-          test -d odoo-workspace/odoo-docker/addons/helpdesk_mgmt
+          test ! -e odoo-workspace/docker/local/addons
+          test ! -e odoo-workspace/docker/deploy
+          ! grep -q '^COPY addons/' odoo-workspace/docker/local/Dockerfile
 
-          image="$(awk '
-            $1 == "odoo:" { in_odoo = 1 }
-            in_odoo && $1 == "image:" { print $2; exit }
-          ' odoo-workspace/compose.yaml)"
-          test -n "${image}"
-          docker image inspect "${image}" >/dev/null
+          cd odoo-workspace
+          docker compose config --quiet
+          docker compose config | grep -q '/mnt/extra-addons/oca-web'
+          docker compose config | grep -q '/mnt/extra-addons/oca-helpdesk'
+
+      - name: Build local Docker image with Compose
+        working-directory: ./odoo-workspace
+        run: docker compose build odoo
+
+      - name: Verify addon bind mounts
+        working-directory: ./odoo-workspace
+        run: |
+          touch odoo-addons/oca-web/.odt-bind-mount-check
+          docker compose run --rm --no-deps --entrypoint sh odoo -c \
+            'test -f /mnt/extra-addons/oca-web/.odt-bind-mount-check'
 
       - name: Start the PostgreSQL service
         working-directory: ./odoo-workspace
-        run: |
-          docker compose up -d db
+        run: docker compose up -d db
 
-      - name: Init database with OCA addons from Docker image
+      - name: Init database with bind-mounted OCA addons
         working-directory: ./odoo-workspace
         run: |
           docker compose run --rm odoo \
@@ -79,7 +87,7 @@ jobs:
              WHERE name IN ('web_notify', 'helpdesk_mgmt')
              ORDER BY name;"
 
-          missing="$(docker compose -f compose.yaml exec -T db psql -U odoo -d odoo -tAc \
+          missing="$(docker compose exec -T db psql -U odoo -d odoo -tAc \
             "SELECT string_agg(name, ',')
              FROM ir_module_module
              WHERE name IN ('web_notify', 'helpdesk_mgmt')
@@ -92,23 +100,23 @@ jobs:
         working-directory: ./odoo-workspace
         run: docker compose down -v --remove-orphans
 
-      - name: Show generated Docker workspace and config
+      - name: Show generated local Docker workspace and config
         if: always()
         run: |
           echo "Workspace tree:"
-          find odoo-workspace -maxdepth 3 | sort
+          find odoo-workspace -maxdepth 4 | sort
           echo
           echo "Docker Compose:"
           cat odoo-workspace/compose.yaml || true
           echo
-          echo "Dockerfile:"
-          cat odoo-workspace/odoo-docker/Dockerfile || true
+          echo "Local Dockerfile:"
+          cat odoo-workspace/docker/local/Dockerfile || true
           echo
-          echo "Docker Odoo config:"
-          cat odoo-workspace/odoo-docker/configs/odoo.conf || true
+          echo "Local Docker Odoo config:"
+          cat odoo-workspace/docker/local/configs/odoo.conf || true
           echo
           echo "Docker images:"
           docker images || true
           echo
           echo "Docker Compose logs:"
-          cd odoo-workspace && docker compose -f compose.yaml logs --no-color || true
+          cd odoo-workspace && docker compose logs --no-color || true

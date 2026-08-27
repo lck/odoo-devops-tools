@@ -1,11 +1,11 @@
-name: Test Build Docker Image Minimal
+name: Test Local Docker Minimal
 
 on:
   push:
   pull_request:
 
 jobs:
-  build-docker-image-minimal:
+  docker-local-minimal:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -24,29 +24,33 @@ jobs:
       - name: Create workspace root folder
         run: mkdir -p odoo-workspace
 
-      - name: Build Docker image from bundled project INI
+      - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odt-env --init-project --build-docker-image --set odoo:version=18.0
+          uv run odt-env --init-project --sync-addons --set odoo:version=18.0
 
-      - name: Check generated Docker artifacts and image
+      - name: Check generated local Docker artifacts
         run: |
           test -f odoo-workspace/compose.yaml
-          test -f odoo-workspace/odoo-docker/Dockerfile
-          test -f odoo-workspace/odoo-docker/.dockerignore
-          test -f odoo-workspace/odoo-docker/configs/odoo.conf
+          test -f odoo-workspace/docker/local/Dockerfile
+          test -f odoo-workspace/docker/local/.dockerignore
+          test -f odoo-workspace/docker/local/configs/odoo.conf
+          test -f odoo-workspace/docker/local/requirements/addons-requirements.lock.txt
 
-          image="$(awk '
-            $1 == "odoo:" { in_odoo = 1 }
-            in_odoo && $1 == "image:" { print $2; exit }
-          ' odoo-workspace/compose.yaml)"
-          test -n "${image}"
-          docker image inspect "${image}" >/dev/null
+          test ! -e odoo-workspace/docker/local/addons
+          test ! -e odoo-workspace/docker/deploy
+          ! grep -q '^COPY addons/' odoo-workspace/docker/local/Dockerfile
+
+          cd odoo-workspace
+          docker compose config --quiet
+
+      - name: Build local Docker image with Compose
+        working-directory: ./odoo-workspace
+        run: docker compose build odoo
 
       - name: Start the PostgreSQL service
         working-directory: ./odoo-workspace
-        run: |
-          docker compose up -d db
+        run: docker compose up -d db
 
       - name: Init database with fleet addon
         working-directory: ./odoo-workspace
@@ -65,13 +69,12 @@ jobs:
           docker compose exec -T db psql -U odoo -d odoo -c \
             "SELECT name, state
              FROM ir_module_module
-             WHERE name IN ('fleet')
-             ORDER BY name;"
+             WHERE name = 'fleet';"
 
-          missing="$(docker compose -f compose.yaml exec -T db psql -U odoo -d odoo -tAc \
+          missing="$(docker compose exec -T db psql -U odoo -d odoo -tAc \
             "SELECT string_agg(name, ',')
              FROM ir_module_module
-             WHERE name IN ('fleet')
+             WHERE name = 'fleet'
                AND state <> 'installed';")"
 
           test -z "${missing}"
@@ -81,23 +84,23 @@ jobs:
         working-directory: ./odoo-workspace
         run: docker compose down -v --remove-orphans
 
-      - name: Show generated Docker workspace and config
+      - name: Show generated local Docker workspace and config
         if: always()
         run: |
           echo "Workspace tree:"
-          find odoo-workspace -maxdepth 3 | sort
+          find odoo-workspace -maxdepth 4 | sort
           echo
           echo "Docker Compose:"
           cat odoo-workspace/compose.yaml || true
           echo
-          echo "Dockerfile:"
-          cat odoo-workspace/odoo-docker/Dockerfile || true
+          echo "Local Dockerfile:"
+          cat odoo-workspace/docker/local/Dockerfile || true
           echo
-          echo "Docker Odoo config:"
-          cat odoo-workspace/odoo-docker/configs/odoo.conf || true
+          echo "Local Docker Odoo config:"
+          cat odoo-workspace/docker/local/configs/odoo.conf || true
           echo
           echo "Docker images:"
           docker images || true
           echo
           echo "Docker Compose logs:"
-          cd odoo-workspace && docker compose -f compose.yaml logs --no-color || true
+          cd odoo-workspace && docker compose logs --no-color || true
