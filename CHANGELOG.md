@@ -1,12 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## 1.19.0 (2026-08-27)
 
 ### Added
 
-- Added automatic generation of local Docker development artifacts under `docker/local/`.
-- Added `--create-docker-deploy` CLI option to generate a self-contained deployment build context under `docker/deploy/`.
+- Add automatic generation of local Docker development artifacts under `docker/local/`.
+- Add `--create-docker-deploy` CLI option to generate a self-contained deployment build context under `docker/deploy/`.
 
 ### Removed
 
-- Removed the `--build-docker-image` CLI option.
+- Remove the `--build-docker-image` CLI option.
