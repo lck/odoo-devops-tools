@@ -104,9 +104,6 @@ shallow = true
 
 [docker]
 base_image = odoo:18.0
-compose_project_name =
-db_service = db
-odoo_service = odoo
 
 [config]
 db_host = 127.0.0.1
@@ -711,9 +708,6 @@ commit = abcdef1
 This section is optional.
 
 - `base_image` — Docker image used as the base image in both generated Dockerfiles. Default: `odoo:${odoo:version}`.
-- `compose_project_name` — optional top-level name written to the local-development `ROOT/compose.yaml`.
-- `odoo_service` — Docker Compose service name for Odoo. Default: `odoo`.
-- `db_service` — Docker Compose service name for PostgreSQL. Default: `db`.
 
 ### `[config]`
 

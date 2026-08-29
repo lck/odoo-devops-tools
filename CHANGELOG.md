@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Removed
+
+- Remove `[docker].compose_project_name`, `[docker].db_service` and `[docker].odoo_service` options.
+
 ## 1.19.1 (2026-08-28)
 
 ### Fixed
