@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## 1.19.3 (2026-08-31)
 
 ### Documentation
 
