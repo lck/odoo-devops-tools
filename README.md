@@ -199,15 +199,25 @@ The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odo
 
 If an addon source contains a `requirements.txt` file, its Python dependencies are included when the local Docker image is rebuilt.
 
-Install the required modules using the normal Odoo module installation workflow. For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
+Install the modules from the newly added addon repositories:
+
+```bash
+docker compose run --rm odoo \
+  -- \
+  -c /etc/odoo/odoo.conf \
+  -d odoo \
+  -i web_notify,helpdesk_mgmt \
+  --without-demo=all \
+  --stop-after-init
+```
+
+For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
 
 ```bash
 docker compose exec odoo click-odoo-update \
   -c /etc/odoo/odoo.conf \
-  -d <database>
+  -d odoo
 ```
-
-The generated local Compose environment uses the service names `odoo` and `db`.
 
 #### 1.3. Native development with venv
 
