@@ -5402,16 +5402,6 @@ def main() -> None:
     if init_project and not implicit_ini:
         parser.error("--init-project can only be used when INI is omitted and no -i/--include is provided.")
 
-    provisioning_requested = bool(
-        args.all
-        or args.odoo
-        or args.addons
-        or create_venv
-        or clear_pip_wheel_cache
-        or create_docker_deploy_requested
-        or create_bundle_raw is not None
-    )
-
     if implicit_ini:
         if args.root:
             root_override = _validate_root_override(parser, args.root)
@@ -5472,9 +5462,6 @@ def main() -> None:
                     ini_overrides=ini_overrides,
                 )
 
-            if init_project and not provisioning_requested:
-                _logger.info("Initialized project INI: %s", ini_path)
-                return
         except SystemExit:
             raise
         except Exception as e:
@@ -5609,7 +5596,7 @@ def main() -> None:
     elif args.addons:
         sync_odoo, sync_addons = False, True
     else:
-        # No sync target selected -> only regenerate configs + helper scripts.
+        # No sync target selected -> regenerate workspace artifacts without syncing repositories.
         sync_odoo, sync_addons = False, False
 
     workspace_root = (root_override or ini_path.parent).resolve()

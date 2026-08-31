@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fix `--init-project` so workspace artifacts are generated even when no sync, venv, deploy, or bundle options are provided.
+
 ## 1.19.3 (2026-08-31)
 
 ### Documentation
