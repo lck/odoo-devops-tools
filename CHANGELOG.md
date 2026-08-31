@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+
+- Separate Docker and native virtual environment workflows more clearly.
+
 ## 1.19.2 (2026-08-31)
 
 ### Removed
