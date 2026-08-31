@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Fix local Docker database configuration.
+
 ## 1.19.4 (2026-08-31)
 
 ### Fixed

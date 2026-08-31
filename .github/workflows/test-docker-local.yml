@@ -95,6 +95,14 @@ jobs:
 
           test -z "${missing}"
 
+      - name: Update Odoo with click-odoo-update
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose up -d odoo
+          docker compose exec -T odoo click-odoo-update \
+            -c /etc/odoo/odoo.conf \
+            -d odoo
+
       - name: Stop Docker Compose services
         if: always()
         working-directory: ./odoo-workspace

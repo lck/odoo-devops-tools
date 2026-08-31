@@ -2678,20 +2678,37 @@ def _render_docker_compose_ports(cfg: Dict[str, Any]) -> str:
     return "\n".join(ports)
 
 
-def render_docker_odoo_conf(cfg: ProjectConfig, *, addons_path: str) -> str:
+def render_docker_odoo_conf(
+        cfg: ProjectConfig,
+        *,
+        addons_path: str,
+        local_database: bool = False,
+) -> str:
     """Render Odoo config for a generated Docker runtime."""
     lines: list[str] = ["[options]"]
 
-    # Database connection settings are runtime-specific and must not be baked
-    # into generated Docker configs. Local Compose and deploy environments
-    # provide them separately (for example through environment variables).
+    lines.append(f"addons_path = {addons_path}")
+    lines.append("data_dir = /var/lib/odoo")
+
+    # Database connection settings from [config] are runtime-specific and are
+    # never copied into generated Docker configs.
     for key, value in cfg.config.items():
         if key in _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS:
             continue
         lines.append(f"{key} = {_format_conf_value(value)}")
 
-    lines.append(f"addons_path = {addons_path}")
-    lines.append("data_dir = /var/lib/odoo")
+    # The generated local Compose environment has a fixed PostgreSQL service
+    # and credentials. Keep these values in the local Odoo config as well so
+    # tools executed directly with `docker compose exec`, such as
+    # click-odoo-update, can connect without relying on the Odoo image entrypoint.
+    # Deploy configs intentionally omit database connection settings.
+    if local_database:
+        lines.extend([
+            "db_host = db",
+            "db_port = 5432",
+            "db_user = odoo",
+            "db_password = odoo",
+        ])
 
     return "\n".join(lines) + "\n"
 
@@ -2701,11 +2718,16 @@ def write_docker_odoo_conf(
         cfg: ProjectConfig,
         *,
         addons_path: str,
+        local_database: bool = False,
 ) -> Path:
     path = _docker_odoo_conf_path(docker_context_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        render_docker_odoo_conf(cfg, addons_path=addons_path),
+        render_docker_odoo_conf(
+            cfg,
+            addons_path=addons_path,
+            local_database=local_database,
+        ),
         encoding="utf-8",
     )
     return path
@@ -2918,6 +2940,7 @@ def create_local_docker_artifacts(
         layout.docker_local_dir,
         cfg,
         addons_path=_docker_local_container_addons_path(cfg),
+        local_database=True,
     )
     dockerfile_path = write_dockerfile(
         layout.docker_local_dir,
