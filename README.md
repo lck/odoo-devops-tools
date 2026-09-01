@@ -23,6 +23,9 @@ From this configuration, `odt-env` can generate a workspace such as:
 
 ```text
 ROOT/
+├── docker/                 # generated Docker artifacts
+│   ├── local/              # development build context
+│   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
 ├── odoo-addons/            # addon sources
 │   ├── oca-web/
@@ -32,27 +35,19 @@ ROOT/
 ├── odoo-data/              # Odoo data directory
 ├── odoo-logs/              # runtime logs
 ├── odoo-backups/           # backups created by helper scripts
-├── docker/                 # generated Docker artifacts
-│   ├── local/              # local-development build context
-│   └── deploy/             # self-contained deploy build context, when requested
 ├── wheelhouse/             # offline Python wheelhouse
 ├── venv/                   # Python virtual environment
-├── dist/                   # portable workspace bundles, when requested
 ├── compose.yaml            # local-development Docker Compose file
-├── odoo-project.ini        # workspace configuration
-└── .odt-env/               # provisioning metadata and snapshots
+└── odoo-project.ini        # workspace configuration
 ```
 
 ## Key features
 
-- **Reproducible Odoo workspaces** — define the workspace in a single INI configuration file and recreate generated artifacts when needed.
-- **Flexible addon sources** — use Git repositories or local addon directories, with optional branch and commit pinning.
-- **Consistent Python dependencies** — manage Python versions, virtual environments, requirements, overrides, and build constraints with `uv`.
-- **Docker development** — generate a local Docker Compose environment with PostgreSQL and bind-mounted addon sources.
-- **Docker deployment artifacts** — generate a self-contained Docker build context for use in existing CI/CD pipelines.
-- **Portable and offline workflows** — create verified bundles containing sources and Python wheels for reproducible or disconnected environments.
-- **Composable configuration** — combine multiple INI files, reusable variables, and CLI overrides.
-- **Minimal Python footprint** — `odt-env` is implemented using only the Python standard library and has no third-party Python package dependencies.
+* **Reproducible workspaces** — define and recreate an Odoo workspace from a single INI configuration.
+* **Docker workflows** — generate local Docker Compose environments and self-contained deploy build contexts.
+* **Portable workflows** — create verified bundles with sources and Python wheels for reproducible or offline use.
+* **Python dependency management** — manage Python versions, virtual environments and requirements.
+* **Composable configuration** — combine INI layers, variables, and CLI overrides.
 
 `odt-env` focuses on creating and maintaining the Odoo workspace and its derived artifacts. Infrastructure provisioning and deployment orchestration remain outside its scope.
 
@@ -84,7 +79,7 @@ odt-env --help
 
 ## Quick start
 
-`odt-env` supports two alternative local development workflows:
+`odt-env` supports two development workflows:
 
 - **Docker development** — run Odoo and PostgreSQL with Docker Compose.
 - **Native development with venv** — run Odoo directly on the host using a generated Python virtual environment.
