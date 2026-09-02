@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.6 (2026-09-02)
+
+### Documentation
+
+- Update Quick start.
+
 ## 1.19.5 (2026-08-31)
 
 ### Fixed
