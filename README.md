@@ -88,17 +88,29 @@ Choose the workflow that fits your development environment. Both use the same `o
 
 ### Docker development
 
-Create a new workspace and start it with Docker Compose:
+Create a new workspace:
 
 ```bash
 odt-env --init-project --root ./odoo19
-cd ./odoo19
-docker compose up
 ```
 
-`odt-env` creates the project definition and generates the local Docker build context and `compose.yaml`. The default project does not contain any extra addon sources, so no repository sync is needed for this first Docker start. Docker Compose then starts both Odoo and PostgreSQL.
+Start the Docker Compose environment:
 
-Open http://localhost:8069.
+```bash
+cd ./odoo19
+docker compose up -d
+```
+
+Initialize the Odoo database:
+
+```bash
+docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
+  -i base \
+  --without-demo=all \
+  --stop-after-init
+```
+
+Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
 
 ### Native development with venv
 
@@ -197,10 +209,7 @@ If an addon source contains a `requirements.txt` file, its Python dependencies a
 Install the modules from the newly added addon repositories:
 
 ```bash
-docker compose run --rm odoo \
-  -- \
-  -c /etc/odoo/odoo.conf \
-  -d odoo \
+docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
   -i web_notify,helpdesk_mgmt \
   --without-demo=all \
   --stop-after-init
@@ -209,9 +218,7 @@ docker compose run --rm odoo \
 For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
 
 ```bash
-docker compose exec odoo click-odoo-update \
-  -c /etc/odoo/odoo.conf \
-  -d odoo
+docker compose exec odoo click-odoo-update -c /etc/odoo/odoo.conf -d odoo
 ```
 
 #### 1.3. Native development with venv
