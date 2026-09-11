@@ -95,6 +95,7 @@ _DEFAULT_DOCKER_REQUIREMENTS = [
     "click-odoo-contrib",
 ]
 
+_DEFAULT_DOCKER_UV_VERSION = "0.12.12"
 _DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
 _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
 _DOCKER_CONTEXT_LOCAL = "local"
@@ -2859,12 +2860,13 @@ COPY --chown=odoo:odoo configs/odoo.conf /etc/odoo/odoo.conf
 FROM {base_image}
 
 USER root
+
+COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
 COPY requirements/addons-requirements.lock.txt /tmp/addons-requirements.lock.txt
 {build_constraints_copy.rstrip()}
 
-RUN PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --no-cache-dir uv \\
- && if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/addons-requirements.lock.txt; then \\
+RUN if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/addons-requirements.lock.txt; then \\
       uv pip install --system --break-system-packages --no-cache-dir{build_constraints_install} -r /tmp/addons-requirements.lock.txt; \\
     else \\
       echo "INFO: No addon Python requirements to install."; \\

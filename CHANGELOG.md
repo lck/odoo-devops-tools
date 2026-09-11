@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.8 (2026-09-11)
+
+### Changed
+
+- Use a pinned official `uv` Docker image in generated Dockerfiles.
+
 ## 1.19.7 (2026-09-11)
 
 ### Changed
