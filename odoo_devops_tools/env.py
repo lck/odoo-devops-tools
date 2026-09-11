@@ -4941,7 +4941,7 @@ def _prepare_included_project_ini(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    epilog = """If no arguments are specified, odt-env prints help and exits.
+    epilog = """If no arguments are specified, odt-env uses ./odoo-project.ini from the current workspace.
 
 Examples:
 
@@ -5274,11 +5274,6 @@ def main() -> None:
     )
 
     parser = build_parser()
-
-    if len(sys.argv) == 1:
-        parser.print_help()
-        return
-
     args = parser.parse_args()
 
     if bool(getattr(args, 'show_last_run', False)) and bool(getattr(args, 'init_project', False)):

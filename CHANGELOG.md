@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.7 (2026-09-11)
+
+### Changed
+
+- Regenerate current workspace when `odt-env` is run without arguments.
+
 ## 1.19.6 (2026-09-02)
 
 ### Documentation

@@ -459,7 +459,8 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 odt-env [INI] [OPTIONS]
 ```
 
-If no arguments are specified, `odt-env` prints help and exits.
+If no arguments are specified, `odt-env` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
+regenerates the workspace artifacts without syncing repositories or recreating the virtual environment.
 
 ### Positional arguments
 
@@ -514,14 +515,14 @@ odt-env ./existing-workspace/odoo-project.ini --sync-all --create-venv
 Use `-i INI` / `--include INI` to include additional project layers. The option can be repeated.
 
 ```bash
-odt-env odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
+odt-env base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
 ```
 
 Project layers are processed from left to right. Later layers override earlier layers.
 
 Validation is performed only after all layers have been merged.
 
-The merged project file is saved as `ROOT/odoo-project.ini`.
+The merged project file is saved as `ROOT/odoo-project.ini`, replacing any existing file at that path.
 
 ### Paths and outputs
 
