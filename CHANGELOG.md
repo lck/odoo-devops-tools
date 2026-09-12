@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.19.9 (2026-09-12)
+
+### Changed
+
+- Resolve Docker Python dependencies during image builds instead of workspace generation.
+
 ## 1.19.8 (2026-09-11)
 
 ### Changed
