@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Allow `--init-project [ROOT]` to select the workspace root directly.
+
 ## 1.19.9 (2026-09-12)
 
 ### Changed

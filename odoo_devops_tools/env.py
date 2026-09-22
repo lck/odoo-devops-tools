@@ -4893,11 +4893,11 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
 
   Creating a workspace:
-    odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \\
+    odt-env --init-project ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0
 
   Creating a workspace with explicit database settings:
-    odt-env --init-project --root ./odoo18-workspace --sync-all --create-venv \\
+    odt-env --init-project ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0 \\
       --set config:db_host=127.0.0.1 \\
       --set config:db_name=odoo \\
@@ -4914,7 +4914,7 @@ Examples:
     odt-env git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
 
   Preparing local Docker development:
-    odt-env --init-project --root ./odoo19 --sync-addons
+    odt-env --init-project ./odoo19 --sync-addons
 
   Generating a deploy Docker build context:
     odt-env /path/to/odoo-project.ini --sync-addons --create-docker-deploy
@@ -4983,9 +4983,14 @@ Examples:
 
     parser.add_argument(
         "--init-project",
-        action="store_true",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="ROOT",
         help=(
             "Create ROOT/odoo-project.ini from the bundled default template if it does not already exist. "
+            "An optional ROOT can be supplied directly as shorthand for --root. "
+            "If ROOT is supplied here, --root must not also be used. "
             "Without --init-project, an existing ROOT/odoo-project.ini is required."
         ),
     )
@@ -5123,8 +5128,12 @@ Examples:
     return parser
 
 
-def _validate_root_override(parser: argparse.ArgumentParser, raw_root: str) -> Path:
-    """Validate, normalize, and prepare the --root override.
+def _validate_root_override(
+        parser: argparse.ArgumentParser,
+        raw_root: str,
+        option_name: str = "--root",
+) -> Path:
+    """Validate, normalize, and prepare an explicit workspace ROOT override.
 
     - Expands '~'
     - Resolves to an absolute path
@@ -5133,7 +5142,7 @@ def _validate_root_override(parser: argparse.ArgumentParser, raw_root: str) -> P
 
     Returns the normalized Path.
     """
-    _logger.info('CLI --root provided: %s', raw_root)
+    _logger.info('CLI %s provided: %s', option_name, raw_root)
 
     candidate = Path(raw_root).expanduser()
 
@@ -5145,19 +5154,19 @@ def _validate_root_override(parser: argparse.ArgumentParser, raw_root: str) -> P
         resolved = candidate.absolute()
 
     if resolved.exists() and not resolved.is_dir():
-        parser.error(f'--root path is not a directory: {resolved}')
+        parser.error(f'{option_name} path is not a directory: {resolved}')
 
     if not resolved.exists():
         try:
-            _logger.info(f'Creating --root directory: {resolved}')
+            _logger.info('Creating %s directory: %s', option_name, resolved)
             resolved.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            parser.error(f'Failed to create --root directory {resolved}: {e}')
+            parser.error(f'Failed to create {option_name} directory {resolved}: {e}')
 
     if not resolved.is_dir():
-        parser.error(f'--root path is not a directory: {resolved}')
+        parser.error(f'{option_name} path is not a directory: {resolved}')
 
-    _logger.info('Validated --root: %s', resolved)
+    _logger.info('Validated %s: %s', option_name, resolved)
     return resolved
 
 
@@ -5223,7 +5232,17 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if bool(getattr(args, 'show_last_run', False)) and bool(getattr(args, 'init_project', False)):
+    init_project_raw = getattr(args, 'init_project', None)
+    init_project = init_project_raw is not None
+    init_project_root_raw = (init_project_raw or "").strip() if init_project else ""
+
+    if init_project_root_raw and args.root:
+        parser.error(
+            "workspace ROOT was specified both as --init-project ROOT and --root; "
+            "use only one of them."
+        )
+
+    if bool(getattr(args, 'show_last_run', False)) and init_project:
         parser.error("--init-project cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
         parser.error("--create-from-bundle cannot be used together with --show-last-run.")
@@ -5239,7 +5258,6 @@ def main() -> None:
             raise SystemExit(1)
         return
 
-    init_project = bool(getattr(args, 'init_project', False))
     clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
     create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
     reuse_wheelhouse = create_venv_from_wheelhouse
@@ -5368,7 +5386,13 @@ def main() -> None:
         parser.error("--init-project can only be used when INI is omitted and no -i/--include is provided.")
 
     if implicit_ini:
-        if args.root:
+        if init_project_root_raw:
+            root_override = _validate_root_override(
+                parser,
+                init_project_root_raw,
+                option_name="--init-project ROOT",
+            )
+        elif args.root:
             root_override = _validate_root_override(parser, args.root)
         else:
             try:
@@ -5403,10 +5427,9 @@ def main() -> None:
                     project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                     _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
             elif not ini_path.is_file():
-                suggested_cmd = ["odt-env"]
+                suggested_cmd = ["odt-env", "--init-project"]
                 if args.root:
-                    suggested_cmd.extend(["--root", str(root_override)])
-                suggested_cmd.append("--init-project")
+                    suggested_cmd.append(str(root_override))
                 parser.error(
                     f"Default project file not found: {ini_path}\n"
                     "Create it manually, pass an explicit INI file, or run:\n"

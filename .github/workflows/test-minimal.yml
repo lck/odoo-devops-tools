@@ -53,15 +53,39 @@ jobs:
       - name: Verify uv
         run: uv --version
 
-      - name: Create workspace root
-        run: mkdir -p odoo-workspace
+      - name: Reject duplicate workspace root options
+        shell: bash
+        run: |
+          set +e
+          uv run odt-env --init-project ./init-project-root --root ./explicit-root \
+            > duplicate-root.log 2>&1
+          status=$?
+          set -e
 
-      - name: Provision Odoo workspace in workspace root folder
-        working-directory: ./odoo-workspace
+          cat duplicate-root.log
+          test "$status" -ne 0
+          grep -F "workspace ROOT was specified both as --init-project ROOT and --root" duplicate-root.log
+          test ! -e init-project-root
+          test ! -e explicit-root
+
+      - name: Check backward-compatible init-project with --root
+        shell: bash
+        run: |
+          uv run odt-env --init-project --root ./legacy-init-workspace \
+            --no-local-docker \
+            --no-configs \
+            --no-scripts \
+            --no-data-dir \
+            --no-provisioning-log
+
+          test -f legacy-init-workspace/odoo-project.ini
+          rm -rf legacy-init-workspace
+
+      - name: Provision Odoo workspace with init-project ROOT shorthand
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env --init-project --sync-all --create-venv \
+          uv run odt-env --init-project ./odoo-workspace --sync-all --create-venv \
             --set odoo:version=19.0 \
             --set config:db_host=127.0.0.1 \
             --set config:db_port=5432 \
