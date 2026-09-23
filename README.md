@@ -24,7 +24,7 @@ From this configuration, `odt-env` can generate a workspace such as:
 ```text
 ROOT/
 ├── docker/                 # generated Docker artifacts
-│   ├── local/              # development build context
+│   ├── local/              # local Docker build context
 │   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
 ├── odoo-addons/            # addon sources
@@ -37,7 +37,7 @@ ROOT/
 ├── odoo-backups/           # backups created by helper scripts
 ├── wheelhouse/             # offline Python wheelhouse
 ├── venv/                   # Python virtual environment
-├── compose.yaml            # local-development Docker Compose file
+├── compose.yaml            # local Docker Compose file
 └── odoo-project.ini        # workspace configuration
 ```
 
@@ -81,12 +81,12 @@ odt-env --help
 
 `odt-env` supports two development workflows:
 
-- **Docker development** — run Odoo and PostgreSQL with Docker Compose.
+- **Local Docker** — run Odoo and PostgreSQL with the generated Docker Compose environment.
 - **Native development with venv** — run Odoo directly on the host using a generated Python virtual environment.
 
-Choose the workflow that fits your development environment. Both use the same `odoo-project.ini` project definition.
+Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
-### Docker development
+### Local Docker
 
 Create a new workspace:
 
@@ -193,7 +193,7 @@ branch = ${odoo:version}
 
 The rest of the generated project file can stay unchanged.
 
-#### 1.2. Docker development
+#### 1.2. Local Docker
 
 Sync the configured addon repositories and refresh the generated local Docker artifacts:
 
@@ -279,7 +279,7 @@ docker build -t mycompany/odoo:19.0 docker/deploy
 
 `[docker].base_image` controls the base image used by both local and deploy Dockerfiles.
 
-In CI, where the local development context is unnecessary, combine the options:
+In CI, where the local Docker context is unnecessary, combine the options:
 
 ```bash
 odt-env --sync-addons --create-docker-deploy --no-local-docker
@@ -569,7 +569,7 @@ Maintenance:
 
 ### Docker generation
 
-- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted for development.
+- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container.
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context.
 
