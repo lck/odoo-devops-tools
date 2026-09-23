@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.2 (2026-09-23)
+
+### Changed
+
+* Configure explicit log rotation for Local Docker Odoo and PostgreSQL services.
+
 ## 1.20.1 (2026-09-23)
 
 ### Documentation

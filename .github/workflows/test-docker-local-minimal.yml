@@ -48,6 +48,12 @@ jobs:
           grep -q 'uv pip install .*addons-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
           grep -q 'apt-get install -y --no-install-recommends restic' odoo-workspace/docker/local/Dockerfile
 
+          test "$(grep -c '^      driver: local$' odoo-workspace/compose.yaml)" -eq 2
+          grep -q '^        max-size: "20m"$' odoo-workspace/compose.yaml
+          grep -q '^        max-file: "5"$' odoo-workspace/compose.yaml
+          grep -q '^        max-size: "50m"$' odoo-workspace/compose.yaml
+          grep -q '^        max-file: "10"$' odoo-workspace/compose.yaml
+
           test ! -e odoo-workspace/docker/local/addons
           test ! -e odoo-workspace/docker/deploy
           ! grep -q '^COPY addons/' odoo-workspace/docker/local/Dockerfile

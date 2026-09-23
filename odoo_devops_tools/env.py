@@ -2737,6 +2737,11 @@ services:
   db:
     image: postgres:16
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "50m"
+        max-file: "10"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: odoo
@@ -2748,6 +2753,11 @@ services:
     build:
       context: {build_context}
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "50m"
+        max-file: "10"
     depends_on:
       - db
     ports:
