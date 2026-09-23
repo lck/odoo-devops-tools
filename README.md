@@ -24,7 +24,8 @@ From this configuration, `odt-env` can generate a workspace such as:
 ```text
 ROOT/
 ├── docker/                 # generated Docker artifacts
-│   ├── local/              # local Docker build context
+│   ├── local/              # local Docker artifacts
+│   │   └── scripts/        # database and filestore backup/restore helpers
 │   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
 ├── odoo-addons/            # addon sources
@@ -244,6 +245,123 @@ For subsequent addon updates, use the generated update script:
 ```
 
 The generated script uses `click-odoo-update` with the workspace Odoo configuration.
+
+### Local Docker backup and restore
+
+The Local Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
+
+```text
+docker/local/scripts/
+├── backup-db.sh
+├── restore-db.sh
+├── backup-filestore.sh
+└── restore-filestore.sh
+```
+
+The helpers stream backup data directly between the Docker containers and files on the host. No backup directory is mounted into the containers, and no intermediate backup file is created inside a container.
+
+The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it for any command with `ODOO_DB_NAME`:
+
+```bash
+ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
+```
+
+#### Database backup
+
+Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
+
+```bash
+./docker/local/scripts/backup-db.sh
+```
+
+The default output name is timestamped, for example:
+
+```text
+odoo-backups/odoo_20260923_093000.dump
+```
+
+Pass an output path explicitly when needed:
+
+```bash
+./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
+```
+
+#### Database restore
+
+Restore a database dump with `pg_restore`:
+
+```bash
+./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
+```
+
+The target database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
+docker compose up -d odoo
+```
+
+To restore the same dump into another database without replacing the default database:
+
+```bash
+ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
+```
+
+#### Filestore backup
+
+Create a compressed tar archive of the selected database filestore:
+
+```bash
+./docker/local/scripts/backup-filestore.sh
+```
+
+The default output name is timestamped, for example:
+
+```text
+odoo-backups/odoo_20260923_093000_filestore.tar.gz
+```
+
+Pass an output path explicitly when needed:
+
+```bash
+./docker/local/scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+The helper uses a one-off Odoo container with the same `odoo-data` volume, so the main Odoo service does not need to be running.
+
+When creating a matching database and filestore backup for migration or disaster recovery, stop Odoo first to prevent writes while both parts are captured:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
+./docker/local/scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+docker compose up -d odoo
+```
+
+#### Filestore restore
+
+Restore a filestore archive:
+
+```bash
+./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+The existing filestore directory for the target database is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+docker compose up -d odoo
+```
+
+A filestore can also be restored under another database name:
+
+```bash
+ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
 ---
 
@@ -569,7 +687,7 @@ Maintenance:
 
 ### Docker generation
 
-- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container.
+- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers are generated under `ROOT/docker/local/scripts/`.
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context.
 
@@ -763,9 +881,11 @@ http_port = 8069
 
 ## Script reference
 
+This section describes the native helpers under `ROOT/odoo-scripts/`. Local Docker backup/restore helpers are documented in the Local Docker section above.
+
 Most helper scripts are generated in both Unix (`.sh`) and Windows (`.bat`) variants. `instance.sh` is available only on Unix-like systems.
 
-Database backup and restore scripts are generated only when `[config].db_name` is configured.
+Native database backup and restore scripts are generated only when `[config].db_name` is configured.
 
 The examples below use the Unix form.
 

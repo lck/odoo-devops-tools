@@ -36,6 +36,10 @@ jobs:
           test -f odoo-workspace/docker/local/.dockerignore
           test -f odoo-workspace/docker/local/configs/odoo.conf
           test -f odoo-workspace/docker/local/requirements/addons-requirements.in.txt
+          test -x odoo-workspace/docker/local/scripts/backup-db.sh
+          test -x odoo-workspace/docker/local/scripts/restore-db.sh
+          test -x odoo-workspace/docker/local/scripts/backup-filestore.sh
+          test -x odoo-workspace/docker/local/scripts/restore-filestore.sh
           test ! -e odoo-workspace/docker/local/requirements/addons-requirements.lock.txt
           grep -q 'uv pip compile .*addons-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
           grep -q 'uv pip install .*addons-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
@@ -81,6 +85,41 @@ jobs:
                AND state <> 'installed';")"
 
           test -z "${missing}"
+
+      - name: Create a filestore marker
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose run --rm --no-deps --entrypoint sh odoo -c \
+            'mkdir -p /var/lib/odoo/filestore/odoo && printf %s streaming-backup-test > /var/lib/odoo/filestore/odoo/odt-env-test.txt'
+
+      - name: Back up database and filestore with generated helpers
+        working-directory: ./odoo-workspace
+        run: |
+          ./docker/local/scripts/backup-db.sh ./odoo-backups/test.dump
+          ./docker/local/scripts/backup-filestore.sh ./odoo-backups/test-filestore.tar.gz
+          test -s ./odoo-backups/test.dump
+          test -s ./odoo-backups/test-filestore.tar.gz
+
+      - name: Restore database and filestore independently
+        working-directory: ./odoo-workspace
+        run: |
+          ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-db.sh ./odoo-backups/test.dump
+          ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz
+
+      - name: Verify restored database and filestore
+        working-directory: ./odoo-workspace
+        run: |
+          missing="$(docker compose exec -T db psql -U odoo -d odoo_restore -tAc \
+            "SELECT string_agg(name, ',')
+             FROM ir_module_module
+             WHERE name = 'fleet'
+               AND state <> 'installed';")"
+          test -z "${missing}"
+
+          docker compose run --rm --no-deps --entrypoint sh odoo -c \
+            'test "$(cat /var/lib/odoo/filestore/odoo_restore/odt-env-test.txt)" = streaming-backup-test'
 
       - name: Stop Docker Compose services
         if: always()

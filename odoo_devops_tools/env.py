@@ -2389,6 +2389,14 @@ def _docker_odoo_conf_path(docker_context_dir: Path) -> Path:
     return _docker_configs_dir(docker_context_dir) / "odoo.conf"
 
 
+def _docker_scripts_dir(docker_context_dir: Path) -> Path:
+    return docker_context_dir / "scripts"
+
+
+def _docker_script_path(docker_context_dir: Path, name: str) -> Path:
+    return _docker_scripts_dir(docker_context_dir) / f"{name}.sh"
+
+
 def _docker_compose_path(layout: Layout) -> Path:
     return layout.root / "compose.yaml"
 
@@ -2560,6 +2568,8 @@ def write_dockerignore(docker_context_dir: Path, *, local: bool) -> Path:
         lines.extend([
             "# Local runtime configuration is bind-mounted by Docker Compose.",
             "configs/",
+            "# Local helper scripts run on the host and are not part of the image.",
+            "scripts/",
         ])
     lines.extend([
         "**/__pycache__/",
@@ -2768,6 +2778,169 @@ def write_docker_compose(layout: Layout, cfg: ProjectConfig) -> Path:
     return path
 
 
+def _docker_default_db_name(cfg: ProjectConfig) -> str:
+    db_name = cfg.config.get("db_name")
+    if isinstance(db_name, str) and db_name.strip():
+        return db_name.strip()
+    return "odoo"
+
+
+def _write_docker_local_script(layout: Layout, name: str, content: str) -> Path:
+    path = _docker_script_path(layout.docker_local_dir, name)
+    _write_text_file(path, content, executable=True)
+    return path
+
+
+def write_docker_backup_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}.dump}}"
+TMP_OUTPUT="${{OUTPUT}}.tmp"
+
+cd "${{ROOT_DIR}}"
+mkdir -p "$(dirname "${{OUTPUT}}")"
+rm -f "${{TMP_OUTPUT}}"
+trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
+
+echo "INFO: Backing up PostgreSQL database '${{DB_NAME}}' to '${{OUTPUT}}'."
+docker compose exec -T db \
+  pg_dump --format=custom --no-owner --no-acl -U odoo "${{DB_NAME}}" \
+  > "${{TMP_OUTPUT}}"
+
+mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
+trap - EXIT
+echo "INFO: Database backup created: ${{OUTPUT}}"
+"""
+    return _write_docker_local_script(layout, "backup-db", content)
+
+
+def write_docker_restore_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $(basename "$0") BACKUP.dump" >&2
+  exit 2
+fi
+
+SOURCE="$1"
+if [[ ! -f "${{SOURCE}}" ]]; then
+  echo "ERROR: database backup not found: ${{SOURCE}}" >&2
+  exit 1
+fi
+SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
+
+cd "${{ROOT_DIR}}"
+
+echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
+echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
+docker compose exec -T db dropdb --if-exists --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+docker compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+docker compose exec -T db \
+  pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
+  < "${{SOURCE}}"
+
+echo "INFO: Database restore completed: ${{DB_NAME}}"
+"""
+    return _write_docker_local_script(layout, "restore-db", content)
+
+
+def write_docker_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
+TMP_OUTPUT="${{OUTPUT}}.tmp"
+
+cd "${{ROOT_DIR}}"
+mkdir -p "$(dirname "${{OUTPUT}}")"
+rm -f "${{TMP_OUTPUT}}"
+trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
+
+echo "INFO: Backing up filestore for database '${{DB_NAME}}' to '${{OUTPUT}}'."
+docker compose run --rm --no-deps -T \
+  --entrypoint tar odoo \
+  -C "/var/lib/odoo/filestore/${{DB_NAME}}" -czf - . \
+  > "${{TMP_OUTPUT}}"
+
+mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
+trap - EXIT
+echo "INFO: Filestore backup created: ${{OUTPUT}}"
+"""
+    return _write_docker_local_script(layout, "backup-filestore", content)
+
+
+def write_docker_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+
+if [[ $# -ne 1 ]]; then
+  echo "Usage: $(basename "$0") FILESTORE.tar.gz" >&2
+  exit 2
+fi
+
+SOURCE="$1"
+if [[ ! -f "${{SOURCE}}" ]]; then
+  echo "ERROR: filestore backup not found: ${{SOURCE}}" >&2
+  exit 1
+fi
+SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
+
+cd "${{ROOT_DIR}}"
+
+echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
+echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
+docker compose run --rm --no-deps -T \
+  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  --entrypoint sh odoo \
+  -c 'set -eu
+target="/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"
+rm -rf "${{target}}"
+mkdir -p "${{target}}"
+tar -xzf - -C "${{target}}"' \
+  < "${{SOURCE}}"
+
+echo "INFO: Filestore restore completed: ${{DB_NAME}}"
+"""
+    return _write_docker_local_script(layout, "restore-filestore", content)
+
+
+def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, Path]:
+    return {
+        "backup_db": write_docker_backup_db_sh(layout, cfg),
+        "restore_db": write_docker_restore_db_sh(layout, cfg),
+        "backup_filestore": write_docker_backup_filestore_sh(layout, cfg),
+        "restore_filestore": write_docker_restore_filestore_sh(layout, cfg),
+    }
+
+
 def write_dockerfile(
         docker_context_dir: Path,
         cfg: ProjectConfig,
@@ -2899,10 +3072,12 @@ def create_local_docker_artifacts(
         include_config=False,
     )
     compose_path = write_docker_compose(layout, cfg)
+    script_paths = write_docker_local_scripts(layout, cfg)
 
     _logger.info("Generated local Docker build context: %s", layout.docker_local_dir)
     _logger.info("Generated local Dockerfile: %s", dockerfile_path)
     _logger.info("Generated local Docker Odoo config: %s", docker_conf_path)
+    _logger.info("Generated local Docker helper scripts: %s", _docker_scripts_dir(layout.docker_local_dir))
 
     return {
         "docker_dir": layout.docker_local_dir,
@@ -2910,6 +3085,7 @@ def create_local_docker_artifacts(
         "dockerignore": dockerignore_path,
         "odoo_config": docker_conf_path,
         "compose": compose_path,
+        "scripts": script_paths,
         "requirements_dir": _docker_requirements_dir(layout.docker_local_dir),
         "requirements_input": input_path,
         "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,

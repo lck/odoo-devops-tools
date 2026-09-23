@@ -4,6 +4,10 @@
 
 ### Added
 
+- Generate Local Docker helpers for streaming PostgreSQL database and Odoo filestore backups and restores independently.
+
+## 1.19.10 (2026-09-22)
+
 - Allow `--init-project [ROOT]` to select the workspace root directly.
 
 ## 1.19.9 (2026-09-12)
