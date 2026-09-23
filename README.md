@@ -246,7 +246,7 @@ For subsequent addon updates, use the generated update script:
 
 The generated script uses `click-odoo-update` with the workspace Odoo configuration.
 
-### Local Docker backup and restore
+### 2. Local Docker backup and restore
 
 The Local Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
 
@@ -269,7 +269,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### Database backup
+#### 2.1. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -289,7 +289,7 @@ Pass an output path explicitly when needed:
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### Database restore
+#### 2.2. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -311,7 +311,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### Filestore backup
+#### 2.3. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -342,7 +342,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### Filestore restore
+#### 2.4. Filestore restore
 
 Restore a filestore archive:
 
@@ -366,7 +366,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### Restic filestore backup
+#### 2.5. Restic filestore backup
 
 The generated Docker image also includes `restic`, installed from the base image APT repositories. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -414,7 +414,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### Restic filestore restore
+#### 2.6. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -442,7 +442,7 @@ The restore helper removes the target database filestore before restoring it. Wh
 
 ---
 
-### 2. Creating a Docker deploy build context
+### 3. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -483,7 +483,7 @@ docker build -t mycompany/odoo:19.0 docker/deploy
 
 ---
 
-### 3. Managing Python requirements
+### 4. Managing Python requirements
 
 The `[virtualenv]` section controls additional Python dependencies used when provisioning both the native virtual environment and generated Docker images.
 
@@ -496,7 +496,7 @@ Use:
 
 When a package is listed in `requirements`, `odt-env` automatically gives that package priority by ignoring the same package name from collected repository requirements. This means you can usually pin a package version just by adding it to `requirements`.
 
-#### 3.1. Add or pin packages
+#### 4.1. Add or pin packages
 
 Use `requirements` to install additional packages or to force a specific version:
 
@@ -509,7 +509,7 @@ requirements =
 
 In this example, both packages are included in the generated dependency set and pinned to the specified versions.
 
-#### 3.2. Override a package with a different one
+#### 4.2. Override a package with a different one
 
 If you want to replace a package with a different distribution name, add the replacement to `requirements` and skip the original package with `requirements_ignore`.
 
@@ -527,13 +527,13 @@ In this example, `odt-env` installs `psycopg2-binary==2.9.9` and skips `psycopg2
 
 ---
 
-### 4. Using system Python instead of managed Python
+### 5. Using system Python instead of managed Python
 
 By default, `odt-env` uses `uv` to install and manage the requested Python version.
 
 If you already have a suitable system Python installed, you can disable managed Python.
 
-#### 4.1. Update the project file
+#### 5.1. Update the project file
 
 Disable managed Python by adding `python_version = 3.11` and `managed_python = false` to the `odoo-project.ini` file.
 
@@ -547,7 +547,7 @@ managed_python = false
 python_version = 3.11
 ```
 
-#### 4.2. Update the workspace
+#### 5.2. Update the workspace
 
 After changing the project file, run `odt-env` again from the workspace root:
 
@@ -559,7 +559,7 @@ This recreates the virtual environment at `ROOT/venv` using the system Python.
 
 ---
 
-### 5. Creating portable workspace bundles
+### 6. Creating portable workspace bundles
 
 Portable bundles are useful when you want to prepare an Odoo workspace on an internet-connected machine and reproduce it on another compatible machine without cloning repositories or downloading Python packages again.
 
@@ -577,7 +577,7 @@ The bundle does not contain the virtual environment, database data, logs, backup
 
 Those machine-specific outputs are recreated on the target machine.
 
-#### 5.1. Create a bundle on the build machine
+#### 6.1. Create a bundle on the build machine
 
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
@@ -597,7 +597,7 @@ You can also select an explicit output file:
 odt-env --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
-#### 5.1.1. Including uncommitted changes
+#### 6.1.1. Including uncommitted changes
 
 By default, bundle creation stops when a bundled Git repository has uncommitted changes.
 
@@ -607,7 +607,7 @@ To intentionally include those changes in the bundle, use:
 odt-env --sync-all --create-venv --create-bundle --allow-dirty-bundle
 ```
 
-#### 5.2. Create the workspace on the target machine
+#### 6.2. Create the workspace on the target machine
 
 Copy the ZIP to the target machine and import it into an empty directory:
 
@@ -634,7 +634,7 @@ The import operation:
 > **Compatibility note**
 > A wheelhouse is platform- and architecture-dependent. Create and import a bundle on compatible systems, for example Linux x86-64 to Linux x86-64. The target machine must have `uv` and access to the configured Python version. When `[virtualenv].managed_python = true`, `uv` may still need network access if that Python interpreter is not already installed or cached. For a fully disconnected target, install the required Python interpreter beforehand or use `managed_python = false`.
 
-#### 5.3. Manual wheelhouse workflow
+#### 6.3. Manual wheelhouse workflow
 
 The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
