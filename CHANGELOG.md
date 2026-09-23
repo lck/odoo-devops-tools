@@ -4,7 +4,8 @@
 
 ### Added
 
-- Generate Local Docker helpers for streaming PostgreSQL database and Odoo filestore backups and restores independently.
+- Generate Local Docker helpers for database and filestore backup and restore.
+- Install `restic` in generated Docker images and generate optional Local Docker restic helpers for incremental filestore backup and restore.
 
 ## 1.19.10 (2026-09-22)
 

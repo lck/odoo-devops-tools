@@ -40,9 +40,13 @@ jobs:
           test -x odoo-workspace/docker/local/scripts/restore-db.sh
           test -x odoo-workspace/docker/local/scripts/backup-filestore.sh
           test -x odoo-workspace/docker/local/scripts/restore-filestore.sh
+          test -x odoo-workspace/docker/local/scripts/restic.sh
+          test -x odoo-workspace/docker/local/scripts/backup-filestore-restic.sh
+          test -x odoo-workspace/docker/local/scripts/restore-filestore-restic.sh
           test ! -e odoo-workspace/docker/local/requirements/addons-requirements.lock.txt
           grep -q 'uv pip compile .*addons-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
           grep -q 'uv pip install .*addons-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
+          grep -q 'apt-get install -y --no-install-recommends restic' odoo-workspace/docker/local/Dockerfile
 
           test ! -e odoo-workspace/docker/local/addons
           test ! -e odoo-workspace/docker/deploy
@@ -54,6 +58,10 @@ jobs:
       - name: Build local Docker image with Compose
         working-directory: ./odoo-workspace
         run: docker compose build odoo
+
+      - name: Verify restic is installed in the local Docker image
+        working-directory: ./odoo-workspace
+        run: docker compose run --rm --no-deps --entrypoint restic odoo version
 
       - name: Start the PostgreSQL service
         working-directory: ./odoo-workspace
@@ -108,6 +116,27 @@ jobs:
           ODOO_DB_NAME=odoo_restore \
             ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz
 
+      - name: Back up and restore filestore with restic
+        working-directory: ./odoo-workspace
+        env:
+          RESTIC_REPOSITORY: ${{ github.workspace }}/odoo-workspace/restic-test-repo
+          RESTIC_PASSWORD: test-restic-password
+          RESTIC_HOST: odt-env-ci
+        run: |
+          ./docker/local/scripts/restic.sh init
+
+          RESTIC_BACKUP_ID=ci-test \
+            ./docker/local/scripts/backup-filestore-restic.sh
+
+          ./docker/local/scripts/restic.sh snapshots \
+            --host odt-env-ci \
+            --path /var/lib/odoo/filestore/odoo \
+            --tag filestore
+
+          ODOO_DB_NAME=odoo_restic_restore \
+          RESTIC_SOURCE_DB_NAME=odoo \
+            ./docker/local/scripts/restore-filestore-restic.sh latest
+
       - name: Verify restored database and filestore
         working-directory: ./odoo-workspace
         run: |
@@ -120,6 +149,9 @@ jobs:
 
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
             'test "$(cat /var/lib/odoo/filestore/odoo_restore/odt-env-test.txt)" = streaming-backup-test'
+
+          docker compose run --rm --no-deps --entrypoint sh odoo -c \
+            'test "$(cat /var/lib/odoo/filestore/odoo_restic_restore/odt-env-test.txt)" = streaming-backup-test'
 
       - name: Stop Docker Compose services
         if: always()

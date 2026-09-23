@@ -255,7 +255,10 @@ docker/local/scripts/
 ├── backup-db.sh
 ├── restore-db.sh
 ├── backup-filestore.sh
-└── restore-filestore.sh
+├── restore-filestore.sh
+├── restic.sh
+├── backup-filestore-restic.sh
+└── restore-filestore-restic.sh
 ```
 
 The helpers stream backup data directly between the Docker containers and files on the host. No backup directory is mounted into the containers, and no intermediate backup file is created inside a container.
@@ -362,6 +365,80 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 ```
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
+
+#### Restic filestore backup
+
+The generated Docker image also includes `restic`, installed from the base image APT repositories. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
+
+The Local Docker workflow generates three additional helpers:
+
+```text
+docker/local/scripts/restic.sh
+docker/local/scripts/backup-filestore-restic.sh
+docker/local/scripts/restore-filestore-restic.sh
+```
+
+`restic.sh` is a generic wrapper that runs the `restic` binary from the generated Odoo image against the same `odoo-data` volume. The restic cache is kept under `/var/lib/odoo/.cache/restic`, outside the filestore directory, so it persists between one-off containers without being included in filestore backups.
+
+Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the Docker host, use an absolute path. The wrapper automatically bind-mounts that path into the one-off container:
+
+```bash
+export RESTIC_REPOSITORY=/srv/restic/odoo
+export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
+
+./docker/local/scripts/restic.sh init
+```
+
+A remote restic repository URL can be used instead of a local path. Backend-specific authentication or external helper programs, when required by that backend, must also be made available to the container.
+
+Create a restic snapshot of the selected database filestore:
+
+```bash
+./docker/local/scripts/backup-filestore-restic.sh
+```
+
+The default database name follows the same `ODOO_DB_NAME` convention as the archive helpers. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the Docker host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
+
+An optional backup identifier can be added as another snapshot tag:
+
+```bash
+RESTIC_BACKUP_ID=20260923_020000 ./docker/local/scripts/backup-filestore-restic.sh
+```
+
+This is useful for pairing a PostgreSQL dump with the corresponding filestore snapshot.
+
+List or inspect snapshots through the generic wrapper:
+
+```bash
+./docker/local/scripts/restic.sh snapshots
+./docker/local/scripts/restic.sh check
+```
+
+#### Restic filestore restore
+
+Restore the latest matching filestore snapshot:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/restore-filestore-restic.sh
+docker compose up -d odoo
+```
+
+Or restore a specific snapshot ID:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/restore-filestore-restic.sh SNAPSHOT_ID
+docker compose up -d odoo
+```
+
+To restore a filestore backed up under one database name into another database, set the target with `ODOO_DB_NAME` and the source snapshot path with `RESTIC_SOURCE_DB_NAME`:
+
+```bash
+ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/restore-filestore-restic.sh SNAPSHOT_ID
+```
+
+The restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
 ---
 
@@ -687,7 +764,7 @@ Maintenance:
 
 ### Docker generation
 
-- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers are generated under `ROOT/docker/local/scripts/`.
+- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context.
 

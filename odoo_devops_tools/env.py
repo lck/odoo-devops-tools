@@ -2932,12 +2932,159 @@ echo "INFO: Filestore restore completed: ${{DB_NAME}}"
     return _write_docker_local_script(layout, "restore-filestore", content)
 
 
+def write_docker_restic_sh(layout: Layout) -> Path:
+    content = r'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $(basename "$0") RESTIC_COMMAND [ARGS...]" >&2
+  exit 2
+fi
+
+if [[ -z "${RESTIC_REPOSITORY:-}" ]]; then
+  echo "ERROR: RESTIC_REPOSITORY is not set." >&2
+  exit 1
+fi
+
+cd "${ROOT_DIR}"
+
+DOCKER_ARGS=(
+  compose run --rm --no-deps -T
+  --user 0:0
+  -e RESTIC_REPOSITORY
+  -e RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic
+)
+
+# Absolute local repository paths refer to the Docker host. Mount the same
+# path into the one-off container so RESTIC_REPOSITORY works unchanged.
+if [[ "${RESTIC_REPOSITORY}" == /* ]]; then
+  mkdir -p "${RESTIC_REPOSITORY}"
+  DOCKER_ARGS+=( -v "${RESTIC_REPOSITORY}:${RESTIC_REPOSITORY}" )
+elif [[ "${RESTIC_REPOSITORY}" != *:* ]]; then
+  echo "ERROR: local RESTIC_REPOSITORY must be an absolute host path." >&2
+  exit 1
+fi
+
+if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
+  if [[ ! -f "${RESTIC_PASSWORD_FILE}" ]]; then
+    echo "ERROR: RESTIC_PASSWORD_FILE not found: ${RESTIC_PASSWORD_FILE}" >&2
+    exit 1
+  fi
+  RESTIC_PASSWORD_FILE_ABS="$(cd "$(dirname "${RESTIC_PASSWORD_FILE}")" && pwd)/$(basename "${RESTIC_PASSWORD_FILE}")"
+  DOCKER_ARGS+=(
+    -v "${RESTIC_PASSWORD_FILE_ABS}:${RESTIC_PASSWORD_FILE_ABS}:ro"
+    -e "RESTIC_PASSWORD_FILE=${RESTIC_PASSWORD_FILE_ABS}"
+  )
+elif [[ -n "${RESTIC_PASSWORD:-}" ]]; then
+  DOCKER_ARGS+=( -e RESTIC_PASSWORD )
+else
+  echo "ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD." >&2
+  exit 1
+fi
+
+exec docker "${DOCKER_ARGS[@]}" --entrypoint restic odoo "$@"
+'''
+    return _write_docker_local_script(layout, "restic", content)
+
+
+def write_docker_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+RESTIC="${{SCRIPT_DIR}}/restic.sh"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
+FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
+
+if [[ ! -x "${{RESTIC}}" ]]; then
+  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
+  exit 1
+fi
+
+EXTRA_TAG_ARGS=()
+if [[ -n "${{RESTIC_BACKUP_ID:-}}" ]]; then
+  EXTRA_TAG_ARGS+=(--tag "backup-id:${{RESTIC_BACKUP_ID}}")
+fi
+
+echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
+"${{RESTIC}}" backup \
+  --host "${{RESTIC_HOST_NAME}}" \
+  --tag odoo \
+  --tag filestore \
+  --tag "db:${{DB_NAME}}" \
+  "${{EXTRA_TAG_ARGS[@]}}" \
+  "$@" \
+  "${{FILESTORE_PATH}}"
+'''
+    return _write_docker_local_script(layout, "backup-filestore-restic", content)
+
+
+def write_docker_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+RESTIC="${{SCRIPT_DIR}}/restic.sh"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
+RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
+SNAPSHOT="${{1:-latest}}"
+SOURCE_FILESTORE_PATH="/var/lib/odoo/filestore/${{SOURCE_DB_NAME}}"
+TARGET_FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
+
+if [[ $# -gt 1 ]]; then
+  echo "Usage: $(basename "$0") [SNAPSHOT]" >&2
+  exit 2
+fi
+
+if [[ ! -x "${{RESTIC}}" ]]; then
+  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
+  exit 1
+fi
+
+cd "${{ROOT_DIR}}"
+
+echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
+echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
+
+docker compose run --rm --no-deps -T \
+  --user 0:0 \
+  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  --entrypoint sh odoo \
+  -c 'set -eu
+rm -rf "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"
+mkdir -p "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"'
+
+RESTORE_ARGS=(restore "${{SNAPSHOT}}:${{SOURCE_FILESTORE_PATH}}" --target "${{TARGET_FILESTORE_PATH}}")
+if [[ "${{SNAPSHOT}}" == "latest" ]]; then
+  RESTORE_ARGS+=(--host "${{RESTIC_HOST_NAME}}" --path "${{SOURCE_FILESTORE_PATH}}")
+fi
+
+"${{RESTIC}}" "${{RESTORE_ARGS[@]}}"
+
+echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
+'''
+    return _write_docker_local_script(layout, "restore-filestore-restic", content)
+
+
 def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, Path]:
     return {
         "backup_db": write_docker_backup_db_sh(layout, cfg),
         "restore_db": write_docker_restore_db_sh(layout, cfg),
         "backup_filestore": write_docker_backup_filestore_sh(layout, cfg),
         "restore_filestore": write_docker_restore_filestore_sh(layout, cfg),
+        "restic": write_docker_restic_sh(layout),
+        "backup_filestore_restic": write_docker_backup_filestore_restic_sh(layout, cfg),
+        "restore_filestore_restic": write_docker_restore_filestore_restic_sh(layout, cfg),
     }
 
 
@@ -2982,6 +3129,10 @@ COPY --chown=odoo:odoo configs/odoo.conf /etc/odoo/odoo.conf
 FROM {base_image}
 
 USER root
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends restic \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
