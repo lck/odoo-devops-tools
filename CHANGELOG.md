@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.1 (2026-09-23)
+
+### Documentation
+
+- Improve README section numbering.
+
 ## 1.20.0 (2026-09-23)
 
 ### Added
