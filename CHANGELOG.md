@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.4 (2026-09-24)
+
+### Documentation
+
+* Reorganize README sections
+
 ## 1.20.3 (2026-09-24)
 
 ### Documentation
