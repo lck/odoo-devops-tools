@@ -816,9 +816,9 @@ odt-env [INI] [OPTIONS]
 If no arguments are specified, `odt-env` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
 regenerates the workspace artifacts without syncing repositories or recreating the virtual environment.
 
-### Positional arguments
+### Project definition (`INI`)
 
-- `INI` — project definition file. It can be:
+`INI` is the optional project definition source used by `odt-env`. It can be:
 
   - a local filesystem path, for example:
 
