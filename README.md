@@ -24,7 +24,7 @@ From this configuration, `odt-env` can generate a workspace such as:
 ```text
 ROOT/
 ├── docker/                 # generated Docker artifacts
-│   ├── local/              # local Docker artifacts
+│   ├── local/              # Docker workflow artifacts
 │   │   └── scripts/        # database and filestore backup/restore helpers
 │   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
@@ -38,7 +38,7 @@ ROOT/
 ├── odoo-backups/           # backups created by helper scripts
 ├── wheelhouse/             # offline Python wheelhouse
 ├── venv/                   # Python virtual environment
-├── compose.yaml            # local Docker Compose file
+├── compose.yaml            # Docker Compose file
 └── odoo-project.ini        # workspace configuration
 ```
 
@@ -82,12 +82,12 @@ odt-env --help
 
 `odt-env` supports two development workflows:
 
-- **Local Docker** — run Odoo and PostgreSQL with the generated Docker Compose environment.
+- **Docker workflow** — run Odoo and PostgreSQL with the generated Docker Compose environment.
 - **Native development with venv** — run Odoo directly on the host using a generated Python virtual environment.
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
-### Local Docker
+### Docker workflow
 
 Create a new workspace:
 
@@ -143,9 +143,11 @@ Odoo starts with the generated configuration from `./odoo-configs/odoo-server.co
 
 ## Usage
 
-The examples below use the same workspace configuration introduced in the Quick start section. Docker-specific and native-specific steps are separated where they differ.
+The examples below use the workspace configuration introduced in the Quick start section.
 
-The default `odoo-project.ini` contains:
+### 1. Docker workflow
+
+The Docker workflow uses the following `odoo-project.ini` configuration:
 
 ```ini
 [virtualenv]
@@ -168,17 +170,15 @@ base_image = odoo:19.0
 [config]
 ```
 
-The local Docker workflow can use this configuration as-is. The native quick start adds the PostgreSQL connection settings to `[config]` through `--set`.
-
 Edit this file when you want to add extra addons, change configuration values, pin repositories, or adjust Python dependency handling.
 
-### 1. Adding extra addons
+#### 1.1. Adding extra addons
 
 To extend Odoo with additional functionality, add extra addons through `[addons.<name>]` sections in `odoo-project.ini`.
 
 In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`.
 
-#### 1.1. Update the project file
+##### 1.1.1. Update the project file
 
 Edit `odoo-project.ini` in the workspace root and add these addon sections:
 
@@ -194,9 +194,10 @@ branch = ${odoo:version}
 
 The rest of the generated project file can stay unchanged.
 
-#### 1.2. Local Docker
+##### 1.1.2. Sync and install addons
 
-Sync the configured addon repositories and refresh the generated local Docker artifacts:
+
+Sync the configured addon repositories and refresh the generated Docker workflow artifacts:
 
 ```bash
 odt-env --sync-addons
@@ -205,7 +206,7 @@ docker compose up --build -d
 
 The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/` and bind-mounted into the Odoo container.
 
-If an addon source contains a `requirements.txt` file, its Python dependencies are included when the local Docker image is rebuilt.
+If an addon source contains a `requirements.txt` file, its Python dependencies are included when the Docker image is rebuilt.
 
 Install the modules from the newly added addon repositories:
 
@@ -222,33 +223,10 @@ For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
 docker compose exec odoo click-odoo-update -c /etc/odoo/odoo.conf -d odoo
 ```
 
-#### 1.3. Native development with venv
 
-Sync the sources and recreate the Python environment so dependencies from the new addon repositories are included:
+#### 1.2. Backup and restore
 
-```bash
-odt-env --sync-all --create-venv
-```
-
-The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`, and their directories are added to the generated `addons_path`.
-
-Start Odoo and install the modules from the newly added addon repositories:
-
-```bash
-./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt
-```
-
-For subsequent addon updates, use the generated update script:
-
-```bash
-./odoo-scripts/update.sh
-```
-
-The generated script uses `click-odoo-update` with the workspace Odoo configuration.
-
-### 2. Local Docker backup and restore
-
-The Local Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
+The Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
 
 ```text
 docker/local/scripts/
@@ -269,7 +247,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### 2.1. Database backup
+##### 1.2.1. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -289,7 +267,7 @@ Pass an output path explicitly when needed:
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 2.2. Database restore
+##### 1.2.2. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -311,7 +289,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 2.3. Filestore backup
+##### 1.2.3. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -342,7 +320,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 2.4. Filestore restore
+##### 1.2.4. Filestore restore
 
 Restore a filestore archive:
 
@@ -366,11 +344,11 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 2.5. Restic filestore backup
+##### 1.2.5. Restic filestore backup
 
 The generated Docker image also includes `restic`, installed from the base image APT repositories. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
-The Local Docker workflow generates three additional helpers:
+The Docker workflow generates three additional helpers:
 
 ```text
 docker/local/scripts/restic.sh
@@ -414,7 +392,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 2.6. Restic filestore restore
+##### 1.2.6. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -440,9 +418,8 @@ ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/rest
 
 The restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
----
 
-### 3. Creating a Docker deploy build context
+#### 1.3. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -472,9 +449,9 @@ Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/ext
 docker build -t mycompany/odoo:19.0 docker/deploy
 ```
 
-`[docker].base_image` controls the base image used by both local and deploy Dockerfiles.
+`[docker].base_image` controls the base image used by both generated Dockerfiles.
 
-In CI, where the local Docker context is unnecessary, combine the options:
+In CI, where the `docker/local/` context is unnecessary, combine the options:
 
 ```bash
 odt-env --sync-addons --create-docker-deploy --no-local-docker
@@ -483,7 +460,221 @@ docker build -t mycompany/odoo:19.0 docker/deploy
 
 ---
 
-### 4. Managing Python requirements
+### 2. Native development with venv
+
+The native workflow uses the following `odoo-project.ini` configuration, with PostgreSQL connection settings added to `[config]`:
+
+```ini
+[virtualenv]
+managed_python = true
+python_version =
+build_constraints =
+requirements =
+requirements_ignore =
+
+[odoo]
+version = 19.0
+repo = https://github.com/odoo/odoo.git
+branch = 19.0
+commit =
+shallow = true
+
+[docker]
+base_image = odoo:19.0
+
+[config]
+db_host = 127.0.0.1
+db_name = odoo
+db_user = odoo
+db_password = odoo
+```
+
+Edit this file when you want to add extra addons, change configuration values, pin repositories, or adjust Python dependency handling.
+
+#### 2.1. Adding extra addons
+
+To extend Odoo with additional functionality, add extra addons through `[addons.<name>]` sections in `odoo-project.ini`.
+
+In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`.
+
+##### 2.1.1. Update the project file
+
+Edit `odoo-project.ini` in the workspace root and add these addon sections:
+
+```ini
+[addons.oca-web]
+repo = https://github.com/OCA/web.git
+branch = ${odoo:version}
+
+[addons.oca-helpdesk]
+repo = https://github.com/OCA/helpdesk.git
+branch = ${odoo:version}
+```
+
+The rest of the generated project file can stay unchanged.
+
+##### 2.1.2. Sync and install addons
+
+
+Sync the sources and recreate the Python environment so dependencies from the new addon repositories are included:
+
+```bash
+odt-env --sync-all --create-venv
+```
+
+The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`, and their directories are added to the generated `addons_path`.
+
+Start Odoo and install the modules from the newly added addon repositories:
+
+```bash
+./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt
+```
+
+For subsequent addon updates, use the generated update script:
+
+```bash
+./odoo-scripts/update.sh
+```
+
+The generated script uses `click-odoo-update` with the workspace Odoo configuration.
+
+
+#### 2.2. Using system Python instead of managed Python
+
+By default, `odt-env` uses `uv` to install and manage the requested Python version.
+
+If you already have a suitable system Python installed, you can disable managed Python.
+
+##### 2.2.1. Update the project file
+
+Disable managed Python by adding `python_version = 3.11` and `managed_python = false` to the `odoo-project.ini` file.
+
+> **Note**
+> Set `python_version` to the Python version you want to use from your local system.
+> In the example below, 3.11 is only illustrative.
+
+```ini
+[virtualenv]
+managed_python = false
+python_version = 3.11
+```
+
+##### 2.2.2. Update the workspace
+
+After changing the project file, run `odt-env` again from the workspace root:
+
+```bash
+odt-env --sync-all --create-venv
+```
+
+This recreates the virtual environment at `ROOT/venv` using the system Python.
+
+#### 2.3. Script reference
+
+This section describes the native helpers under `ROOT/odoo-scripts/`. Docker backup/restore helpers are documented in the Docker workflow section above.
+
+Most helper scripts are generated in both Unix (`.sh`) and Windows (`.bat`) variants. `instance.sh` is available only on Unix-like systems.
+
+Native database backup and restore scripts are generated only when `[config].db_name` is configured.
+
+The examples below use the Unix form.
+
+##### 2.3.1. run
+
+Starts Odoo in the foreground.
+
+Any extra arguments are forwarded to the underlying command `odoo-bin`.
+
+Examples:
+
+```bash
+./odoo-scripts/run.sh
+./odoo-scripts/run.sh --dev=all
+./odoo-scripts/run.sh -i sale,crm --without-demo=all
+```
+
+##### 2.3.2. instance
+
+Manages Odoo as a background service on Unix-like systems.
+
+Logs are written to `ROOT/odoo-logs/odoo-server.log` and the PID is stored in `ROOT/odoo-logs/odoo-server.pid`.
+
+Examples:
+
+```bash
+./odoo-scripts/instance.sh start
+./odoo-scripts/instance.sh stop
+./odoo-scripts/instance.sh restart
+./odoo-scripts/instance.sh status
+```
+
+##### 2.3.3. test
+
+Runs Odoo tests.
+
+The script always adds `--test-enable --stop-after-init`.
+
+Any extra arguments are forwarded to the underlying command `odoo-bin`.
+
+Examples:
+
+```bash
+./odoo-scripts/test.sh
+./odoo-scripts/test.sh -i sale --test-tags /sale
+```
+
+##### 2.3.4. shell
+
+Opens an Odoo shell.
+
+Examples:
+
+```bash
+./odoo-scripts/shell.sh
+```
+
+##### 2.3.5. backup
+
+Creates a timestamped ZIP backup under `ROOT/odoo-backups/`.
+
+Any extra arguments are forwarded to the underlying command `click-odoo-backupdb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-backupdb-beta) package.
+
+Examples:
+
+```bash
+./odoo-scripts/backup.sh
+```
+
+##### 2.3.6. restore
+
+Restores a backup into the configured database.
+
+The script always adds `--copy --neutralize`.
+
+Any extra arguments are forwarded to the underlying command `click-odoo-restoredb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-restoredb-beta) package.
+
+Examples:
+
+```bash
+./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip
+./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip --force
+```
+
+##### 2.3.7. update
+
+Updates an Odoo database automatically detecting addons to update based on a hash of their file content.
+
+Any extra arguments are forwarded to the underlying command `click-odoo-update` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-update-stable) package.
+
+Examples:
+
+```bash
+./odoo-scripts/update.sh
+./odoo-scripts/update.sh --update-all
+```
+
+
+### 3. Managing Python requirements
 
 The `[virtualenv]` section controls additional Python dependencies used when provisioning both the native virtual environment and generated Docker images.
 
@@ -496,7 +687,7 @@ Use:
 
 When a package is listed in `requirements`, `odt-env` automatically gives that package priority by ignoring the same package name from collected repository requirements. This means you can usually pin a package version just by adding it to `requirements`.
 
-#### 4.1. Add or pin packages
+#### 3.1. Add or pin packages
 
 Use `requirements` to install additional packages or to force a specific version:
 
@@ -509,7 +700,7 @@ requirements =
 
 In this example, both packages are included in the generated dependency set and pinned to the specified versions.
 
-#### 4.2. Override a package with a different one
+#### 3.2. Override a package with a different one
 
 If you want to replace a package with a different distribution name, add the replacement to `requirements` and skip the original package with `requirements_ignore`.
 
@@ -527,39 +718,7 @@ In this example, `odt-env` installs `psycopg2-binary==2.9.9` and skips `psycopg2
 
 ---
 
-### 5. Using system Python instead of managed Python
-
-By default, `odt-env` uses `uv` to install and manage the requested Python version.
-
-If you already have a suitable system Python installed, you can disable managed Python.
-
-#### 5.1. Update the project file
-
-Disable managed Python by adding `python_version = 3.11` and `managed_python = false` to the `odoo-project.ini` file.
-
-> **Note**
-> Set `python_version` to the Python version you want to use from your local system.
-> In the example below, 3.11 is only illustrative.
-
-```ini
-[virtualenv]
-managed_python = false
-python_version = 3.11
-```
-
-#### 5.2. Update the workspace
-
-After changing the project file, run `odt-env` again from the workspace root:
-
-```bash
-odt-env --sync-all --create-venv
-```
-
-This recreates the virtual environment at `ROOT/venv` using the system Python.
-
----
-
-### 6. Creating portable workspace bundles
+### 4. Creating portable workspace bundles
 
 Portable bundles are useful when you want to prepare an Odoo workspace on an internet-connected machine and reproduce it on another compatible machine without cloning repositories or downloading Python packages again.
 
@@ -577,7 +736,7 @@ The bundle does not contain the virtual environment, database data, logs, backup
 
 Those machine-specific outputs are recreated on the target machine.
 
-#### 6.1. Create a bundle on the build machine
+#### 4.1. Create a bundle on the build machine
 
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
@@ -597,7 +756,7 @@ You can also select an explicit output file:
 odt-env --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
-#### 6.1.1. Including uncommitted changes
+##### 4.1.1. Including uncommitted changes
 
 By default, bundle creation stops when a bundled Git repository has uncommitted changes.
 
@@ -607,7 +766,7 @@ To intentionally include those changes in the bundle, use:
 odt-env --sync-all --create-venv --create-bundle --allow-dirty-bundle
 ```
 
-#### 6.2. Create the workspace on the target machine
+#### 4.2. Create the workspace on the target machine
 
 Copy the ZIP to the target machine and import it into an empty directory:
 
@@ -634,7 +793,7 @@ The import operation:
 > **Compatibility note**
 > A wheelhouse is platform- and architecture-dependent. Create and import a bundle on compatible systems, for example Linux x86-64 to Linux x86-64. The target machine must have `uv` and access to the configured Python version. When `[virtualenv].managed_python = true`, `uv` may still need network access if that Python interpreter is not already installed or cached. For a fully disconnected target, install the required Python interpreter beforehand or use `managed_python = false`.
 
-#### 6.3. Manual wheelhouse workflow
+#### 4.3. Manual wheelhouse workflow
 
 The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
@@ -760,11 +919,11 @@ Maintenance:
 
 - `--create-bundle [BUNDLE]` — create a verified portable ZIP containing Odoo sources, configured addon sources, a sanitized `odoo-project.ini`, and `ROOT/wheelhouse/`. If `BUNDLE` is omitted, the output is `ROOT/dist/ROOT-NAME.odt.zip`. Relative explicit output paths are resolved from the current working directory.
 - `--allow-dirty-bundle` — allow `--create-bundle` to snapshot Git repositories with uncommitted changes. Without this option, dirty repositories abort bundle creation.
-- `--create-from-bundle BUNDLE` — verify and extract a portable bundle into an empty `ROOT`, then recreate `ROOT/venv` using the bundled wheelhouse. This offline deployment path intentionally skips local Docker generation; `--create-docker-deploy` cannot be combined with it.
+- `--create-from-bundle BUNDLE` — verify and extract a portable bundle into an empty `ROOT`, then recreate `ROOT/venv` using the bundled wheelhouse. This offline deployment path intentionally skips Docker workflow generation; `--create-docker-deploy` cannot be combined with it.
 
 ### Docker generation
 
-- Local Docker generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context.
 
@@ -788,7 +947,7 @@ The following sections are supported:
 - `[virtualenv]` — optional Python and dependency settings
 - `[odoo]` — required Odoo source settings
 - `[addons.<name>]` — optional addon sources
-- `[docker]` — optional local/deploy Docker generation settings
+- `[docker]` — optional Docker workflow/deploy generation settings
 - `[config]` — optional Odoo server configuration values
 
 ### General rules
@@ -955,107 +1114,3 @@ http_port = 8069
 ```
 
 ---
-
-## Script reference
-
-This section describes the native helpers under `ROOT/odoo-scripts/`. Local Docker backup/restore helpers are documented in the Local Docker section above.
-
-Most helper scripts are generated in both Unix (`.sh`) and Windows (`.bat`) variants. `instance.sh` is available only on Unix-like systems.
-
-Native database backup and restore scripts are generated only when `[config].db_name` is configured.
-
-The examples below use the Unix form.
-
-### run
-
-Starts Odoo in the foreground.
-
-Any extra arguments are forwarded to the underlying command `odoo-bin`.
-
-Examples:
-
-```bash
-./odoo-scripts/run.sh
-./odoo-scripts/run.sh --dev=all
-./odoo-scripts/run.sh -i sale,crm --without-demo=all
-```
-
-### instance
-
-Manages Odoo as a background service on Unix-like systems.
-
-Logs are written to `ROOT/odoo-logs/odoo-server.log` and the PID is stored in `ROOT/odoo-logs/odoo-server.pid`.
-
-Examples:
-
-```bash
-./odoo-scripts/instance.sh start
-./odoo-scripts/instance.sh stop
-./odoo-scripts/instance.sh restart
-./odoo-scripts/instance.sh status
-```
-
-### test
-
-Runs Odoo tests.
-
-The script always adds `--test-enable --stop-after-init`.
-
-Any extra arguments are forwarded to the underlying command `odoo-bin`.
-
-Examples:
-
-```bash
-./odoo-scripts/test.sh
-./odoo-scripts/test.sh -i sale --test-tags /sale
-```
-
-### shell
-
-Opens an Odoo shell.
-
-Examples:
-
-```bash
-./odoo-scripts/shell.sh
-```
-
-### backup
-
-Creates a timestamped ZIP backup under `ROOT/odoo-backups/`.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-backupdb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-backupdb-beta) package.
-
-Examples:
-
-```bash
-./odoo-scripts/backup.sh
-```
-
-### restore
-
-Restores a backup into the configured database.
-
-The script always adds `--copy --neutralize`.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-restoredb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-restoredb-beta) package.
-
-Examples:
-
-```bash
-./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip
-./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip --force
-```
-
-### update
-
-Updates an Odoo database automatically detecting addons to update based on a hash of their file content.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-update` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-update-stable) package.
-
-Examples:
-
-```bash
-./odoo-scripts/update.sh
-./odoo-scripts/update.sh --update-all
-```
