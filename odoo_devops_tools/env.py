@@ -96,6 +96,7 @@ _DEFAULT_DOCKER_REQUIREMENTS = [
 ]
 
 _DEFAULT_DOCKER_UV_VERSION = "0.12.12"
+_DEFAULT_DOCKER_RESTIC_VERSION = "0.19.1"
 _DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
 _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
 _DOCKER_CONTEXT_LOCAL = "local"
@@ -3140,10 +3141,7 @@ FROM {base_image}
 
 USER root
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends restic \
- && rm -rf /var/lib/apt/lists/*
-
+COPY --from=restic/restic:{_DEFAULT_DOCKER_RESTIC_VERSION} /usr/bin/restic /usr/bin/restic
 COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
 COPY requirements/addons-requirements.in.txt /tmp/addons-requirements.in.txt

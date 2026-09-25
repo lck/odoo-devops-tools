@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.20.5 (2026-09-25)
+
+### Changed
+
+* Install Restic from the official Docker image instead of APT for compatibility with older Odoo base images.
+
 ## 1.20.4 (2026-09-24)
 
 ### Documentation
