@@ -116,24 +116,8 @@ Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localh
 The Docker workflow uses the following `odoo-project.ini` configuration:
 
 ```ini
-[virtualenv]
-managed_python = true
-python_version =
-build_constraints =
-requirements =
-requirements_ignore =
-
 [odoo]
 version = 19.0
-repo = https://github.com/odoo/odoo.git
-branch = 19.0
-commit =
-shallow = true
-
-[docker]
-base_image = odoo:19.0
-
-[config]
 ```
 
 Edit this file when you want to add extra addons, change configuration values, pin repositories, or adjust Python dependency handling.
@@ -189,7 +173,36 @@ For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
 docker compose exec odoo click-odoo-update -c /etc/odoo/odoo.conf -d odoo
 ```
 
-### 1.2. Backup and restore
+### 1.2. Running Odoo from workspace source
+
+By default, `[docker].odoo_source = image`, so the generated Docker workflow runs the Odoo installation already provided by `[docker].base_image`.
+
+Use `odoo_source = workspace` when you need to run a modified Odoo core from the source configured in `[odoo]` instead. This works with both Git-managed Odoo sources under `ROOT/odoo/` and local sources configured with `[odoo].path`.
+
+For example, a customized Odoo source can be configured as:
+
+```ini
+[odoo]
+version = 19.0
+repo = git@github.com:my-company/odoo.git
+branch = 19.0-custom-odoo
+
+[docker]
+odoo_source = workspace
+```
+
+Sync the Odoo source and generate the Docker artifacts:
+
+```bash
+odt-env --sync-all
+docker compose up --build -d
+```
+
+In the local Docker workflow, the resolved Odoo source is bind-mounted read-only at `/opt/odoo`, `/usr/local/bin/odoo` runs `/opt/odoo/odoo-bin`, and `PYTHONPATH` points to `/opt/odoo`. The generated `addons_path` includes both Odoo core addon directories and the configured extra addons. The Odoo installation from the base image remains present but is not used as the runtime Odoo source.
+
+The source `requirements.txt` is used as a resolver constraint when Docker addon dependencies are compiled. This keeps packages pulled by addons compatible with the selected Odoo source without reinstalling every Odoo core dependency already provided by the base image. Add or override packages explicitly through `[virtualenv].requirements` when needed.
+
+### 1.3. Backup and restore
 
 The Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
 
@@ -212,7 +225,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### 1.2.1. Database backup
+#### 1.3.1. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -232,7 +245,7 @@ Pass an output path explicitly when needed:
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.2.2. Database restore
+#### 1.3.2. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -254,7 +267,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.2.3. Filestore backup
+#### 1.3.3. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -285,7 +298,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.2.4. Filestore restore
+#### 1.3.4. Filestore restore
 
 Restore a filestore archive:
 
@@ -309,7 +322,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.2.5. Restic filestore backup
+#### 1.3.5. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -357,7 +370,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.2.6. Restic filestore restore
+#### 1.3.6. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -384,7 +397,7 @@ ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/rest
 The restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
 
-### 1.3. Creating a Docker deploy build context
+### 1.4. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -394,6 +407,12 @@ Addon modules are staged into the build context so the resulting image does not 
 odt-env --sync-addons --create-docker-deploy
 ```
 
+When `[docker].odoo_source = workspace`, sync the Odoo source as well:
+
+```bash
+odt-env --sync-all --create-docker-deploy
+```
+
 This additionally creates:
 
 ```text
@@ -401,12 +420,13 @@ ROOT/docker/deploy/
 ├── Dockerfile
 ├── .dockerignore
 ├── addons/
+├── odoo/                    # only with odoo_source = workspace
 ├── requirements/
 └── configs/
     └── odoo.conf
 ```
 
-Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/extra-addons/` by the generated Dockerfile. Runtime Compose configuration is not generated for the deploy context.
+Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/extra-addons/` by the generated Dockerfile. With `odoo_source = workspace`, the resolved Odoo source is also staged under `docker/deploy/odoo/` and copied into `/opt/odoo/`, so the deploy image is self-contained. Runtime Compose configuration is not generated for the deploy context.
 
 `odt-env` prepares the deploy build context but does not build or push the image. Build it with Docker or your CI/CD system, for example:
 
@@ -414,7 +434,7 @@ Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/ext
 docker build -t mycompany/odoo:19.0 docker/deploy
 ```
 
-`[docker].base_image` controls the base image used by both generated Dockerfiles.
+`[docker].base_image` controls the base image used by both generated Dockerfiles. `[docker].odoo_source` controls whether Odoo runs from that image or from the workspace source.
 
 In CI, where the `docker/local/` context is unnecessary, combine the options:
 
@@ -454,22 +474,8 @@ Odoo starts with the generated configuration from `./odoo-configs/odoo-server.co
 The native workflow uses the following `odoo-project.ini` configuration, with PostgreSQL connection settings added to `[config]`:
 
 ```ini
-[virtualenv]
-managed_python = true
-python_version =
-build_constraints =
-requirements =
-requirements_ignore =
-
 [odoo]
 version = 19.0
-repo = https://github.com/odoo/odoo.git
-branch = 19.0
-commit =
-shallow = true
-
-[docker]
-base_image = odoo:19.0
 
 [config]
 db_host = 127.0.0.1
@@ -911,9 +917,9 @@ Maintenance:
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
-- `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context.
+- `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
 ### Other options
 
@@ -1073,6 +1079,7 @@ commit = abcdef1
 This section is optional.
 
 - `base_image` — Docker image used as the base image in both generated Dockerfiles. Default: `odoo:${odoo:version}`.
+- `odoo_source` — Odoo runtime source for generated Docker workflows. `image` uses the Odoo installation from `base_image`; `workspace` runs the resolved `[odoo]` source from `/opt/odoo`. Default: `image`.
 
 ### `[config]`
 

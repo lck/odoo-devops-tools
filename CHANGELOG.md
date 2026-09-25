@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.0 (2026-09-25)
+
+### Added
+
+* Add Docker support for running Odoo from workspace sources.
+
 ## 1.20.5 (2026-09-25)
 
 ### Changed

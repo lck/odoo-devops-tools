@@ -63,24 +63,8 @@ _BUNDLE_IGNORED_NAMES = {
 _BUNDLE_IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 _DEFAULT_PROJECT_INI_TEMPLATE = r"""
-[virtualenv]
-managed_python = true
-python_version =
-build_constraints =
-requirements =
-requirements_ignore =
-
 [odoo]
 version = 19.0
-repo = https://github.com/odoo/odoo.git
-branch = ${odoo:version}
-commit =
-shallow = true
-
-[docker]
-base_image = odoo:${odoo:version}
-
-[config]
 """
 
 
@@ -101,6 +85,9 @@ _DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
 _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
 _DOCKER_CONTEXT_LOCAL = "local"
 _DOCKER_CONTEXT_DEPLOY = "deploy"
+_DOCKER_ODOO_SOURCE_IMAGE = "image"
+_DOCKER_ODOO_SOURCE_WORKSPACE = "workspace"
+_DOCKER_ODOO_CONTAINER_ROOT = PurePosixPath("/opt/odoo")
 _DOCKER_ADDONS_CONTAINER_ROOT = PurePosixPath("/mnt/extra-addons")
 _DOCKER_HOST_PORT_CONFIG_KEYS = {"http_port", "gevent_port", "longpolling_port"}
 _DOCKER_DB_CONNECTION_CONFIG_KEYS = {"db_host", "db_port", "db_name", "db_user", "db_password"}
@@ -186,6 +173,7 @@ class VirtualenvConfig:
 @dataclass(frozen=True)
 class DockerConfig:
     base_image: Optional[str] = None
+    odoo_source: str = _DOCKER_ODOO_SOURCE_IMAGE
 
 
 @dataclass(frozen=True)
@@ -904,6 +892,18 @@ def _validate_docker_image(value: str, option: str) -> str:
     return image
 
 
+def _validate_docker_odoo_source(value: str) -> str:
+    source = (value or "").strip().lower()
+    supported = {_DOCKER_ODOO_SOURCE_IMAGE, _DOCKER_ODOO_SOURCE_WORKSPACE}
+    if source not in supported:
+        choices = ", ".join(sorted(supported))
+        raise Exception(
+            "Invalid option 'odoo_source' in section [docker] "
+            f"(expected one of: {choices})."
+        )
+    return source
+
+
 def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str], list[str]]:
     odoo_major_version = _parse_odoo_version(odoo_version)
 
@@ -1087,14 +1087,17 @@ def load_project_config(
                 shallow=_get_ini_bool(cp, sec, "shallow", default=True),
             )
 
-    docker = DockerConfig(base_image=f"odoo:{odoo_version}")
+    docker = DockerConfig(
+        base_image=f"odoo:{odoo_version}",
+        odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
+    )
     if cp.has_section("docker"):
-        supported_docker_options = {"base_image"}
+        supported_docker_options = {"base_image", "odoo_source"}
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
-                    "Supported options: base_image."
+                    "Supported options: base_image, odoo_source."
                 )
 
         base_image = (
@@ -1102,7 +1105,12 @@ def load_project_config(
             if cp.has_option("docker", "base_image")
             else f"odoo:{odoo_version}"
         )
-        docker = DockerConfig(base_image=base_image)
+        odoo_source = (
+            _validate_docker_odoo_source(cp.get("docker", "odoo_source"))
+            if cp.has_option("docker", "odoo_source")
+            else _DOCKER_ODOO_SOURCE_IMAGE
+        )
+        docker = DockerConfig(base_image=base_image, odoo_source=odoo_source)
 
     config: Dict[str, Any] = {}
     # [config] is optional. Only include keys explicitly defined in [config]
@@ -2370,6 +2378,10 @@ def _docker_build_constraints_path(docker_context_dir: Path) -> Path:
     return _docker_requirements_dir(docker_context_dir) / "build-constraints.txt"
 
 
+def _docker_odoo_requirements_constraints_path(docker_context_dir: Path) -> Path:
+    return _docker_requirements_dir(docker_context_dir) / "odoo-requirements.txt"
+
+
 def _docker_requirements_input_path(docker_context_dir: Path) -> Path:
     return _docker_requirements_dir(docker_context_dir) / "addons-requirements.in.txt"
 
@@ -2384,6 +2396,10 @@ def _dockerignore_path(docker_context_dir: Path) -> Path:
 
 def _docker_addons_dir(docker_context_dir: Path) -> Path:
     return docker_context_dir / "addons"
+
+
+def _docker_odoo_dir(docker_context_dir: Path) -> Path:
+    return docker_context_dir / "odoo"
 
 
 def _docker_odoo_conf_path(docker_context_dir: Path) -> Path:
@@ -2436,6 +2452,44 @@ def _docker_local_container_addons_path(cfg: ProjectConfig) -> str:
     )
 
 
+def _docker_uses_workspace_odoo(cfg: ProjectConfig) -> bool:
+    return cfg.docker.odoo_source == _DOCKER_ODOO_SOURCE_WORKSPACE
+
+
+def _docker_workspace_odoo_path(layout: Layout, cfg: ProjectConfig) -> Path:
+    source = _resolve_odoo_path(layout, cfg.odoo)
+    if not source.exists() or not source.is_dir():
+        raise Exception(
+            f"Docker workspace Odoo source not found: {source}. "
+            "Run with --sync-odoo/--sync-all first, or provide an existing [odoo].path."
+        )
+    odoo_bin = source / "odoo-bin"
+    if not odoo_bin.is_file():
+        raise Exception(f"Docker workspace Odoo source is missing odoo-bin: {odoo_bin}")
+    requirements = source / "requirements.txt"
+    if not requirements.is_file():
+        raise Exception(f"Docker workspace Odoo source is missing requirements.txt: {requirements}")
+    return source
+
+
+def _docker_workspace_core_addons_path() -> str:
+    return ",".join([
+        str(_DOCKER_ODOO_CONTAINER_ROOT / "addons"),
+        str(_DOCKER_ODOO_CONTAINER_ROOT / "odoo" / "addons"),
+    ])
+
+
+def _docker_runtime_addons_path(cfg: ProjectConfig, *, local: bool) -> str:
+    extra_addons = (
+        _docker_local_container_addons_path(cfg)
+        if local
+        else str(_DOCKER_ADDONS_CONTAINER_ROOT)
+    )
+    if not _docker_uses_workspace_odoo(cfg):
+        return extra_addons
+    return f"{_docker_workspace_core_addons_path()},{extra_addons}"
+
+
 def _yaml_quote_scalar(value: str) -> str:
     return json.dumps(value)
 
@@ -2471,7 +2525,7 @@ def write_docker_requirements_input(
     lines: list[str] = [
         "# This file is generated by odt-env (DO NOT EDIT).",
         "# Source: addon repository requirements plus odt-env Docker defaults and explicit [virtualenv].requirements.",
-        "# Odoo core requirements are intentionally excluded for official Odoo Docker images.",
+        "# In workspace Odoo source mode, Odoo requirements are applied separately as resolver constraints.",
         "# Dependency resolution is performed later inside the Docker build.",
         "",
     ]
@@ -2559,6 +2613,33 @@ def stage_docker_addons(layout: Layout, cfg: ProjectConfig, docker_context_dir: 
 
     _logger.info("Staged %s Odoo addon module(s) for Docker deploy context.", len(staged_modules))
     return len(staged_modules)
+
+
+def stage_docker_odoo_source(layout: Layout, cfg: ProjectConfig, docker_context_dir: Path) -> Optional[Path]:
+    if not _docker_uses_workspace_odoo(cfg):
+        return None
+
+    source = _docker_workspace_odoo_path(layout, cfg)
+    destination = _docker_odoo_dir(docker_context_dir)
+    if destination.exists():
+        _rmtree(destination)
+
+    shutil.copytree(
+        source,
+        destination,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+        ),
+    )
+    _logger.info("Staged workspace Odoo source for Docker deploy context: %s", destination)
+    return destination
 
 
 def write_dockerignore(docker_context_dir: Path, *, local: bool) -> Path:
@@ -2722,6 +2803,14 @@ def _render_docker_compose_volumes(layout: Layout, cfg: ProjectConfig) -> str:
     volumes = [
         "      - ./docker/local/configs:/etc/odoo:ro",
     ]
+    if _docker_uses_workspace_odoo(cfg):
+        odoo_source = _docker_workspace_odoo_path(layout, cfg)
+        volumes.extend([
+            "      - type: bind",
+            f"        source: {_yaml_quote_scalar(_compose_host_path(layout, odoo_source))}",
+            f"        target: {_yaml_quote_scalar(str(_DOCKER_ODOO_CONTAINER_ROOT))}",
+            "        read_only: true",
+        ])
     volumes.extend(_render_docker_local_addon_volumes(layout, cfg))
     volumes.append("      - odoo-data:/var/lib/odoo")
     return "\n".join(volumes)
@@ -3103,6 +3192,7 @@ def write_dockerfile(
         docker_context_dir: Path,
         cfg: ProjectConfig,
         has_build_constraints: bool,
+        has_odoo_requirements_constraints: bool,
         *,
         include_addons: bool,
         include_config: bool,
@@ -3110,12 +3200,18 @@ def write_dockerfile(
     build_constraints_copy = ""
     build_constraints_compile = ""
     build_constraints_install = ""
+    odoo_constraints_copy = ""
+    odoo_constraints_compile = ""
     cleanup_constraints = ""
     if has_build_constraints:
         build_constraints_copy = "COPY requirements/build-constraints.txt /tmp/build-constraints.txt\n"
         build_constraints_compile = " --build-constraints /tmp/build-constraints.txt"
         build_constraints_install = " --build-constraints /tmp/build-constraints.txt"
-        cleanup_constraints = " /tmp/build-constraints.txt"
+        cleanup_constraints += " /tmp/build-constraints.txt"
+    if has_odoo_requirements_constraints:
+        odoo_constraints_copy = "COPY requirements/odoo-requirements.txt /tmp/odoo-requirements.txt\n"
+        odoo_constraints_compile = " --constraint /tmp/odoo-requirements.txt"
+        cleanup_constraints += " /tmp/odoo-requirements.txt"
 
     base_image = (cfg.docker.base_image or f"odoo:{cfg.odoo.version}").strip()
     addon_copy_step = ""
@@ -3135,6 +3231,20 @@ RUN chown -R odoo:odoo /mnt/extra-addons
 COPY --chown=odoo:odoo configs/odoo.conf /etc/odoo/odoo.conf
 """
 
+    odoo_source_copy_step = ""
+    workspace_runtime_step = ""
+    if _docker_uses_workspace_odoo(cfg):
+        if include_addons:
+            odoo_source_copy_step = f"""
+COPY --chown=odoo:odoo odoo/ {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/
+"""
+        workspace_runtime_step = f"""
+ENV PYTHONPATH={_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}
+
+RUN printf '%s\\n' '#!/bin/sh' 'exec {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/odoo-bin "$@"' > /usr/local/bin/odoo \\
+ && chmod 0755 /usr/local/bin/odoo
+"""
+
     content = f"""# Generated by odt-env.
 # Review and edit this file before building when project-specific changes are needed.
 FROM {base_image}
@@ -3146,14 +3256,16 @@ COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
 COPY requirements/addons-requirements.in.txt /tmp/addons-requirements.in.txt
 {build_constraints_copy.rstrip()}
+{odoo_constraints_copy.rstrip()}
 
 RUN if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/addons-requirements.in.txt; then \\
-      uv pip compile --python python3 --no-cache{build_constraints_compile} /tmp/addons-requirements.in.txt -o /tmp/addons-requirements.lock.txt \\
+      uv pip compile --python python3 --no-cache{build_constraints_compile}{odoo_constraints_compile} /tmp/addons-requirements.in.txt -o /tmp/addons-requirements.lock.txt \\
       && uv pip install --system --break-system-packages --no-cache{build_constraints_install} -r /tmp/addons-requirements.lock.txt; \\
     else \\
       echo "INFO: No addon Python requirements to install."; \\
     fi \\
  && rm -f /tmp/addons-requirements.in.txt /tmp/addons-requirements.lock.txt{cleanup_constraints}{addon_chown_step}
+{odoo_source_copy_step}{workspace_runtime_step}
 USER odoo
 """
     path = _dockerfile_path(docker_context_dir)
@@ -3167,7 +3279,7 @@ def _prepare_docker_requirements(
         addon_requirement_files: list[Path],
         docker_context_dir: Path,
         copy_from: Optional[Path] = None,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     requirements_dir = _docker_requirements_dir(docker_context_dir)
     requirements_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3178,9 +3290,10 @@ def _prepare_docker_requirements(
         shutil.copytree(copy_from, requirements_dir)
         input_path = _docker_requirements_input_path(docker_context_dir)
         build_constraints_path = _docker_build_constraints_path(docker_context_dir)
+        odoo_constraints_path = _docker_odoo_requirements_constraints_path(docker_context_dir)
         if not input_path.is_file():
             raise Exception(f"Copied Docker requirements are missing input file: {input_path}")
-        return input_path, build_constraints_path
+        return input_path, build_constraints_path, odoo_constraints_path
 
     build_constraints_path = _docker_build_constraints_path(docker_context_dir)
     if cfg.virtualenv.build_constraints:
@@ -3188,6 +3301,16 @@ def _prepare_docker_requirements(
             "\n".join(cfg.virtualenv.build_constraints).rstrip("\n") + "\n",
             encoding="utf-8",
         )
+
+    odoo_constraints_path = _docker_odoo_requirements_constraints_path(docker_context_dir)
+    if _docker_uses_workspace_odoo(cfg):
+        odoo_source = _docker_workspace_odoo_path(layout, cfg)
+        constraint_lines = _collect_requirement_file_lines(
+            layout.root,
+            [odoo_source / "requirements.txt"],
+            _requirements_ignore_set(_docker_requirements_ignore(cfg.virtualenv)),
+        )
+        _write_requirements_input(odoo_constraints_path, constraint_lines)
 
     input_path = _docker_requirements_input_path(docker_context_dir)
     write_docker_requirements_input(
@@ -3197,7 +3320,7 @@ def _prepare_docker_requirements(
         requirements_ignore=_docker_requirements_ignore(cfg.virtualenv),
         output_path=input_path,
     )
-    return input_path, build_constraints_path
+    return input_path, build_constraints_path, odoo_constraints_path
 
 
 def create_local_docker_artifacts(
@@ -3210,7 +3333,7 @@ def create_local_docker_artifacts(
         _rmtree(layout.docker_local_dir)
     layout.docker_local_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path, build_constraints_path = _prepare_docker_requirements(
+    input_path, build_constraints_path, odoo_constraints_path = _prepare_docker_requirements(
         layout=layout,
         cfg=cfg,
         addon_requirement_files=addon_requirement_files,
@@ -3220,13 +3343,14 @@ def create_local_docker_artifacts(
     docker_conf_path = write_docker_odoo_conf(
         layout.docker_local_dir,
         cfg,
-        addons_path=_docker_local_container_addons_path(cfg),
+        addons_path=_docker_runtime_addons_path(cfg, local=True),
         local_database=True,
     )
     dockerfile_path = write_dockerfile(
         layout.docker_local_dir,
         cfg,
         has_build_constraints=build_constraints_path.is_file(),
+        has_odoo_requirements_constraints=odoo_constraints_path.is_file(),
         include_addons=False,
         include_config=False,
     )
@@ -3248,6 +3372,7 @@ def create_local_docker_artifacts(
         "requirements_dir": _docker_requirements_dir(layout.docker_local_dir),
         "requirements_input": input_path,
         "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,
+        "odoo_requirements_constraints": odoo_constraints_path if odoo_constraints_path.is_file() else None,
     }
 
 
@@ -3262,7 +3387,7 @@ def create_deploy_docker_artifacts(
         _rmtree(layout.docker_deploy_dir)
     layout.docker_deploy_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path, build_constraints_path = _prepare_docker_requirements(
+    input_path, build_constraints_path, odoo_constraints_path = _prepare_docker_requirements(
         layout=layout,
         cfg=cfg,
         addon_requirement_files=addon_requirement_files,
@@ -3270,16 +3395,18 @@ def create_deploy_docker_artifacts(
         copy_from=requirements_source_dir,
     )
     staged_module_count = stage_docker_addons(layout, cfg, layout.docker_deploy_dir)
+    staged_odoo_source = stage_docker_odoo_source(layout, cfg, layout.docker_deploy_dir)
     dockerignore_path = write_dockerignore(layout.docker_deploy_dir, local=False)
     docker_conf_path = write_docker_odoo_conf(
         layout.docker_deploy_dir,
         cfg,
-        addons_path=str(_DOCKER_ADDONS_CONTAINER_ROOT),
+        addons_path=_docker_runtime_addons_path(cfg, local=False),
     )
     dockerfile_path = write_dockerfile(
         layout.docker_deploy_dir,
         cfg,
         has_build_constraints=build_constraints_path.is_file(),
+        has_odoo_requirements_constraints=odoo_constraints_path.is_file(),
         include_addons=True,
         include_config=True,
     )
@@ -3296,7 +3423,9 @@ def create_deploy_docker_artifacts(
         "requirements_dir": _docker_requirements_dir(layout.docker_deploy_dir),
         "requirements_input": input_path,
         "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,
+        "odoo_requirements_constraints": odoo_constraints_path if odoo_constraints_path.is_file() else None,
         "staged_module_count": staged_module_count,
+        "staged_odoo_source": staged_odoo_source,
     }
 
 
