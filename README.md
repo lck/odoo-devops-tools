@@ -311,7 +311,7 @@ Database and filestore backups are intentionally separate. This allows either pa
 
 #### 1.2.5. Restic filestore backup
 
-The generated Docker image also includes `restic`, installed from the base image APT repositories. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
+The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
 The Docker workflow generates three additional helpers:
 
