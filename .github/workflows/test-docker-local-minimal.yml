@@ -35,7 +35,7 @@ jobs:
           test -f odoo-workspace/docker/local/Dockerfile
           test -f odoo-workspace/docker/local/.dockerignore
           test -f odoo-workspace/docker/local/configs/odoo.conf
-          test -f odoo-workspace/docker/local/requirements/addons-requirements.in.txt
+          test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
           test -x odoo-workspace/docker/local/scripts/backup-db.sh
           test -x odoo-workspace/docker/local/scripts/restore-db.sh
           test -x odoo-workspace/docker/local/scripts/backup-filestore.sh
@@ -43,9 +43,9 @@ jobs:
           test -x odoo-workspace/docker/local/scripts/restic.sh
           test -x odoo-workspace/docker/local/scripts/backup-filestore-restic.sh
           test -x odoo-workspace/docker/local/scripts/restore-filestore-restic.sh
-          test ! -e odoo-workspace/docker/local/requirements/addons-requirements.lock.txt
-          grep -q 'uv pip compile .*addons-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
-          grep -q 'uv pip install .*addons-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
+          test ! -e odoo-workspace/docker/local/requirements/all-requirements.lock.txt
+          grep -q 'uv pip compile .*all-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
+          grep -q 'uv pip install .*all-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
           grep -q 'COPY --from=restic/restic:.* /usr/bin/restic /usr/bin/restic' odoo-workspace/docker/local/Dockerfile
 
           test "$(grep -c '^      driver: local$' odoo-workspace/compose.yaml)" -eq 2

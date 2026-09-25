@@ -4,6 +4,7 @@
 
 ### Added
 
+* Allow `--set` to add supported project options.
 * Add Docker support for running Odoo from workspace sources.
 
 ## 1.20.5 (2026-09-25)

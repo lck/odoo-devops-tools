@@ -114,6 +114,36 @@ _ODOO_VENV_SETTINGS = {
 
 _SENSITIVE_KEYS = ("password", "passwd", "secret", "token", "api_key", "apikey", "private_key")
 
+_INI_SET_SUPPORTED_OPTIONS = {
+    "virtualenv": {
+        "managed_python",
+        "python_version",
+        "build_constraints",
+        "requirements",
+        "requirements_ignore",
+    },
+    "odoo": {
+        "version",
+        "repo",
+        "branch",
+        "commit",
+        "shallow",
+        "path",
+    },
+    "docker": {
+        "base_image",
+        "odoo_source",
+        "odoo_requirements_source",
+    },
+}
+_INI_SET_ADDON_SUPPORTED_OPTIONS = {
+    "repo",
+    "branch",
+    "commit",
+    "shallow",
+    "path",
+}
+
 
 # -----------------------------
 # Data models
@@ -174,6 +204,7 @@ class VirtualenvConfig:
 class DockerConfig:
     base_image: Optional[str] = None
     odoo_source: str = _DOCKER_ODOO_SOURCE_IMAGE
+    odoo_requirements_source: str = _DOCKER_ODOO_SOURCE_IMAGE
 
 
 @dataclass(frozen=True)
@@ -800,33 +831,49 @@ def _parse_cli_ini_overrides(raw_overrides: list[str]) -> Dict[str, Dict[str, st
     return overrides
 
 
-def _validate_ini_overrides_exist(
-        cp: configparser.ConfigParser,
+def _validate_ini_overrides(
         ini_overrides: Dict[str, Dict[str, str]],
 ) -> None:
-    """Require --set targets to exist, except new [config] options.
-
-    The [config] section maps directly to generated Odoo configuration options,
-    so allowing new keys there keeps reusable templates small while preserving
-    strict validation for odt-env's own structured sections.
-    """
+    """Validate --set targets against the supported project-file schema."""
     for section, options in ini_overrides.items():
-        if not cp.has_section(section):
-            if section == "config":
-                continue
-            raise Exception(
-                f"Invalid -S/--set override: section [{section}] does not exist in the INI file. "
-                "--set can only create new options in [config]."
-            )
+        if section == "config":
+            for key in options:
+                if key == "addons_path":
+                    raise Exception(
+                        "Invalid -S/--set override: option 'addons_path' is not supported in section [config]. "
+                        "addons_path is always generated automatically."
+                    )
+            continue
+
+        if section == "vars":
+            # [vars] is intentionally schema-free. -e/--extra-var remains the
+            # dedicated shorthand, but --set keeps working here as well.
+            continue
+
+        if section.startswith("addons."):
+            addon_name = section.split(".", 1)[1].strip()
+            if not addon_name:
+                raise Exception(
+                    "Invalid -S/--set override: addon section name must be in the form [addons.<name>]."
+                )
+            supported = _INI_SET_ADDON_SUPPORTED_OPTIONS
+        else:
+            supported = _INI_SET_SUPPORTED_OPTIONS.get(section)
+            if supported is None:
+                supported_sections = ", ".join(
+                    ["vars", "virtualenv", "odoo", "addons.<name>", "docker", "config"]
+                )
+                raise Exception(
+                    f"Invalid -S/--set override: unsupported section [{section}]. "
+                    f"Supported sections: {supported_sections}."
+                )
 
         for key in options:
-            if section == "config":
-                continue
-
-            if not cp.has_option(section, key):
+            if key not in supported:
+                supported_keys = ", ".join(sorted(supported))
                 raise Exception(
-                    f"Invalid -S/--set override: option '{key}' does not exist in section [{section}] "
-                    "in the INI file. --set can only create new options in [config]."
+                    f"Invalid -S/--set override: unsupported option '{key}' in section [{section}]. "
+                    f"Supported options: {supported_keys}."
                 )
 
 
@@ -841,12 +888,13 @@ def _read_ini(
     if not read_ok:
         raise Exception(f"Failed to read INI config: {entry_ini}")
 
-    # Validate --set against the original INI content before -e/--extra-var can
-    # inject anything into [vars]. New options are allowed only in [config].
+    # Validate --set against the supported project-file schema before applying
+    # overrides. Supported missing sections/options are created on demand.
     if ini_overrides:
-        _validate_ini_overrides_exist(cp, ini_overrides)
-        if "config" in ini_overrides and not cp.has_section("config"):
-            cp.add_section("config")
+        _validate_ini_overrides(ini_overrides)
+        for section in ini_overrides:
+            if not cp.has_section(section):
+                cp.add_section(section)
 
     if vars_overrides:
         if not cp.has_section("vars"):
@@ -892,13 +940,13 @@ def _validate_docker_image(value: str, option: str) -> str:
     return image
 
 
-def _validate_docker_odoo_source(value: str) -> str:
+def _validate_docker_source(value: str, option: str) -> str:
     source = (value or "").strip().lower()
     supported = {_DOCKER_ODOO_SOURCE_IMAGE, _DOCKER_ODOO_SOURCE_WORKSPACE}
     if source not in supported:
         choices = ", ".join(sorted(supported))
         raise Exception(
-            "Invalid option 'odoo_source' in section [docker] "
+            f"Invalid option '{option}' in section [docker] "
             f"(expected one of: {choices})."
         )
     return source
@@ -1090,14 +1138,15 @@ def load_project_config(
     docker = DockerConfig(
         base_image=f"odoo:{odoo_version}",
         odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
+        odoo_requirements_source=_DOCKER_ODOO_SOURCE_IMAGE,
     )
     if cp.has_section("docker"):
-        supported_docker_options = {"base_image", "odoo_source"}
+        supported_docker_options = {"base_image", "odoo_source", "odoo_requirements_source"}
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
-                    "Supported options: base_image, odoo_source."
+                    "Supported options: base_image, odoo_requirements_source, odoo_source."
                 )
 
         base_image = (
@@ -1106,11 +1155,31 @@ def load_project_config(
             else f"odoo:{odoo_version}"
         )
         odoo_source = (
-            _validate_docker_odoo_source(cp.get("docker", "odoo_source"))
+            _validate_docker_source(cp.get("docker", "odoo_source"), "odoo_source")
             if cp.has_option("docker", "odoo_source")
             else _DOCKER_ODOO_SOURCE_IMAGE
         )
-        docker = DockerConfig(base_image=base_image, odoo_source=odoo_source)
+        odoo_requirements_source = (
+            _validate_docker_source(
+                cp.get("docker", "odoo_requirements_source"),
+                "odoo_requirements_source",
+            )
+            if cp.has_option("docker", "odoo_requirements_source")
+            else _DOCKER_ODOO_SOURCE_IMAGE
+        )
+        if (
+            odoo_requirements_source == _DOCKER_ODOO_SOURCE_WORKSPACE
+            and odoo_source != _DOCKER_ODOO_SOURCE_WORKSPACE
+        ):
+            raise Exception(
+                "Invalid Docker configuration: "
+                "odoo_requirements_source=workspace requires odoo_source=workspace."
+            )
+        docker = DockerConfig(
+            base_image=base_image,
+            odoo_source=odoo_source,
+            odoo_requirements_source=odoo_requirements_source,
+        )
 
     config: Dict[str, Any] = {}
     # [config] is optional. Only include keys explicitly defined in [config]
@@ -2378,12 +2447,8 @@ def _docker_build_constraints_path(docker_context_dir: Path) -> Path:
     return _docker_requirements_dir(docker_context_dir) / "build-constraints.txt"
 
 
-def _docker_odoo_requirements_constraints_path(docker_context_dir: Path) -> Path:
-    return _docker_requirements_dir(docker_context_dir) / "odoo-requirements.txt"
-
-
 def _docker_requirements_input_path(docker_context_dir: Path) -> Path:
-    return _docker_requirements_dir(docker_context_dir) / "addons-requirements.in.txt"
+    return _docker_requirements_dir(docker_context_dir) / "all-requirements.in.txt"
 
 
 def _dockerfile_path(docker_context_dir: Path) -> Path:
@@ -2456,6 +2521,10 @@ def _docker_uses_workspace_odoo(cfg: ProjectConfig) -> bool:
     return cfg.docker.odoo_source == _DOCKER_ODOO_SOURCE_WORKSPACE
 
 
+def _docker_uses_workspace_odoo_requirements(cfg: ProjectConfig) -> bool:
+    return cfg.docker.odoo_requirements_source == _DOCKER_ODOO_SOURCE_WORKSPACE
+
+
 def _docker_workspace_odoo_path(layout: Layout, cfg: ProjectConfig) -> Path:
     source = _resolve_odoo_path(layout, cfg.odoo)
     if not source.exists() or not source.is_dir():
@@ -2466,10 +2535,15 @@ def _docker_workspace_odoo_path(layout: Layout, cfg: ProjectConfig) -> Path:
     odoo_bin = source / "odoo-bin"
     if not odoo_bin.is_file():
         raise Exception(f"Docker workspace Odoo source is missing odoo-bin: {odoo_bin}")
+    return source
+
+
+def _docker_workspace_odoo_requirements_path(layout: Layout, cfg: ProjectConfig) -> Path:
+    source = _docker_workspace_odoo_path(layout, cfg)
     requirements = source / "requirements.txt"
     if not requirements.is_file():
         raise Exception(f"Docker workspace Odoo source is missing requirements.txt: {requirements}")
-    return source
+    return requirements
 
 
 def _docker_workspace_core_addons_path() -> str:
@@ -2525,7 +2599,7 @@ def write_docker_requirements_input(
     lines: list[str] = [
         "# This file is generated by odt-env (DO NOT EDIT).",
         "# Source: addon repository requirements plus odt-env Docker defaults and explicit [virtualenv].requirements.",
-        "# In workspace Odoo source mode, Odoo requirements are applied separately as resolver constraints.",
+        "# Odoo requirements are also included when [docker].odoo_requirements_source = workspace.",
         "# Dependency resolution is performed later inside the Docker build.",
         "",
     ]
@@ -3192,7 +3266,6 @@ def write_dockerfile(
         docker_context_dir: Path,
         cfg: ProjectConfig,
         has_build_constraints: bool,
-        has_odoo_requirements_constraints: bool,
         *,
         include_addons: bool,
         include_config: bool,
@@ -3200,19 +3273,12 @@ def write_dockerfile(
     build_constraints_copy = ""
     build_constraints_compile = ""
     build_constraints_install = ""
-    odoo_constraints_copy = ""
-    odoo_constraints_compile = ""
     cleanup_constraints = ""
     if has_build_constraints:
         build_constraints_copy = "COPY requirements/build-constraints.txt /tmp/build-constraints.txt\n"
         build_constraints_compile = " --build-constraints /tmp/build-constraints.txt"
         build_constraints_install = " --build-constraints /tmp/build-constraints.txt"
         cleanup_constraints += " /tmp/build-constraints.txt"
-    if has_odoo_requirements_constraints:
-        odoo_constraints_copy = "COPY requirements/odoo-requirements.txt /tmp/odoo-requirements.txt\n"
-        odoo_constraints_compile = " --constraint /tmp/odoo-requirements.txt"
-        cleanup_constraints += " /tmp/odoo-requirements.txt"
-
     base_image = (cfg.docker.base_image or f"odoo:{cfg.odoo.version}").strip()
     addon_copy_step = ""
     addon_chown_step = ""
@@ -3254,17 +3320,16 @@ USER root
 COPY --from=restic/restic:{_DEFAULT_DOCKER_RESTIC_VERSION} /usr/bin/restic /usr/bin/restic
 COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
-COPY requirements/addons-requirements.in.txt /tmp/addons-requirements.in.txt
+COPY requirements/all-requirements.in.txt /tmp/all-requirements.in.txt
 {build_constraints_copy.rstrip()}
-{odoo_constraints_copy.rstrip()}
 
-RUN if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/addons-requirements.in.txt; then \\
-      uv pip compile --python python3 --no-cache{build_constraints_compile}{odoo_constraints_compile} /tmp/addons-requirements.in.txt -o /tmp/addons-requirements.lock.txt \\
-      && uv pip install --system --break-system-packages --no-cache{build_constraints_install} -r /tmp/addons-requirements.lock.txt; \\
+RUN if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/all-requirements.in.txt; then \\
+      uv pip compile --python python3 --no-cache{build_constraints_compile} /tmp/all-requirements.in.txt -o /tmp/all-requirements.lock.txt \\
+      && uv pip install --system --break-system-packages --no-cache{build_constraints_install} -r /tmp/all-requirements.lock.txt; \\
     else \\
-      echo "INFO: No addon Python requirements to install."; \\
+      echo "INFO: No Docker Python requirements to install."; \\
     fi \\
- && rm -f /tmp/addons-requirements.in.txt /tmp/addons-requirements.lock.txt{cleanup_constraints}{addon_chown_step}
+ && rm -f /tmp/all-requirements.in.txt /tmp/all-requirements.lock.txt{cleanup_constraints}{addon_chown_step}
 {odoo_source_copy_step}{workspace_runtime_step}
 USER odoo
 """
@@ -3279,7 +3344,7 @@ def _prepare_docker_requirements(
         addon_requirement_files: list[Path],
         docker_context_dir: Path,
         copy_from: Optional[Path] = None,
-) -> tuple[Path, Path, Path]:
+) -> tuple[Path, Path]:
     requirements_dir = _docker_requirements_dir(docker_context_dir)
     requirements_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3290,10 +3355,9 @@ def _prepare_docker_requirements(
         shutil.copytree(copy_from, requirements_dir)
         input_path = _docker_requirements_input_path(docker_context_dir)
         build_constraints_path = _docker_build_constraints_path(docker_context_dir)
-        odoo_constraints_path = _docker_odoo_requirements_constraints_path(docker_context_dir)
         if not input_path.is_file():
             raise Exception(f"Copied Docker requirements are missing input file: {input_path}")
-        return input_path, build_constraints_path, odoo_constraints_path
+        return input_path, build_constraints_path
 
     build_constraints_path = _docker_build_constraints_path(docker_context_dir)
     if cfg.virtualenv.build_constraints:
@@ -3302,25 +3366,19 @@ def _prepare_docker_requirements(
             encoding="utf-8",
         )
 
-    odoo_constraints_path = _docker_odoo_requirements_constraints_path(docker_context_dir)
-    if _docker_uses_workspace_odoo(cfg):
-        odoo_source = _docker_workspace_odoo_path(layout, cfg)
-        constraint_lines = _collect_requirement_file_lines(
-            layout.root,
-            [odoo_source / "requirements.txt"],
-            _requirements_ignore_set(_docker_requirements_ignore(cfg.virtualenv)),
-        )
-        _write_requirements_input(odoo_constraints_path, constraint_lines)
+    requirement_files = list(addon_requirement_files)
+    if _docker_uses_workspace_odoo_requirements(cfg):
+        requirement_files.insert(0, _docker_workspace_odoo_requirements_path(layout, cfg))
 
     input_path = _docker_requirements_input_path(docker_context_dir)
     write_docker_requirements_input(
         workspace_root=layout.root,
-        requirement_files=addon_requirement_files,
+        requirement_files=requirement_files,
         explicit_requirements=cfg.virtualenv.explicit_requirements,
         requirements_ignore=_docker_requirements_ignore(cfg.virtualenv),
         output_path=input_path,
     )
-    return input_path, build_constraints_path, odoo_constraints_path
+    return input_path, build_constraints_path
 
 
 def create_local_docker_artifacts(
@@ -3333,7 +3391,7 @@ def create_local_docker_artifacts(
         _rmtree(layout.docker_local_dir)
     layout.docker_local_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path, build_constraints_path, odoo_constraints_path = _prepare_docker_requirements(
+    input_path, build_constraints_path = _prepare_docker_requirements(
         layout=layout,
         cfg=cfg,
         addon_requirement_files=addon_requirement_files,
@@ -3350,7 +3408,6 @@ def create_local_docker_artifacts(
         layout.docker_local_dir,
         cfg,
         has_build_constraints=build_constraints_path.is_file(),
-        has_odoo_requirements_constraints=odoo_constraints_path.is_file(),
         include_addons=False,
         include_config=False,
     )
@@ -3372,7 +3429,6 @@ def create_local_docker_artifacts(
         "requirements_dir": _docker_requirements_dir(layout.docker_local_dir),
         "requirements_input": input_path,
         "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,
-        "odoo_requirements_constraints": odoo_constraints_path if odoo_constraints_path.is_file() else None,
     }
 
 
@@ -3387,7 +3443,7 @@ def create_deploy_docker_artifacts(
         _rmtree(layout.docker_deploy_dir)
     layout.docker_deploy_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path, build_constraints_path, odoo_constraints_path = _prepare_docker_requirements(
+    input_path, build_constraints_path = _prepare_docker_requirements(
         layout=layout,
         cfg=cfg,
         addon_requirement_files=addon_requirement_files,
@@ -3406,7 +3462,6 @@ def create_deploy_docker_artifacts(
         layout.docker_deploy_dir,
         cfg,
         has_build_constraints=build_constraints_path.is_file(),
-        has_odoo_requirements_constraints=odoo_constraints_path.is_file(),
         include_addons=True,
         include_config=True,
     )
@@ -3423,7 +3478,6 @@ def create_deploy_docker_artifacts(
         "requirements_dir": _docker_requirements_dir(layout.docker_deploy_dir),
         "requirements_input": input_path,
         "build_constraints": build_constraints_path if build_constraints_path.is_file() else None,
-        "odoo_requirements_constraints": odoo_constraints_path if odoo_constraints_path.is_file() else None,
         "staged_module_count": staged_module_count,
         "staged_odoo_source": staged_odoo_source,
     }
@@ -5480,9 +5534,8 @@ Examples:
         default=[],
         metavar="SECTION:KEY=VALUE",
         help=(
-            "Override an option that is already present in the INI file. "
-            "Can be passed multiple times. New options are allowed only in [config]. "
-            "Example: --set odoo:version=19.0"
+            "Set or override a supported INI option. Missing supported sections/options are created. "
+            "Can be passed multiple times. Example: --set docker:odoo_source=workspace"
         ),
     )
 

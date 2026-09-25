@@ -48,10 +48,10 @@ jobs:
 
           test -f odoo-workspace/docker/deploy/Dockerfile
           test -f odoo-workspace/docker/deploy/.dockerignore
-          test -f odoo-workspace/docker/deploy/requirements/addons-requirements.in.txt
-          test ! -e odoo-workspace/docker/deploy/requirements/addons-requirements.lock.txt
-          grep -q 'uv pip compile .*addons-requirements.in.txt' odoo-workspace/docker/deploy/Dockerfile
-          grep -q 'uv pip install .*addons-requirements.lock.txt' odoo-workspace/docker/deploy/Dockerfile
+          test -f odoo-workspace/docker/deploy/requirements/all-requirements.in.txt
+          test ! -e odoo-workspace/docker/deploy/requirements/all-requirements.lock.txt
+          grep -q 'uv pip compile .*all-requirements.in.txt' odoo-workspace/docker/deploy/Dockerfile
+          grep -q 'uv pip install .*all-requirements.lock.txt' odoo-workspace/docker/deploy/Dockerfile
           test -d odoo-workspace/docker/deploy/addons/web_notify
           test -d odoo-workspace/docker/deploy/addons/helpdesk_mgmt
           grep -q '^COPY addons/ /mnt/extra-addons/' odoo-workspace/docker/deploy/Dockerfile

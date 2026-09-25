@@ -175,11 +175,11 @@ docker compose exec odoo click-odoo-update -c /etc/odoo/odoo.conf -d odoo
 
 ### 1.2. Running Odoo from workspace source
 
-By default, `[docker].odoo_source = image`, so the generated Docker workflow runs the Odoo installation already provided by `[docker].base_image`.
+By default, the generated Docker workflow runs the Odoo provided by `[docker].base_image`.
 
-Use `odoo_source = workspace` when you need to run a modified Odoo core from the source configured in `[odoo]` instead. This works with both Git-managed Odoo sources under `ROOT/odoo/` and local sources configured with `[odoo].path`.
+Use `odoo_source = workspace` when you need to run Odoo from the workspace source.
 
-For example, a customized Odoo source can be configured as:
+For example:
 
 ```ini
 [odoo]
@@ -198,9 +198,7 @@ odt-env --sync-all
 docker compose up --build -d
 ```
 
-In the local Docker workflow, the resolved Odoo source is bind-mounted read-only at `/opt/odoo`, `/usr/local/bin/odoo` runs `/opt/odoo/odoo-bin`, and `PYTHONPATH` points to `/opt/odoo`. The generated `addons_path` includes both Odoo core addon directories and the configured extra addons. The Odoo installation from the base image remains present but is not used as the runtime Odoo source.
-
-The source `requirements.txt` is used as a resolver constraint when Docker addon dependencies are compiled. This keeps packages pulled by addons compatible with the selected Odoo source without reinstalling every Odoo core dependency already provided by the base image. Add or override packages explicitly through `[virtualenv].requirements` when needed.
+The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo installation from the base image remains present but is not used.
 
 ### 1.3. Backup and restore
 
@@ -434,7 +432,9 @@ Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/ext
 docker build -t mycompany/odoo:19.0 docker/deploy
 ```
 
-`[docker].base_image` controls the base image used by both generated Dockerfiles. `[docker].odoo_source` controls whether Odoo runs from that image or from the workspace source.
+`[docker].base_image` controls the base image used by both generated Dockerfiles.
+`[docker].odoo_source` controls whether Odoo runs from that image or from the workspace source.
+`[docker].odoo_requirements_source` controls whether Odoo Python requirements come from the base image or are installed from the workspace Odoo `requirements.txt`.
 
 In CI, where the `docker/local/` context is unnecessary, combine the options:
 
@@ -878,7 +878,7 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 - `--init-project [ROOT]` — create `ROOT/odoo-project.ini` from the bundled default template if it does not already exist. `ROOT` is optional; when supplied, it is a shorthand for selecting the workspace root directly, for example `odt-env --init-project ./odoo19`. When the optional value is omitted, `--root ROOT` remains supported for backward compatibility. Do not supply both `--init-project ROOT` and `--root ROOT`; the command exits with an error instead of choosing one implicitly. This option is valid only when `INI` is omitted and no `-i/--include` is provided. Existing project files are not overwritten.
 - `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated.
-- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — override a value that is already present in the INI file; can be repeated. New options are allowed only in the `[config]` section.
+- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, and `[docker]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
 - `--no-configs` — do not generate config files.
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`.
 - `--no-data-dir` — do not create the Odoo data directory.
@@ -951,7 +951,7 @@ The following sections are supported:
 - Multiple INI layers can be composed with `-i/--include`. Later layers override earlier layers; multi-line values are replaced as whole option values, not appended.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
 - Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
-- Values that already exist in the INI file can be overridden directly with `-S section:key=value` / `--set section:key=value`.
+- Supported project options can be set or overridden directly with `-S section:key=value` / `--set section:key=value`, even when the section or option is omitted from the INI file. Structured sections accept only their documented keys.
 - Multi-line values are used for lists such as `requirements`, `build_constraints`, and `requirements_ignore`.
 
 ### `[vars]`
@@ -1080,6 +1080,7 @@ This section is optional.
 
 - `base_image` — Docker image used as the base image in both generated Dockerfiles. Default: `odoo:${odoo:version}`.
 - `odoo_source` — Odoo runtime source for generated Docker workflows. `image` uses the Odoo installation from `base_image`; `workspace` runs the resolved `[odoo]` source from `/opt/odoo`. Default: `image`.
+- `odoo_requirements_source` — Odoo Python requirements source. `image` uses the dependencies already provided by `base_image`; `workspace` adds the workspace Odoo `requirements.txt` to Docker dependency resolution. `workspace` requires `odoo_source = workspace`. Default: `image`.
 
 ### `[config]`
 

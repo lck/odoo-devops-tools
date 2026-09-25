@@ -21,38 +21,60 @@ jobs:
       - name: Verify uv
         run: uv --version
 
-      - name: Create workspace root folder
+      - name: Verify --set rejects unsupported Docker options
+        run: |
+          set +e
+          output="$(uv run odt-env --init-project ./invalid-workspace \
+            --set docker:not_supported=value 2>&1)"
+          status=$?
+          set -e
+
+          test "${status}" -ne 0
+          printf '%s\n' "${output}"
+          grep -q "unsupported option 'not_supported' in section \[docker\]" <<< "${output}"
+
+      - name: Verify workspace requirements require workspace Odoo
+        run: |
+          set +e
+          output="$(uv run odt-env --init-project ./invalid-requirements-workspace \
+            --set docker:odoo_requirements_source=workspace 2>&1)"
+          status=$?
+          set -e
+
+          test "${status}" -ne 0
+          printf '%s\n' "${output}"
+          grep -q 'odoo_requirements_source=workspace requires odoo_source=workspace' <<< "${output}"
+
+      - name: Create Odoo 19 workspace
         run: mkdir -p odoo-workspace
 
-      - name: Generate Odoo workspace Docker artifacts
+      - name: Generate Odoo 19 workspace Docker artifacts
         working-directory: ./odoo-workspace
         run: |
           uv run odt-env --init-project --sync-all \
-            --set docker:odoo_source=workspace
+            --set odoo:version=19.0 \
+            --set docker:odoo_source=workspace \
+            --set docker:odoo_requirements_source=image
 
-      - name: Add workspace core marker
-        working-directory: ./odoo-workspace
-        run: |
-          printf '\nODT_DOCKER_WORKSPACE_MARKER = "workspace-source"\n' >> odoo/odoo/release.py
-
-      - name: Check generated local Docker workspace-source artifacts
+      - name: Check generated local Docker artifacts
         run: |
           test -d odoo-workspace/odoo/.git
           test -f odoo-workspace/odoo/odoo-bin
-          test -f odoo-workspace/odoo/requirements.txt
 
           test -f odoo-workspace/compose.yaml
           test -f odoo-workspace/docker/local/Dockerfile
           test -f odoo-workspace/docker/local/configs/odoo.conf
-          test -f odoo-workspace/docker/local/requirements/addons-requirements.in.txt
-          test -f odoo-workspace/docker/local/requirements/odoo-requirements.txt
+          test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
+          ! grep -q '# --- from odoo/requirements.txt ---' \
+            odoo-workspace/docker/local/requirements/all-requirements.in.txt
 
-          grep -q '^ENV PYTHONPATH=/opt/odoo$' odoo-workspace/docker/local/Dockerfile
-          grep -q 'exec /opt/odoo/odoo-bin' odoo-workspace/docker/local/Dockerfile
-          grep -q -- '--constraint /tmp/odoo-requirements.txt' odoo-workspace/docker/local/Dockerfile
-          ! grep -q '^COPY .*odoo/ /opt/odoo/' odoo-workspace/docker/local/Dockerfile
+          grep -q '^ENV PYTHONPATH=/opt/odoo$' \
+            odoo-workspace/docker/local/Dockerfile
+          grep -q 'exec /opt/odoo/odoo-bin' \
+            odoo-workspace/docker/local/Dockerfile
+          ! grep -q '^COPY .*odoo/ /opt/odoo/' \
+            odoo-workspace/docker/local/Dockerfile
 
-          grep -q 'lxml==4.3.2' odoo-workspace/docker/local/requirements/odoo-requirements.txt
           grep -q '^addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons$' \
             odoo-workspace/docker/local/configs/odoo.conf
 
@@ -60,20 +82,20 @@ jobs:
           docker compose config --quiet
           docker compose config | grep -q '/opt/odoo'
 
-      - name: Build local Docker image with Compose
+      - name: Build local Docker image
         working-directory: ./odoo-workspace
         run: docker compose build odoo
 
-      - name: Verify workspace Odoo source is used
+      - name: Verify local container uses workspace Odoo
         working-directory: ./odoo-workspace
         run: |
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
-            'test "$(command -v odoo)" = /usr/local/bin/odoo && test -x /usr/bin/odoo'
+            'test "$(command -v odoo)" = /usr/local/bin/odoo'
 
           docker compose run --rm --no-deps --entrypoint python3 odoo -c \
-            'import odoo, odoo.release; assert odoo.__file__.startswith("/opt/odoo/"); assert odoo.release.ODT_DOCKER_WORKSPACE_MARKER == "workspace-source"; print(odoo.__file__)'
+            'import odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); print(odoo.release.__file__)'
 
-      - name: Start PostgreSQL and initialize database from workspace Odoo
+      - name: Initialize Odoo 19 database
         working-directory: ./odoo-workspace
         run: |
           docker compose up -d db
@@ -85,20 +107,20 @@ jobs:
               --without-demo=all \
               --stop-after-init
 
-      - name: Generate self-contained deploy context from workspace Odoo
+      - name: Generate self-contained deploy context
         working-directory: ./odoo-workspace
         run: uv run odt-env --create-docker-deploy --no-local-docker
 
-      - name: Check generated deploy workspace-source artifacts
+      - name: Check generated deploy artifacts
         run: |
           test -f odoo-workspace/docker/deploy/Dockerfile
           test -f odoo-workspace/docker/deploy/odoo/odoo-bin
           test -f odoo-workspace/docker/deploy/odoo/odoo/release.py
-          grep -q 'ODT_DOCKER_WORKSPACE_MARKER = "workspace-source"' \
-            odoo-workspace/docker/deploy/odoo/odoo/release.py
+
           grep -q '^COPY --chown=odoo:odoo odoo/ /opt/odoo/$' \
             odoo-workspace/docker/deploy/Dockerfile
-          grep -q '^ENV PYTHONPATH=/opt/odoo$' odoo-workspace/docker/deploy/Dockerfile
+          grep -q '^ENV PYTHONPATH=/opt/odoo$' \
+            odoo-workspace/docker/deploy/Dockerfile
           grep -q '^addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons$' \
             odoo-workspace/docker/deploy/configs/odoo.conf
 
@@ -106,8 +128,20 @@ jobs:
         working-directory: ./odoo-workspace
         run: |
           docker build -t odt-env-odoo-workspace:test docker/deploy
+
           docker run --rm --entrypoint python3 odt-env-odoo-workspace:test -c \
-            'import odoo, odoo.release; assert odoo.__file__.startswith("/opt/odoo/"); assert odoo.release.ODT_DOCKER_WORKSPACE_MARKER == "workspace-source"; print(odoo.__file__)'
+            'import odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); print(odoo.release.__file__)'
+
+      - name: Verify workspace Odoo requirements opt-in
+        working-directory: ./odoo-workspace
+        run: |
+          uv run odt-env \
+            --set docker:odoo_source=workspace \
+            --set docker:odoo_requirements_source=workspace
+
+          test -f docker/local/requirements/all-requirements.in.txt
+          grep -q '# --- from odoo/requirements.txt ---' \
+            docker/local/requirements/all-requirements.in.txt
 
       - name: Stop Docker Compose services
         if: always()
