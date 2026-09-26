@@ -4596,6 +4596,7 @@ def _sync_project_impl(
         synced.append("addons")
 
     _logger.info("OK")
+    _logger.info(f"  Version:            {__version__}")
     if synced:
         synced_label = ", ".join(synced)
     else:
@@ -5790,6 +5791,7 @@ def main() -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    _logger.info("odt-env %s", __version__)
 
     parser = build_parser()
     args = parser.parse_args()
