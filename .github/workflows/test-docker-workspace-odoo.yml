@@ -67,6 +67,10 @@ jobs:
             odoo-workspace/docker/local/Dockerfile
           grep -q 'exec /opt/odoo/odoo-bin' \
             odoo-workspace/docker/local/Dockerfile
+          grep -q '/usr/lib/python3/dist-packages/odoo' \
+            odoo-workspace/docker/local/Dockerfile
+          grep -q 'rm -f /usr/bin/odoo' \
+            odoo-workspace/docker/local/Dockerfile
           ! grep -q '^COPY .*odoo/ /opt/odoo/' \
             odoo-workspace/docker/local/Dockerfile
 
@@ -85,10 +89,10 @@ jobs:
         working-directory: ./odoo-workspace
         run: |
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
-            'test "$(command -v odoo)" = /usr/local/bin/odoo'
+            'test "$(command -v odoo)" = /usr/local/bin/odoo && test ! -e /usr/lib/python3/dist-packages/odoo && test ! -e /usr/bin/odoo'
 
           docker compose run --rm --no-deps --entrypoint python3 odoo -c \
-            'import odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); print(odoo.release.__file__)'
+            'import odoo.addons, odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); assert not any(path.startswith("/usr/lib/python3/dist-packages/odoo") for path in odoo.addons.__path__); print(odoo.release.__file__); print(list(odoo.addons.__path__))'
 
       - name: Initialize Odoo 19 database
         working-directory: ./odoo-workspace
@@ -117,6 +121,10 @@ jobs:
 
           grep -q '^COPY --chown=odoo:odoo odoo/ /opt/odoo/$' \
             odoo-workspace/docker/deploy/Dockerfile
+          grep -q '/usr/lib/python3/dist-packages/odoo' \
+            odoo-workspace/docker/deploy/Dockerfile
+          grep -q 'rm -f /usr/bin/odoo' \
+            odoo-workspace/docker/deploy/Dockerfile
           grep -q '^ENV PYTHONPATH=/opt/odoo$' \
             odoo-workspace/docker/deploy/Dockerfile
           grep -q '^addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons$' \
@@ -128,7 +136,7 @@ jobs:
           docker build -t odt-env-odoo-workspace:test docker/deploy
 
           docker run --rm --entrypoint python3 odt-env-odoo-workspace:test -c \
-            'import odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); print(odoo.release.__file__)'
+            'import odoo.addons, odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); assert not any(path.startswith("/usr/lib/python3/dist-packages/odoo") for path in odoo.addons.__path__); print(odoo.release.__file__); print(list(odoo.addons.__path__))'
 
       - name: Verify explicit requirements override matching constraints
         run: |
@@ -141,6 +149,8 @@ jobs:
             constraints-workspace/docker/local/requirements/all-requirements.in.txt
           grep -Fq "skipped (overridden by explicit [virtualenv].requirements package 'packaging'): packaging<1" \
             constraints-workspace/docker/local/requirements/constraints.txt
+          ! grep -q '/usr/lib/python3/dist-packages/odoo' \
+            constraints-workspace/docker/local/Dockerfile
 
       - name: Stop Docker Compose services
         if: always()

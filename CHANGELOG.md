@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.3 (2026-09-26)
+
+### Fixed
+
+* Prevent base-image Odoo code from mixing with workspace Odoo in Docker.
+
 ## 1.21.2 (2026-09-26)
 
 ### Added

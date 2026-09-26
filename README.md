@@ -198,7 +198,7 @@ odt-env --sync-all
 docker compose up --build -d
 ```
 
-The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo installation from the base image remains present but is not used.
+The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
 
 ### 1.3. Backup and restore
 

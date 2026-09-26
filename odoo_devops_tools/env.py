@@ -3310,8 +3310,16 @@ COPY --chown=odoo:odoo configs/odoo.conf /etc/odoo/odoo.conf
 """
 
     odoo_source_copy_step = ""
+    workspace_base_odoo_cleanup_step = ""
     workspace_runtime_step = ""
     if _docker_uses_workspace_odoo(cfg):
+        workspace_base_odoo_cleanup_step = """
+RUN rm -rf \\
+      /usr/lib/python3/dist-packages/odoo \\
+      /usr/lib/python3/dist-packages/odoo-*.egg-info \\
+      /usr/lib/python3/dist-packages/odoo-*.dist-info \\
+ && rm -f /usr/bin/odoo
+"""
         if include_addons:
             odoo_source_copy_step = f"""
 COPY --chown=odoo:odoo odoo/ {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/
@@ -3328,7 +3336,7 @@ RUN printf '%s\\n' '#!/bin/sh' 'exec {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/od
 FROM {base_image}
 
 USER root
-
+{workspace_base_odoo_cleanup_step}
 COPY --from=restic/restic:{_DEFAULT_DOCKER_RESTIC_VERSION} /usr/bin/restic /usr/bin/restic
 COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
