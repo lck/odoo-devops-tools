@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.2 (2026-09-26)
+
+### Added
+
+* Log the version at startup and in the summary report.
+
 ## 1.21.1 (2026-09-26)
 
 ### Added
