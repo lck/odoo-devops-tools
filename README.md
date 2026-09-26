@@ -424,23 +424,9 @@ ROOT/docker/deploy/
     └── odoo.conf
 ```
 
-Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/extra-addons/` by the generated Dockerfile. With `odoo_source = workspace`, the resolved Odoo source is also staged under `docker/deploy/odoo/` and copied into `/opt/odoo/`, so the deploy image is self-contained. Runtime Compose configuration is not generated for the deploy context.
+Addon modules are staged under `docker/deploy/addons/` and copied into `/mnt/extra-addons/` by the generated Dockerfile.
 
-`odt-env` prepares the deploy build context but does not build or push the image. Build it with Docker or your CI/CD system, for example:
-
-```bash
-docker build -t mycompany/odoo:19.0 docker/deploy
-```
-
-`[docker].base_image` controls the base image used by both generated Dockerfiles.
-`[docker].odoo_source` controls whether Odoo runs from that image or from the workspace source.
-
-In CI, where the `docker/local/` context is unnecessary, combine the options:
-
-```bash
-odt-env --sync-addons --create-docker-deploy --no-local-docker
-docker build -t mycompany/odoo:19.0 docker/deploy
-```
+With `odoo_source = workspace`, the resolved Odoo source is also staged under `docker/deploy/odoo/` and copied into `/opt/odoo/`, so the deploy image is self-contained.
 
 ---
 
