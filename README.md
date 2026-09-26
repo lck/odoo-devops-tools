@@ -434,7 +434,6 @@ docker build -t mycompany/odoo:19.0 docker/deploy
 
 `[docker].base_image` controls the base image used by both generated Dockerfiles.
 `[docker].odoo_source` controls whether Odoo runs from that image or from the workspace source.
-`[docker].odoo_requirements_source` controls whether Odoo Python requirements come from the base image or are installed from the workspace Odoo `requirements.txt`.
 
 In CI, where the `docker/local/` context is unnecessary, combine the options:
 
@@ -677,9 +676,11 @@ Use it to add new packages, pin specific versions, and override packages collect
 Use:
 
 - `requirements` to add extra packages or pin an explicit version
+- `constraints` to restrict dependency versions without installing packages by themselves
+- `build_constraints` to restrict build-time dependency versions
 - `requirements_ignore` to skip packages that would otherwise be collected from repository requirements files
 
-When a package is listed in `requirements`, `odt-env` automatically gives that package priority by ignoring the same package name from collected repository requirements. This means you can usually pin a package version just by adding it to `requirements`.
+When a package is listed in `requirements`, `odt-env` automatically gives that package priority over the same package name from collected repository requirements and `constraints`. This means you can usually pin a package version just by adding it to `requirements`.
 
 ### 3.1. Add or pin packages
 
@@ -694,7 +695,20 @@ requirements =
 
 In this example, both packages are included in the generated dependency set and pinned to the specified versions.
 
-### 3.2. Override a package with a different one
+### 3.2. Constrain dependency versions
+
+Use `constraints` to restrict versions selected by the dependency resolver without adding those packages to the installation set:
+
+```ini
+[virtualenv]
+constraints =
+  urllib3<2
+  lxml<6
+```
+
+A constraint only applies when the package is required by another dependency. If the same package is listed explicitly in `requirements`, the explicit requirement takes priority.
+
+### 3.3. Override a package with a different one
 
 If you want to replace a package with a different distribution name, add the replacement to `requirements` and skip the original package with `requirements_ignore`.
 
@@ -952,7 +966,7 @@ The following sections are supported:
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
 - Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
 - Supported project options can be set or overridden directly with `-S section:key=value` / `--set section:key=value`, even when the section or option is omitted from the INI file. Structured sections accept only their documented keys.
-- Multi-line values are used for lists such as `requirements`, `build_constraints`, and `requirements_ignore`.
+- Multi-line values are used for lists such as `requirements`, `constraints`, `build_constraints`, and `requirements_ignore`.
 
 ### `[vars]`
 
@@ -992,6 +1006,7 @@ This section is optional.
 - `python_version` — Python version for the virtual environment. If omitted, `odt-env` chooses a default version based on the selected Odoo version.
 - `managed_python` — whether `uv` should install and manage Python automatically. Default: `true`.
 - `requirements` — additional Python requirements to install. Multi-line list.
+- `constraints` — dependency constraints used during resolution without installing packages by themselves. Explicit `requirements` take priority over matching constraints. Multi-line list.
 - `build_constraints` — additional build constraints used during dependency compilation. Multi-line list.
 - `requirements_ignore` — package names to ignore when collecting requirements from addon repositories. Multi-line list.
 
@@ -1004,6 +1019,8 @@ python_version = 3.11
 requirements =
   lxml>=6
   psycopg2-binary==2.9.9
+constraints =
+  urllib3<2
 requirements_ignore =
   psycopg2
 ```
@@ -1078,9 +1095,8 @@ commit = abcdef1
 
 This section is optional.
 
-- `base_image` — Docker image used as the base image in both generated Dockerfiles. Default: `odoo:${odoo:version}`.
-- `odoo_source` — Odoo runtime source for generated Docker workflows. `image` uses the Odoo installation from `base_image`; `workspace` runs the resolved `[odoo]` source from `/opt/odoo`. Default: `image`.
-- `odoo_requirements_source` — Odoo Python requirements source. `image` uses the dependencies already provided by `base_image`; `workspace` adds the workspace Odoo `requirements.txt` to Docker dependency resolution. `workspace` requires `odoo_source = workspace`. Default: `image`.
+- `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
+- `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
 
 ### `[config]`
 

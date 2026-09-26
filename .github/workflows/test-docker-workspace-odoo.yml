@@ -33,18 +33,6 @@ jobs:
           printf '%s\n' "${output}"
           grep -q "unsupported option 'not_supported' in section \[docker\]" <<< "${output}"
 
-      - name: Verify workspace requirements require workspace Odoo
-        run: |
-          set +e
-          output="$(uv run odt-env --init-project ./invalid-requirements-workspace \
-            --set docker:odoo_requirements_source=workspace 2>&1)"
-          status=$?
-          set -e
-
-          test "${status}" -ne 0
-          printf '%s\n' "${output}"
-          grep -q 'odoo_requirements_source=workspace requires odoo_source=workspace' <<< "${output}"
-
       - name: Create Odoo 19 workspace
         run: mkdir -p odoo-workspace
 
@@ -53,8 +41,8 @@ jobs:
         run: |
           uv run odt-env --init-project --sync-all \
             --set odoo:version=19.0 \
-            --set docker:odoo_source=workspace \
-            --set docker:odoo_requirements_source=image
+            --set 'virtualenv:constraints=packaging<1000' \
+            --set docker:odoo_source=workspace
 
       - name: Check generated local Docker artifacts
         run: |
@@ -65,9 +53,16 @@ jobs:
           test -f odoo-workspace/docker/local/Dockerfile
           test -f odoo-workspace/docker/local/configs/odoo.conf
           test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
+          test -f odoo-workspace/docker/local/requirements/constraints.txt
+          grep -q '^packaging<1000$' \
+            odoo-workspace/docker/local/requirements/constraints.txt
           ! grep -q '# --- from odoo/requirements.txt ---' \
             odoo-workspace/docker/local/requirements/all-requirements.in.txt
 
+          grep -q '^COPY requirements/constraints.txt /tmp/constraints.txt$' \
+            odoo-workspace/docker/local/Dockerfile
+          grep -q -- '--constraints /tmp/constraints.txt' \
+            odoo-workspace/docker/local/Dockerfile
           grep -q '^ENV PYTHONPATH=/opt/odoo$' \
             odoo-workspace/docker/local/Dockerfile
           grep -q 'exec /opt/odoo/odoo-bin' \
@@ -116,6 +111,9 @@ jobs:
           test -f odoo-workspace/docker/deploy/Dockerfile
           test -f odoo-workspace/docker/deploy/odoo/odoo-bin
           test -f odoo-workspace/docker/deploy/odoo/odoo/release.py
+          test -f odoo-workspace/docker/deploy/requirements/constraints.txt
+          grep -q '^packaging<1000$' \
+            odoo-workspace/docker/deploy/requirements/constraints.txt
 
           grep -q '^COPY --chown=odoo:odoo odoo/ /opt/odoo/$' \
             odoo-workspace/docker/deploy/Dockerfile
@@ -132,16 +130,17 @@ jobs:
           docker run --rm --entrypoint python3 odt-env-odoo-workspace:test -c \
             'import odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); print(odoo.release.__file__)'
 
-      - name: Verify workspace Odoo requirements opt-in
-        working-directory: ./odoo-workspace
+      - name: Verify explicit requirements override matching constraints
         run: |
-          uv run odt-env \
-            --set docker:odoo_source=workspace \
-            --set docker:odoo_requirements_source=workspace
+          uv run odt-env --init-project ./constraints-workspace \
+            --set odoo:version=19.0 \
+            --set 'virtualenv:requirements=packaging>=1' \
+            --set 'virtualenv:constraints=packaging<1'
 
-          test -f docker/local/requirements/all-requirements.in.txt
-          grep -q '# --- from odoo/requirements.txt ---' \
-            docker/local/requirements/all-requirements.in.txt
+          grep -q '^packaging>=1$' \
+            constraints-workspace/docker/local/requirements/all-requirements.in.txt
+          grep -Fq "skipped (overridden by explicit [virtualenv].requirements package 'packaging'): packaging<1" \
+            constraints-workspace/docker/local/requirements/constraints.txt
 
       - name: Stop Docker Compose services
         if: always()

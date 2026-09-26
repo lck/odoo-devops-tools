@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.1 (2026-09-26)
+
+### Added
+
+* Add `[virtualenv].constraints`.
+
 ## 1.21.0 (2026-09-25)
 
 ### Added
