@@ -202,7 +202,9 @@ The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Pyth
 
 ### 1.3. Backup and restore
 
-The Docker workflow generates Unix shell helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently:
+The Docker workflow generates platform-specific helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
+
+On Unix-like systems:
 
 ```text
 docker/local/scripts/
@@ -215,7 +217,7 @@ docker/local/scripts/
 └── restore-filestore-restic.sh
 ```
 
-The helpers stream backup data directly between the Docker containers and files on the host. No backup directory is mounted into the containers, and no intermediate backup file is created inside a container.
+On Windows the same helper names are generated with the `.bat` extension instead. The helpers stream backup data directly between the Docker containers and files on the host. No backup directory is mounted into the containers, and no intermediate backup file is created inside a container. The examples below use the Unix `.sh` form.
 
 The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it for any command with `ODOO_DB_NAME`:
 
@@ -251,11 +253,11 @@ Restore a database dump with `pg_restore`:
 ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-The target database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
+If the target database already exists, the restore is rejected unless `--force` is used. With `--force`, the existing database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
 
 ```bash
 docker compose stop odoo
-./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
+./docker/local/scripts/restore-db.sh --force ./odoo-backups/pre-upgrade.dump
 docker compose up -d odoo
 ```
 
@@ -304,11 +306,11 @@ Restore a filestore archive:
 ./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
 ```
 
-The existing filestore directory for the target database is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
+If the target filestore already exists, the restore is rejected unless `--force` is used. With `--force`, the existing filestore directory is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
 
 ```bash
 docker compose stop odoo
-./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+./docker/local/scripts/restore-filestore.sh --force ./odoo-backups/pre-upgrade-filestore.tar.gz
 docker compose up -d odoo
 ```
 
@@ -324,7 +326,7 @@ Database and filestore backups are intentionally separate. This allows either pa
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
-The Docker workflow generates three additional helpers:
+The Docker workflow generates platform-specific restic helpers: `.sh` on Unix-like systems and `.bat` on Windows.
 
 ```text
 docker/local/scripts/restic.sh
@@ -332,9 +334,9 @@ docker/local/scripts/backup-filestore-restic.sh
 docker/local/scripts/restore-filestore-restic.sh
 ```
 
-`restic.sh` is a generic wrapper that runs the `restic` binary from the generated Odoo image against the same `odoo-data` volume. The restic cache is kept under `/var/lib/odoo/.cache/restic`, outside the filestore directory, so it persists between one-off containers without being included in filestore backups.
+The corresponding Windows helpers use the same names with the `.bat` extension. The `restic` helper runs the `restic` binary from the generated Odoo image against the same `odoo-data` volume. The restic cache is kept under `/var/lib/odoo/.cache/restic`, outside the filestore directory, so it persists between one-off containers without being included in filestore backups.
 
-Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the Docker host, use an absolute path. The wrapper automatically bind-mounts that path into the one-off container:
+Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the Docker host, use an absolute path. The wrapper automatically bind-mounts the repository into the one-off container; Windows drive paths such as `C:\backups\odoo` are supported by `restic.bat`:
 
 ```bash
 export RESTIC_REPOSITORY=/srv/restic/odoo
@@ -374,15 +376,17 @@ Restore the latest matching filestore snapshot:
 
 ```bash
 docker compose stop odoo
-./docker/local/scripts/restore-filestore-restic.sh
+./docker/local/scripts/restore-filestore-restic.sh --force
 docker compose up -d odoo
 ```
+
+If the target filestore does not exist yet, `--force` is not required. If it already exists, the restore is rejected unless `--force` is used.
 
 Or restore a specific snapshot ID:
 
 ```bash
 docker compose stop odoo
-./docker/local/scripts/restore-filestore-restic.sh SNAPSHOT_ID
+./docker/local/scripts/restore-filestore-restic.sh --force SNAPSHOT_ID
 docker compose up -d odoo
 ```
 
@@ -392,8 +396,7 @@ To restore a filestore backed up under one database name into another database, 
 ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/restore-filestore-restic.sh SNAPSHOT_ID
 ```
 
-The restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
-
+With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
 ### 1.4. Creating a Docker deploy build context
 
@@ -917,7 +920,7 @@ Maintenance:
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated under `ROOT/docker/local/scripts/`.
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 

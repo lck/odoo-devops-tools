@@ -120,6 +120,29 @@ jobs:
           ODOO_DB_NAME=odoo_restore \
             ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz
 
+      - name: Require force when restoring existing database or filestore
+        working-directory: ./odoo-workspace
+        run: |
+          set +e
+          db_output="$(ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-db.sh ./odoo-backups/test.dump 2>&1)"
+          db_status=$?
+          fs_output="$(ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz 2>&1)"
+          fs_status=$?
+          set -e
+
+          test "${db_status}" -ne 0
+          grep -Fq "target database 'odoo_restore' already exists. Use --force to replace it." <<< "${db_output}"
+
+          test "${fs_status}" -ne 0
+          grep -Fq "target filestore for database 'odoo_restore' already exists. Use --force to replace it." <<< "${fs_output}"
+
+          ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-db.sh --force ./odoo-backups/test.dump
+          ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz --force
+
       - name: Back up and restore filestore with restic
         working-directory: ./odoo-workspace
         env:
@@ -140,6 +163,20 @@ jobs:
           ODOO_DB_NAME=odoo_restic_restore \
           RESTIC_SOURCE_DB_NAME=odoo \
             ./docker/local/scripts/restore-filestore-restic.sh latest
+
+          set +e
+          restic_output="$(ODOO_DB_NAME=odoo_restic_restore \
+            RESTIC_SOURCE_DB_NAME=odoo \
+            ./docker/local/scripts/restore-filestore-restic.sh latest 2>&1)"
+          restic_status=$?
+          set -e
+
+          test "${restic_status}" -ne 0
+          grep -Fq "target filestore for database 'odoo_restic_restore' already exists. Use --force to replace it." <<< "${restic_output}"
+
+          ODOO_DB_NAME=odoo_restic_restore \
+          RESTIC_SOURCE_DB_NAME=odoo \
+            ./docker/local/scripts/restore-filestore-restic.sh latest --force
 
       - name: Verify restored database and filestore
         working-directory: ./odoo-workspace

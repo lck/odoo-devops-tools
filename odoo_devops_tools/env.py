@@ -2493,8 +2493,8 @@ def _docker_scripts_dir(docker_context_dir: Path) -> Path:
     return docker_context_dir / "scripts"
 
 
-def _docker_script_path(docker_context_dir: Path, name: str) -> Path:
-    return _docker_scripts_dir(docker_context_dir) / f"{name}.sh"
+def _docker_script_path(docker_context_dir: Path, name: str, ext: str = "sh") -> Path:
+    return _docker_scripts_dir(docker_context_dir) / f"{name}.{ext}"
 
 
 def _docker_compose_path(layout: Layout) -> Path:
@@ -2964,9 +2964,19 @@ def _docker_default_db_name(cfg: ProjectConfig) -> str:
     return "odoo"
 
 
-def _write_docker_local_script(layout: Layout, name: str, content: str) -> Path:
-    path = _docker_script_path(layout.docker_local_dir, name)
-    _write_text_file(path, content, executable=True)
+def _write_docker_local_script(
+        layout: Layout,
+        name: str,
+        content: str,
+        ext: str = "sh",
+) -> Path:
+    path = _docker_script_path(layout.docker_local_dir, name, ext)
+    _write_text_file(
+        path,
+        content,
+        executable=(ext == "sh"),
+        crlf=(ext == "bat"),
+    )
     return path
 
 
@@ -3010,13 +3020,39 @@ SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+FORCE=false
+SOURCE=""
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $(basename "$0") BACKUP.dump" >&2
+usage() {{
+  echo "Usage: $(basename "$0") [--force] BACKUP.dump" >&2
+}}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "${{SOURCE}}" ]]; then
+        usage
+        exit 2
+      fi
+      SOURCE="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${{SOURCE}}" ]]; then
+  usage
   exit 2
 fi
 
-SOURCE="$1"
 if [[ ! -f "${{SOURCE}}" ]]; then
   echo "ERROR: database backup not found: ${{SOURCE}}" >&2
   exit 1
@@ -3025,9 +3061,23 @@ SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
 
 cd "${{ROOT_DIR}}"
 
+DB_EXISTS=false
+DATABASES="$(docker compose exec -T db \
+  psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
+if grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
+  DB_EXISTS=true
+fi
+
+if [[ "${{DB_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
+
 echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
 echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
-docker compose exec -T db dropdb --if-exists --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+if [[ "${{DB_EXISTS}}" == true ]]; then
+  docker compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+fi
 docker compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
 docker compose exec -T db \
   pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
@@ -3079,13 +3129,39 @@ SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+FORCE=false
+SOURCE=""
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $(basename "$0") FILESTORE.tar.gz" >&2
+usage() {{
+  echo "Usage: $(basename "$0") [--force] FILESTORE.tar.gz" >&2
+}}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "${{SOURCE}}" ]]; then
+        usage
+        exit 2
+      fi
+      SOURCE="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${{SOURCE}}" ]]; then
+  usage
   exit 2
 fi
 
-SOURCE="$1"
 if [[ ! -f "${{SOURCE}}" ]]; then
   echo "ERROR: filestore backup not found: ${{SOURCE}}" >&2
   exit 1
@@ -3093,6 +3169,20 @@ fi
 SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
 
 cd "${{ROOT_DIR}}"
+
+FILESTORE_EXISTS=false
+FILESTORE_STATE="$(docker compose run --rm --no-deps -T \
+  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  --entrypoint sh odoo \
+  -c 'if [ -d "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}" ]; then echo exists; else echo missing; fi')"
+if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
+  FILESTORE_EXISTS=true
+fi
+
+if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
 
 echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
 echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
@@ -3216,14 +3306,37 @@ DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
 RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-SNAPSHOT="${{1:-latest}}"
+FORCE=false
+SNAPSHOT="latest"
+SNAPSHOT_SET=false
 SOURCE_FILESTORE_PATH="/var/lib/odoo/filestore/${{SOURCE_DB_NAME}}"
 TARGET_FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
 
-if [[ $# -gt 1 ]]; then
-  echo "Usage: $(basename "$0") [SNAPSHOT]" >&2
-  exit 2
-fi
+usage() {{
+  echo "Usage: $(basename "$0") [--force] [SNAPSHOT]" >&2
+}}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ "${{SNAPSHOT_SET}}" == true ]]; then
+        usage
+        exit 2
+      fi
+      SNAPSHOT="$1"
+      SNAPSHOT_SET=true
+      ;;
+  esac
+  shift
+done
 
 if [[ ! -x "${{RESTIC}}" ]]; then
   echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
@@ -3231,6 +3344,21 @@ if [[ ! -x "${{RESTIC}}" ]]; then
 fi
 
 cd "${{ROOT_DIR}}"
+
+FILESTORE_EXISTS=false
+FILESTORE_STATE="$(docker compose run --rm --no-deps -T \
+  --user 0:0 \
+  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  --entrypoint sh odoo \
+  -c 'if [ -d "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}" ]; then echo exists; else echo missing; fi')"
+if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
+  FILESTORE_EXISTS=true
+fi
+
+if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
 
 echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
 echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
@@ -3255,7 +3383,501 @@ echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
     return _write_docker_local_script(layout, "restore-filestore-restic", content)
 
 
+def write_docker_backup_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+
+for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
+if "%~1"=="" (
+  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%.dump"
+) else (
+  for %%I in ("%~1") do set "OUTPUT=%%~fI"
+)
+for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
+set "TMP_OUTPUT=%OUTPUT%.tmp"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+if errorlevel 1 exit /b 1
+if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+
+echo INFO: Backing up PostgreSQL database '%DB_NAME%' to '%OUTPUT%'.
+docker compose exec -T db pg_dump --format=custom --no-owner --no-acl -U odoo "%DB_NAME%" > "%TMP_OUTPUT%"
+if errorlevel 1 (
+  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+  exit /b 1
+)
+move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
+if errorlevel 1 exit /b 1
+
+echo INFO: Database backup created: %OUTPUT%
+endlocal
+"""
+    return _write_docker_local_script(layout, "backup-db", content, ext="bat")
+
+
+def write_docker_restore_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+set "FORCE=false"
+set "SOURCE="
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+if "%~1:~0,1%"=="-" goto unknown_option
+if defined SOURCE goto usage_error
+set "SOURCE=%~1"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:args_done
+if not defined SOURCE goto usage_error
+if not exist "%SOURCE%" (
+  echo ERROR: database backup not found: %SOURCE%
+  exit /b 1
+)
+for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "DB_EXISTS=false"
+for /f "usebackq delims=" %%D in (`docker compose exec -T db psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database"`) do (
+  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
+)
+
+if "%DB_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+echo INFO: Restoring PostgreSQL database '%DB_NAME%' from '%SOURCE%'.
+echo INFO: Stop the Odoo service first when restoring a database that is currently in use.
+if "%DB_EXISTS%"=="true" (
+  docker compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "%DB_NAME%"
+  if errorlevel 1 exit /b 1
+)
+docker compose exec -T db createdb -U odoo --maintenance-db=postgres "%DB_NAME%"
+if errorlevel 1 exit /b 1
+docker compose exec -T db pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "%DB_NAME%" < "%SOURCE%"
+if errorlevel 1 exit /b 1
+
+echo INFO: Database restore completed: %DB_NAME%
+endlocal
+exit /b 0
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] BACKUP.dump
+exit /b 2
+"""
+    return _write_docker_local_script(layout, "restore-db", content, ext="bat")
+
+
+def write_docker_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+
+for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
+if "%~1"=="" (
+  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%_filestore.tar.gz"
+) else (
+  for %%I in ("%~1") do set "OUTPUT=%%~fI"
+)
+for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
+set "TMP_OUTPUT=%OUTPUT%.tmp"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+if errorlevel 1 exit /b 1
+if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+
+echo INFO: Backing up filestore for database '%DB_NAME%' to '%OUTPUT%'.
+docker compose run --rm --no-deps -T --entrypoint tar odoo -C "/var/lib/odoo/filestore/%DB_NAME%" -czf - . > "%TMP_OUTPUT%"
+if errorlevel 1 (
+  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+  exit /b 1
+)
+move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
+if errorlevel 1 exit /b 1
+
+echo INFO: Filestore backup created: %OUTPUT%
+endlocal
+"""
+    return _write_docker_local_script(layout, "backup-filestore", content, ext="bat")
+
+
+def write_docker_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+set "FORCE=false"
+set "SOURCE="
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+if "%~1:~0,1%"=="-" goto unknown_option
+if defined SOURCE goto usage_error
+set "SOURCE=%~1"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:args_done
+if not defined SOURCE goto usage_error
+if not exist "%SOURCE%" (
+  echo ERROR: filestore backup not found: %SOURCE%
+  exit /b 1
+)
+for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "STATE_FILE=%TEMP%\odt-env-filestore-state-%RANDOM%-%RANDOM%.txt"
+docker compose run --rm --no-deps -T -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
+if errorlevel 1 (
+  if exist "%STATE_FILE%" del /q "%STATE_FILE%"
+  exit /b 1
+)
+set "FILESTORE_EXISTS=false"
+findstr /x /c:"exists" "%STATE_FILE%" >nul
+if not errorlevel 1 set "FILESTORE_EXISTS=true"
+del /q "%STATE_FILE%" >nul 2>&1
+
+if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+echo INFO: Restoring filestore for database '%DB_NAME%' from '%SOURCE%'.
+echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
+docker compose run --rm --no-deps -T -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; target=/var/lib/odoo/filestore/$ODOO_DB_NAME; rm -rf $target; mkdir -p $target; tar -xzf - -C $target" < "%SOURCE%"
+if errorlevel 1 exit /b 1
+
+echo INFO: Filestore restore completed: %DB_NAME%
+endlocal
+exit /b 0
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] FILESTORE.tar.gz
+exit /b 2
+"""
+    return _write_docker_local_script(layout, "restore-filestore", content, ext="bat")
+
+
+def write_docker_restic_bat(layout: Layout) -> Path:
+    content = r"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+
+if "%~1"=="" (
+  echo Usage: %~nx0 RESTIC_COMMAND [ARGS...]
+  exit /b 2
+)
+
+if not defined RESTIC_REPOSITORY (
+  echo ERROR: RESTIC_REPOSITORY is not set.
+  exit /b 1
+)
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "REPO_LOCAL=false"
+set "RESTIC_REPOSITORY_HOST="
+set "RESTIC_REPOSITORY_CONTAINER=%RESTIC_REPOSITORY%"
+if "%RESTIC_REPOSITORY:~1,1%"==":" goto local_repository
+if "%RESTIC_REPOSITORY:~0,2%"=="\\" goto local_repository
+goto repository_ready
+
+:local_repository
+set "REPO_LOCAL=true"
+for %%I in ("%RESTIC_REPOSITORY%") do set "RESTIC_REPOSITORY_HOST=%%~fI"
+if not exist "%RESTIC_REPOSITORY_HOST%" mkdir "%RESTIC_REPOSITORY_HOST%"
+if errorlevel 1 exit /b 1
+set "RESTIC_REPOSITORY_CONTAINER=/restic-repository"
+
+:repository_ready
+set "PASSWORD_MODE="
+set "RESTIC_PASSWORD_FILE_HOST="
+if defined RESTIC_PASSWORD_FILE goto password_file
+if defined RESTIC_PASSWORD goto password_env
+echo ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD.
+exit /b 1
+
+:password_file
+if not exist "%RESTIC_PASSWORD_FILE%" (
+  echo ERROR: RESTIC_PASSWORD_FILE not found: %RESTIC_PASSWORD_FILE%
+  exit /b 1
+)
+for %%I in ("%RESTIC_PASSWORD_FILE%") do set "RESTIC_PASSWORD_FILE_HOST=%%~fI"
+set "PASSWORD_MODE=file"
+goto run_restic
+
+:password_env
+set "PASSWORD_MODE=env"
+
+:run_restic
+if "%REPO_LOCAL%"=="true" if "%PASSWORD_MODE%"=="file" goto run_local_file
+if "%REPO_LOCAL%"=="true" goto run_local_env
+if "%PASSWORD_MODE%"=="file" goto run_remote_file
+goto run_remote_env
+
+:run_local_file
+docker compose run --rm --no-deps -T --user 0:0 ^
+  -v "%RESTIC_REPOSITORY_HOST%:/restic-repository" ^
+  -e "RESTIC_REPOSITORY=/restic-repository" ^
+  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
+  -v "%RESTIC_PASSWORD_FILE_HOST%:/run/secrets/odt-env-restic-password:ro" ^
+  -e "RESTIC_PASSWORD_FILE=/run/secrets/odt-env-restic-password" ^
+  --entrypoint restic odoo %*
+exit /b %ERRORLEVEL%
+
+:run_local_env
+docker compose run --rm --no-deps -T --user 0:0 ^
+  -v "%RESTIC_REPOSITORY_HOST%:/restic-repository" ^
+  -e "RESTIC_REPOSITORY=/restic-repository" ^
+  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
+  -e RESTIC_PASSWORD ^
+  --entrypoint restic odoo %*
+exit /b %ERRORLEVEL%
+
+:run_remote_file
+docker compose run --rm --no-deps -T --user 0:0 ^
+  -e "RESTIC_REPOSITORY=%RESTIC_REPOSITORY_CONTAINER%" ^
+  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
+  -v "%RESTIC_PASSWORD_FILE_HOST%:/run/secrets/odt-env-restic-password:ro" ^
+  -e "RESTIC_PASSWORD_FILE=/run/secrets/odt-env-restic-password" ^
+  --entrypoint restic odoo %*
+exit /b %ERRORLEVEL%
+
+:run_remote_env
+docker compose run --rm --no-deps -T --user 0:0 ^
+  -e "RESTIC_REPOSITORY=%RESTIC_REPOSITORY_CONTAINER%" ^
+  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
+  -e RESTIC_PASSWORD ^
+  --entrypoint restic odoo %*
+exit /b %ERRORLEVEL%
+"""
+    return _write_docker_local_script(layout, "restic", content, ext="bat")
+
+
+def write_docker_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+set "RESTIC=%SCRIPT_DIR%\restic.bat"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+if defined RESTIC_HOST (
+  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
+) else (
+  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
+)
+set "FILESTORE_PATH=/var/lib/odoo/filestore/%DB_NAME%"
+
+if not exist "%RESTIC%" (
+  echo ERROR: restic helper not found: %RESTIC%
+  exit /b 1
+)
+
+echo INFO: Backing up filestore for database '%DB_NAME%' with restic.
+if defined RESTIC_BACKUP_ID goto with_backup_id
+
+call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" %* "%FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:with_backup_id
+call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" --tag "backup-id:%RESTIC_BACKUP_ID%" %* "%FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+"""
+    return _write_docker_local_script(layout, "backup-filestore-restic", content, ext="bat")
+
+
+def write_docker_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "RESTIC=%SCRIPT_DIR%\restic.bat"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+if defined RESTIC_SOURCE_DB_NAME (
+  set "SOURCE_DB_NAME=%RESTIC_SOURCE_DB_NAME%"
+) else (
+  set "SOURCE_DB_NAME=%DB_NAME%"
+)
+if defined RESTIC_HOST (
+  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
+) else (
+  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
+)
+set "FORCE=false"
+set "SNAPSHOT=latest"
+set "SNAPSHOT_SET=false"
+set "SOURCE_FILESTORE_PATH=/var/lib/odoo/filestore/%SOURCE_DB_NAME%"
+set "TARGET_FILESTORE_PATH=/var/lib/odoo/filestore/%DB_NAME%"
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+if "%~1:~0,1%"=="-" goto unknown_option
+if /i "%SNAPSHOT_SET%"=="true" goto usage_error
+set "SNAPSHOT=%~1"
+set "SNAPSHOT_SET=true"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:args_done
+if not exist "%RESTIC%" (
+  echo ERROR: restic helper not found: %RESTIC%
+  exit /b 1
+)
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "STATE_FILE=%TEMP%\odt-env-restic-filestore-state-%RANDOM%-%RANDOM%.txt"
+docker compose run --rm --no-deps -T --user 0:0 -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
+if errorlevel 1 (
+  if exist "%STATE_FILE%" del /q "%STATE_FILE%"
+  exit /b 1
+)
+set "FILESTORE_EXISTS=false"
+findstr /x /c:"exists" "%STATE_FILE%" >nul
+if not errorlevel 1 set "FILESTORE_EXISTS=true"
+del /q "%STATE_FILE%" >nul 2>&1
+
+if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+echo INFO: Restoring filestore for database '%DB_NAME%' from restic snapshot '%SNAPSHOT%'.
+echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
+
+docker compose run --rm --no-deps -T --user 0:0 -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; rm -rf /var/lib/odoo/filestore/$ODOO_DB_NAME; mkdir -p /var/lib/odoo/filestore/$ODOO_DB_NAME"
+if errorlevel 1 exit /b 1
+
+if /i "%SNAPSHOT%"=="latest" goto restore_latest
+call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_FILESTORE_PATH%" --target "%TARGET_FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:restore_latest
+call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_FILESTORE_PATH%" --target "%TARGET_FILESTORE_PATH%" --host "%RESTIC_HOST_NAME%" --path "%SOURCE_FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] [SNAPSHOT]
+exit /b 2
+"""
+    return _write_docker_local_script(layout, "restore-filestore-restic", content, ext="bat")
+
+
 def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, Path]:
+    if sys.platform.startswith("win"):
+        return {
+            "backup_db": write_docker_backup_db_bat(layout, cfg),
+            "restore_db": write_docker_restore_db_bat(layout, cfg),
+            "backup_filestore": write_docker_backup_filestore_bat(layout, cfg),
+            "restore_filestore": write_docker_restore_filestore_bat(layout, cfg),
+            "restic": write_docker_restic_bat(layout),
+            "backup_filestore_restic": write_docker_backup_filestore_restic_bat(layout, cfg),
+            "restore_filestore_restic": write_docker_restore_filestore_restic_bat(layout, cfg),
+        }
+
     return {
         "backup_db": write_docker_backup_db_sh(layout, cfg),
         "restore_db": write_docker_restore_db_sh(layout, cfg),

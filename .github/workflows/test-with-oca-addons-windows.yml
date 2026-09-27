@@ -106,6 +106,13 @@ jobs:
           $requiredPaths = @(
             "odoo-workspace\odoo-scripts\run.bat",
             "odoo-workspace\odoo-scripts\update.bat",
+            "odoo-workspace\docker\local\scripts\backup-db.bat",
+            "odoo-workspace\docker\local\scripts\restore-db.bat",
+            "odoo-workspace\docker\local\scripts\backup-filestore.bat",
+            "odoo-workspace\docker\local\scripts\restore-filestore.bat",
+            "odoo-workspace\docker\local\scripts\restic.bat",
+            "odoo-workspace\docker\local\scripts\backup-filestore-restic.bat",
+            "odoo-workspace\docker\local\scripts\restore-filestore-restic.bat",
             "odoo-workspace\odoo-addons\oca-web",
             "odoo-workspace\odoo-addons\oca-helpdesk",
             "odoo-workspace\odoo-addons\oca-web\.git",
@@ -116,6 +123,11 @@ jobs:
             if (-not (Test-Path -LiteralPath $path)) {
               throw "Required path not found: $path"
             }
+          }
+
+          $unixDockerHelpers = Get-ChildItem -LiteralPath "odoo-workspace\docker\local\scripts" -Filter *.sh -File
+          if ($unixDockerHelpers) {
+            throw "Unix Docker helpers must not be generated on Windows: $($unixDockerHelpers.Name -join ', ')"
           }
 
       - name: Init database with OCA addons

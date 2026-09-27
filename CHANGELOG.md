@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.21.4 (2026-09-??)
+
+### Changed
+
+* Require `--force` when restoring over an existing Docker database or filestore.
+
 ## 1.21.3 (2026-09-27)
 
 ### Fixed

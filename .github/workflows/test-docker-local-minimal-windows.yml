@@ -1,0 +1,381 @@
+name: Test Local Docker Minimal (Windows)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  docker-local-minimal-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Verify uv
+        run: uv --version
+
+      - name: Create workspace root folder
+        run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
+
+      - name: Initialize project and generate default local Docker artifacts
+        working-directory: ./odoo-workspace
+        run: |
+          uv run odt-env --init-project --set odoo:version=18.0
+
+      - name: Check generated Windows local Docker helpers
+        run: |
+          $required = @(
+            "backup-db.bat",
+            "restore-db.bat",
+            "backup-filestore.bat",
+            "restore-filestore.bat",
+            "restic.bat",
+            "backup-filestore-restic.bat",
+            "restore-filestore-restic.bat"
+          )
+
+          $scriptsDir = "odoo-workspace\docker\local\scripts"
+
+          foreach ($name in $required) {
+            $path = Join-Path $scriptsDir $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required Windows helper not found: $path"
+            }
+          }
+
+          $unixHelpers = Get-ChildItem `
+            -LiteralPath $scriptsDir `
+            -Filter "*.sh" `
+            -File `
+            -ErrorAction SilentlyContinue
+
+          if ($unixHelpers) {
+            throw "Unix helpers must not be generated on Windows: $($unixHelpers.Name -join ', ')"
+          }
+
+          $batHelpers = Get-ChildItem -LiteralPath $scriptsDir -Filter "*.bat" -File
+          if ($batHelpers.Count -ne 7) {
+            throw "Expected exactly 7 .bat helpers, got $($batHelpers.Count)."
+          }
+
+      - name: Install mock Docker command
+        run: |
+          $mockRoot = Join-Path $env:RUNNER_TEMP "odt-env-mock-docker"
+          $mockProject = Join-Path $mockRoot "src"
+          $mockBin = Join-Path $mockRoot "bin"
+
+          New-Item -ItemType Directory -Force -Path $mockProject | Out-Null
+          New-Item -ItemType Directory -Force -Path $mockBin | Out-Null
+
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+              <AssemblyName>docker</AssemblyName>
+              <UseAppHost>true</UseAppHost>
+            </PropertyGroup>
+          </Project>
+          '@ | Set-Content `
+            -LiteralPath (Join-Path $mockProject "docker.csproj") `
+            -Encoding UTF8
+
+          @'
+          using System;
+          using System.IO;
+          using System.Linq;
+
+          internal static class Program
+          {
+              private static int Main(string[] args)
+              {
+                  var joined = string.Join(" ", args);
+                  var logPath = Environment.GetEnvironmentVariable("ODT_MOCK_DOCKER_LOG");
+
+                  if (!string.IsNullOrEmpty(logPath))
+                  {
+                      File.AppendAllText(logPath, joined + Environment.NewLine);
+                  }
+
+                  if (joined.Contains("SELECT datname FROM pg_database", StringComparison.Ordinal))
+                  {
+                      if (Environment.GetEnvironmentVariable("ODT_MOCK_DB_EXISTS") == "1")
+                      {
+                          Console.WriteLine(
+                              Environment.GetEnvironmentVariable("ODOO_DB_NAME") ?? "odoo"
+                          );
+                      }
+
+                      return 0;
+                  }
+
+                  if (joined.Contains(
+                      "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]",
+                      StringComparison.Ordinal
+                  ))
+                  {
+                      Console.WriteLine(
+                          Environment.GetEnvironmentVariable("ODT_MOCK_FILESTORE_EXISTS") == "1"
+                              ? "exists"
+                              : "missing"
+                      );
+                      return 0;
+                  }
+
+                  return 0;
+              }
+          }
+          '@ | Set-Content `
+            -LiteralPath (Join-Path $mockProject "Program.cs") `
+            -Encoding UTF8
+
+          dotnet publish `
+            (Join-Path $mockProject "docker.csproj") `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained false `
+            --output $mockBin
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to build mock docker.exe."
+          }
+
+          $dockerExe = Join-Path $mockBin "docker.exe"
+          if (-not (Test-Path -LiteralPath $dockerExe -PathType Leaf)) {
+            throw "Mock docker.exe was not generated: $dockerExe"
+          }
+
+          $mockBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Prepare mock restore inputs
+        working-directory: ./odoo-workspace
+        run: |
+          New-Item -ItemType Directory -Force -Path odoo-backups | Out-Null
+          Set-Content -LiteralPath .\odoo-backups\test.dump -Value "mock-database-dump" -Encoding ASCII
+          Set-Content -LiteralPath .\odoo-backups\test-filestore.tar.gz -Value "mock-filestore-archive" -Encoding ASCII
+
+      - name: Test database restore force protection
+        working-directory: ./odoo-workspace
+        run: |
+          $env:ODOO_DB_NAME = "odoo_restore"
+          $env:ODT_MOCK_DB_EXISTS = "1"
+          $env:ODT_MOCK_FILESTORE_EXISTS = "0"
+          $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-db-docker.log"
+
+          try {
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            $output = (& .\docker\local\scripts\restore-db.bat .\odoo-backups\test.dump 2>&1 | Out-String)
+            $status = $LASTEXITCODE
+
+            if ($status -eq 0) {
+              throw "Database restore unexpectedly succeeded without --force."
+            }
+
+            if ($output -notlike "*target database 'odoo_restore' already exists. Use --force to replace it.*") {
+              throw "Unexpected database restore error: $output"
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -match "\bdropdb\b|\bcreatedb\b|\bpg_restore\b") {
+              throw "Destructive database restore command ran without --force:`n$log"
+            }
+
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-db.bat --force .\odoo-backups\test.dump
+            if ($LASTEXITCODE -ne 0) {
+              throw "Forced database restore failed."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            foreach ($expected in @("dropdb --force", "createdb", "pg_restore")) {
+              if ($log -notlike "*$expected*") {
+                throw "Forced database restore did not call '$expected':`n$log"
+              }
+            }
+
+            $env:ODT_MOCK_DB_EXISTS = "0"
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-db.bat .\odoo-backups\test.dump
+            if ($LASTEXITCODE -ne 0) {
+              throw "Restore into a missing database should not require --force."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -like "*dropdb*") {
+              throw "Restore into a missing database unexpectedly called dropdb:`n$log"
+            }
+            foreach ($expected in @("createdb", "pg_restore")) {
+              if ($log -notlike "*$expected*") {
+                throw "Restore into a missing database did not call '$expected':`n$log"
+              }
+            }
+          }
+          finally {
+            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_FILESTORE_EXISTS -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+          }
+
+      - name: Test archive filestore restore force protection
+        working-directory: ./odoo-workspace
+        run: |
+          $env:ODOO_DB_NAME = "odoo_restore"
+          $env:ODT_MOCK_DB_EXISTS = "0"
+          $env:ODT_MOCK_FILESTORE_EXISTS = "1"
+          $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-filestore-docker.log"
+
+          try {
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            $output = (& .\docker\local\scripts\restore-filestore.bat .\odoo-backups\test-filestore.tar.gz 2>&1 | Out-String)
+            $status = $LASTEXITCODE
+
+            if ($status -eq 0) {
+              throw "Filestore restore unexpectedly succeeded without --force."
+            }
+
+            if ($output -notlike "*target filestore for database 'odoo_restore' already exists. Use --force to replace it.*") {
+              throw "Unexpected filestore restore error: $output"
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -like "*rm -rf*") {
+              throw "Filestore removal ran without --force:`n$log"
+            }
+
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-filestore.bat .\odoo-backups\test-filestore.tar.gz --force
+            if ($LASTEXITCODE -ne 0) {
+              throw "Forced filestore restore failed."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*rm -rf*") {
+              throw "Forced filestore restore did not replace the target filestore:`n$log"
+            }
+
+            $env:ODT_MOCK_FILESTORE_EXISTS = "0"
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-filestore.bat .\odoo-backups\test-filestore.tar.gz
+            if ($LASTEXITCODE -ne 0) {
+              throw "Restore into a missing filestore should not require --force."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*rm -rf*") {
+              throw "Filestore restore command did not run for a missing target:`n$log"
+            }
+          }
+          finally {
+            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_FILESTORE_EXISTS -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+          }
+
+      - name: Test restic filestore restore force protection
+        working-directory: ./odoo-workspace
+        run: |
+          $env:ODOO_DB_NAME = "odoo_restic_restore"
+          $env:RESTIC_SOURCE_DB_NAME = "odoo"
+          $env:RESTIC_REPOSITORY = "mock:repository"
+          $env:RESTIC_PASSWORD = "test-password"
+          $env:RESTIC_HOST = "odt-env-ci"
+          $env:ODT_MOCK_DB_EXISTS = "0"
+          $env:ODT_MOCK_FILESTORE_EXISTS = "1"
+          $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-restic-docker.log"
+
+          try {
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            $output = (& .\docker\local\scripts\restore-filestore-restic.bat latest 2>&1 | Out-String)
+            $status = $LASTEXITCODE
+
+            if ($status -eq 0) {
+              throw "Restic filestore restore unexpectedly succeeded without --force."
+            }
+
+            if ($output -notlike "*target filestore for database 'odoo_restic_restore' already exists. Use --force to replace it.*") {
+              throw "Unexpected restic restore error: $output"
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -like "*rm -rf*" -or $log -like "*--entrypoint restic*") {
+              throw "Restic restore progressed past protection without --force:`n$log"
+            }
+
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-filestore-restic.bat latest --force
+            if ($LASTEXITCODE -ne 0) {
+              throw "Forced restic filestore restore failed."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*rm -rf*") {
+              throw "Forced restic restore did not replace the target filestore:`n$log"
+            }
+            if ($log -notlike "*--entrypoint restic odoo restore*") {
+              throw "Forced restic restore did not invoke restic restore:`n$log"
+            }
+
+            $env:ODT_MOCK_FILESTORE_EXISTS = "0"
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\restore-filestore-restic.bat
+            if ($LASTEXITCODE -ne 0) {
+              throw "Restic restore into a missing filestore should not require --force."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*--entrypoint restic odoo restore*") {
+              throw "Restic restore command did not run for a missing target:`n$log"
+            }
+          }
+          finally {
+            foreach ($name in @(
+              "ODOO_DB_NAME",
+              "RESTIC_SOURCE_DB_NAME",
+              "RESTIC_REPOSITORY",
+              "RESTIC_PASSWORD",
+              "RESTIC_HOST",
+              "ODT_MOCK_DB_EXISTS",
+              "ODT_MOCK_FILESTORE_EXISTS",
+              "ODT_MOCK_DOCKER_LOG"
+            )) {
+              Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Show generated Windows local Docker helpers
+        if: always()
+        run: |
+          $scriptsDir = "odoo-workspace\docker\local\scripts"
+
+          if (Test-Path -LiteralPath $scriptsDir) {
+            Get-ChildItem -LiteralPath $scriptsDir -Force |
+              Select-Object Name, Length
+
+            foreach ($file in Get-ChildItem -LiteralPath $scriptsDir -Filter "*.bat" -File) {
+              Write-Host ""
+              Write-Host "===== $($file.Name) ====="
+              Get-Content -LiteralPath $file.FullName
+            }
+          }
