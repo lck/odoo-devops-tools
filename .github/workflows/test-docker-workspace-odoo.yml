@@ -24,7 +24,7 @@ jobs:
       - name: Verify --set rejects unsupported Docker options
         run: |
           set +e
-          output="$(uv run odt-env --init-project ./invalid-workspace \
+          output="$(uv run odoo-compose --init-project ./invalid-workspace \
             --set docker:not_supported=value 2>&1)"
           status=$?
           set -e
@@ -39,7 +39,7 @@ jobs:
       - name: Generate Odoo 19 workspace Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odt-env --init-project --sync-all \
+          uv run odoo-compose --init-project --sync-all \
             --set odoo:version=19.0 \
             --set 'virtualenv:constraints=packaging<1000' \
             --set docker:odoo_source=workspace
@@ -108,7 +108,7 @@ jobs:
 
       - name: Generate self-contained deploy context
         working-directory: ./odoo-workspace
-        run: uv run odt-env --create-docker-deploy --no-local-docker
+        run: uv run odoo-compose --create-docker-deploy --no-local-docker
 
       - name: Check generated deploy artifacts
         run: |
@@ -133,14 +133,14 @@ jobs:
       - name: Build and verify deploy Docker image
         working-directory: ./odoo-workspace
         run: |
-          docker build -t odt-env-odoo-workspace:test docker/deploy
+          docker build -t odoo-compose-odoo-workspace:test docker/deploy
 
-          docker run --rm --entrypoint python3 odt-env-odoo-workspace:test -c \
+          docker run --rm --entrypoint python3 odoo-compose-odoo-workspace:test -c \
             'import odoo.addons, odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); assert not any(path.startswith("/usr/lib/python3/dist-packages/odoo") for path in odoo.addons.__path__); print(odoo.release.__file__); print(list(odoo.addons.__path__))'
 
       - name: Verify explicit requirements override matching constraints
         run: |
-          uv run odt-env --init-project ./constraints-workspace \
+          uv run odoo-compose --init-project ./constraints-workspace \
             --set odoo:version=19.0 \
             --set 'virtualenv:requirements=packaging>=1' \
             --set 'virtualenv:constraints=packaging<1'

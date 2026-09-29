@@ -79,7 +79,7 @@ jobs:
 
       - name: Provision Odoo workspace
         run: |
-          uv run odt-env .\odoo-project.ini `
+          uv run odoo-compose .\odoo-project.ini `
             --sync-all `
             --create-venv `
             --root odoo-workspace

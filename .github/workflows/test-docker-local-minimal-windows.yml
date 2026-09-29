@@ -31,7 +31,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odt-env --init-project --set odoo:version=18.0
+          uv run odoo-compose --init-project --set odoo:version=18.0
 
       - name: Check generated Windows local Docker helpers
         run: |
@@ -71,7 +71,7 @@ jobs:
 
       - name: Install mock Docker command
         run: |
-          $mockRoot = Join-Path $env:RUNNER_TEMP "odt-env-mock-docker"
+          $mockRoot = Join-Path $env:RUNNER_TEMP "odoo-compose-mock-docker"
           $mockProject = Join-Path $mockRoot "src"
           $mockBin = Join-Path $mockRoot "bin"
 
@@ -297,7 +297,7 @@ jobs:
           $env:RESTIC_SOURCE_DB_NAME = "odoo"
           $env:RESTIC_REPOSITORY = "mock:repository"
           $env:RESTIC_PASSWORD = "test-password"
-          $env:RESTIC_HOST = "odt-env-ci"
+          $env:RESTIC_HOST = "odoo-compose-ci"
           $env:ODT_MOCK_DB_EXISTS = "0"
           $env:ODT_MOCK_FILESTORE_EXISTS = "1"
           $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-restic-docker.log"

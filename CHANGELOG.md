@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.0 (2026-09-??)
+
+### Added
+
+* Add `odoo-compose` as the primary CLI command while keeping `odt-env` as a backward-compatible alias.
+
 ## 1.22.0 (2026-09-29)
 
 ### Added

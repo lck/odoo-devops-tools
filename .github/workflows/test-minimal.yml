@@ -53,11 +53,16 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Verify legacy odt-env CLI alias
+        shell: bash
+        run: |
+          uv run odt-env --help | grep -q "odoo-compose"
+
       - name: Reject duplicate workspace root options
         shell: bash
         run: |
           set +e
-          uv run odt-env --init-project ./init-project-root --root ./explicit-root \
+          uv run odoo-compose --init-project ./init-project-root --root ./explicit-root \
             > duplicate-root.log 2>&1
           status=$?
           set -e
@@ -71,7 +76,7 @@ jobs:
       - name: Check backward-compatible init-project with --root
         shell: bash
         run: |
-          uv run odt-env --init-project --root ./legacy-init-workspace \
+          uv run odoo-compose --init-project --root ./legacy-init-workspace \
             --no-local-docker \
             --no-configs \
             --no-scripts \
@@ -85,7 +90,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env --init-project ./odoo-workspace --sync-all --create-venv \
+          uv run odoo-compose --init-project ./odoo-workspace --sync-all --create-venv \
             --set odoo:version=19.0 \
             --set config:db_host=127.0.0.1 \
             --set config:db_port=5432 \

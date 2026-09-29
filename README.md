@@ -1,8 +1,8 @@
-# odoo-devops-tools
+# odoo-compose
 
-**Manage reproducible Odoo workspaces.**
+**Build reproducible Odoo workspaces.**
 
-`odoo-devops-tools` provides **`odt-env`**, a CLI for creating reproducible Odoo workspaces from a single configuration file.
+`odoo-compose`, provided by the `odoo-devops-tools` package, builds and maintains reproducible Odoo workspaces from a single project definition.
 
 A basic workspace definition with addons can look like this:
 
@@ -19,7 +19,7 @@ repo = https://github.com/OCA/helpdesk.git
 branch = ${odoo:version}
 ```
 
-From this configuration, `odt-env` can generate a workspace such as:
+From this configuration, `odoo-compose` can generate a workspace such as:
 
 ```text
 ROOT/
@@ -50,7 +50,7 @@ ROOT/
 * **Python dependency management** — manage Python versions, virtual environments and requirements.
 * **Composable configuration** — combine INI layers, variables, and CLI overrides.
 
-`odt-env` focuses on creating and maintaining the Odoo workspace and its derived artifacts. Infrastructure provisioning and deployment orchestration remain outside its scope.
+`odoo-compose` focuses on creating and maintaining the Odoo workspace and its derived artifacts. Infrastructure provisioning and deployment orchestration remain outside its scope.
 
 ---
 
@@ -73,14 +73,14 @@ uv tool install -U odoo-devops-tools
 Verify the installation:
 
 ```bash
-odt-env --help
+odoo-compose --help
 ```
 
 ---
 
 ## Usage
 
-`odt-env` supports two development workflows:
+`odoo-compose` supports two development workflows:
 
 - **Docker workflow** — run Odoo and PostgreSQL with the generated Docker Compose environment.
 - **Native development with venv** — run Odoo directly on the host using a generated Python virtual environment.
@@ -92,7 +92,7 @@ Choose the workflow that fits your environment. Both use the same `odoo-project.
 Create a new workspace:
 
 ```bash
-odt-env --init-project ./odoo19
+odoo-compose --init-project ./odoo19
 ```
 
 Start the Docker Compose environment:
@@ -150,7 +150,7 @@ The rest of the generated project file can stay unchanged.
 Sync the configured addon repositories and refresh the generated Docker workflow artifacts:
 
 ```bash
-odt-env --sync-addons
+odoo-compose --sync-addons
 docker compose up --build -d
 ```
 
@@ -194,7 +194,7 @@ odoo_source = workspace
 Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
-odt-env --sync-all
+odoo-compose --sync-all
 docker compose up --build -d
 ```
 
@@ -405,13 +405,13 @@ Use `--create-docker-deploy` to generate a self-contained Docker build context f
 Addon modules are staged into the build context so the resulting image does not depend on bind-mounted workspace sources:
 
 ```bash
-odt-env --sync-addons --create-docker-deploy
+odoo-compose --sync-addons --create-docker-deploy
 ```
 
 When `[docker].odoo_source = workspace`, sync the Odoo source as well:
 
 ```bash
-odt-env --sync-all --create-docker-deploy
+odoo-compose --sync-all --create-docker-deploy
 ```
 
 This additionally creates:
@@ -440,7 +440,7 @@ In this workflow, Odoo runs directly on the host using a generated Python virtua
 Create the workspace with the Odoo source and virtual environment:
 
 ```bash
-odt-env --init-project ./odoo19 --sync-all --create-venv \
+odoo-compose --init-project ./odoo19 --sync-all --create-venv \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
   --set config:db_user=odoo \
@@ -501,7 +501,7 @@ The rest of the generated project file can stay unchanged.
 Sync the sources and recreate the Python environment so dependencies from the new addon repositories are included:
 
 ```bash
-odt-env --sync-all --create-venv
+odoo-compose --sync-all --create-venv
 ```
 
 The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`, and their directories are added to the generated `addons_path`.
@@ -522,7 +522,7 @@ The generated script uses `click-odoo-update` with the workspace Odoo configurat
 
 ### 2.2. Using system Python instead of managed Python
 
-By default, `odt-env` uses `uv` to install and manage the requested Python version.
+By default, `odoo-compose` uses `uv` to install and manage the requested Python version.
 
 If you already have a suitable system Python installed, you can disable managed Python.
 
@@ -542,10 +542,10 @@ python_version = 3.11
 
 #### 2.2.2. Update the workspace
 
-After changing the project file, run `odt-env` again from the workspace root:
+After changing the project file, run `odoo-compose` again from the workspace root:
 
 ```bash
-odt-env --sync-all --create-venv
+odoo-compose --sync-all --create-venv
 ```
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
@@ -669,7 +669,7 @@ Use:
 - `build_constraints` to restrict build-time dependency versions
 - `requirements_ignore` to skip packages that would otherwise be collected from repository requirements files
 
-When a package is listed in `requirements`, `odt-env` automatically gives that package priority over the same package name from collected repository requirements and `constraints`. This means you can usually pin a package version just by adding it to `requirements`.
+When a package is listed in `requirements`, `odoo-compose` automatically gives that package priority over the same package name from collected repository requirements and `constraints`. This means you can usually pin a package version just by adding it to `requirements`.
 
 ### 3.1. Add or pin packages
 
@@ -711,7 +711,7 @@ requirements_ignore =
   psycopg2
 ```
 
-In this example, `odt-env` installs `psycopg2-binary==2.9.9` and skips `psycopg2` when collecting repository requirements.
+In this example, `odoo-compose` installs `psycopg2-binary==2.9.9` and skips `psycopg2` when collecting repository requirements.
 
 ---
 
@@ -738,7 +738,7 @@ Those machine-specific outputs are recreated on the target machine.
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
 ```bash
-odt-env --sync-all --create-venv --create-bundle
+odoo-compose --sync-all --create-venv --create-bundle
 ```
 
 When no output path is supplied, the bundle is written to:
@@ -750,7 +750,7 @@ ROOT/dist/ROOT-NAME.odt.zip
 You can also select an explicit output file:
 
 ```bash
-odt-env --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+odoo-compose --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
 #### 4.1.1. Including uncommitted changes
@@ -760,7 +760,7 @@ By default, bundle creation stops when a bundled Git repository has uncommitted 
 To intentionally include those changes in the bundle, use:
 
 ```bash
-odt-env --sync-all --create-venv --create-bundle --allow-dirty-bundle
+odoo-compose --sync-all --create-venv --create-bundle --allow-dirty-bundle
 ```
 
 ### 4.2. Create the workspace on the target machine
@@ -768,7 +768,7 @@ odt-env --sync-all --create-venv --create-bundle --allow-dirty-bundle
 Copy the ZIP to the target machine and import it into an empty directory:
 
 ```bash
-odt-env --create-from-bundle ./odoo18-production.odt.zip \
+odoo-compose --create-from-bundle ./odoo18-production.odt.zip \
   --root ./odoo18-prod \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
@@ -795,7 +795,7 @@ The import operation:
 The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
 ```bash
-odt-env --create-venv-from-wheelhouse --no-local-docker
+odoo-compose --create-venv-from-wheelhouse --no-local-docker
 ```
 
 This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building, and installs strictly from the existing `ROOT/wheelhouse/` and `all-requirements.lock.txt`.
@@ -807,27 +807,27 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 ### Syntax
 
 ```text
-odt-env [INI] [OPTIONS]
+odoo-compose [INI] [OPTIONS]
 ```
 
-If no arguments are specified, `odt-env` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
+If no arguments are specified, `odoo-compose` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
 regenerates the workspace artifacts without syncing repositories or recreating the virtual environment.
 
 ### Project definition (`INI`)
 
-`INI` is the optional project definition source used by `odt-env`. It can be:
+`INI` is the optional project definition source used by `odoo-compose`. It can be:
 
   - a local filesystem path, for example:
 
     ```bash
-    odt-env /path/to/odoo-project.ini --sync-all --create-venv
+    odoo-compose /path/to/odoo-project.ini
     ```
 
   - a remote INI loaded from a Git repository, for example:
 
     ```bash
-    odt-env 'git+https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main' --sync-all --create-venv
-    odt-env 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main' --sync-all --create-venv
+    odoo-compose 'git+https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main'
+    odoo-compose 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
     ```
 
     Syntax:
@@ -839,26 +839,26 @@ regenerates the workspace artifacts without syncing repositories or recreating t
   - a remote INI loaded from a URL, for example:
 
     ```bash
-    odt-env 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini' --sync-all --create-venv
-    odt-env 'https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini' --sync-all --create-venv
+    odoo-compose 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
+    odoo-compose 'https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini'
     ```
 
 #### Default project file convention
 
-If no positional `INI` file is provided and no `-i/--include` option is used, `odt-env` looks for `ROOT/odoo-project.ini`.
+If no positional `INI` file is provided and no `-i/--include` option is used, `odoo-compose` looks for `ROOT/odoo-project.ini`.
 
 This is similar to how Docker Compose uses `compose.yaml` by convention.
 
 For example, this command:
 
 ```bash
-odt-env --root ./existing-workspace --sync-all --create-venv
+odoo-compose --root ./existing-workspace --sync-all --create-venv
 ```
 
 is equivalent to passing the default project file explicitly:
 
 ```bash
-odt-env ./existing-workspace/odoo-project.ini --sync-all --create-venv
+odoo-compose ./existing-workspace/odoo-project.ini --sync-all --create-venv
 ```
 
 #### INI includes
@@ -866,7 +866,7 @@ odt-env ./existing-workspace/odoo-project.ini --sync-all --create-venv
 Use `-i INI` / `--include INI` to include additional project layers. The option can be repeated.
 
 ```bash
-odt-env base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
+odoo-compose base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
 ```
 
 Project layers are processed from left to right. Later layers override earlier layers.
@@ -878,7 +878,7 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 ### Paths and outputs
 
 - `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a remote INI or omitted INI. In include mode, the default is the directory of the first local source, or the current working directory when the first source is remote.
-- `--init-project [ROOT]` — create `ROOT/odoo-project.ini` from the bundled default template if it does not already exist. `ROOT` is optional; when supplied, it is a shorthand for selecting the workspace root directly, for example `odt-env --init-project ./odoo19`. When the optional value is omitted, `--root ROOT` remains supported for backward compatibility. Do not supply both `--init-project ROOT` and `--root ROOT`; the command exits with an error instead of choosing one implicitly. This option is valid only when `INI` is omitted and no `-i/--include` is provided. Existing project files are not overwritten.
+- `--init-project [ROOT]` — create `ROOT/odoo-project.ini` from the bundled default template if it does not already exist. `ROOT` is optional; when supplied, it is a shorthand for selecting the workspace root directly, for example `odoo-compose --init-project ./odoo19`. When the optional value is omitted, `--root ROOT` remains supported for backward compatibility. Do not supply both `--init-project ROOT` and `--root ROOT`; the command exits with an error instead of choosing one implicitly. This option is valid only when `INI` is omitted and no `-i/--include` is provided. Existing project files are not overwritten.
 - `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated.
 - `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, and `[docker]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
@@ -895,7 +895,7 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 - `--sync-all` — sync both Odoo and addons.
 
 > **Note**
-> If any target repository contains local uncommitted changes, `odt-env` aborts the sync operation.
+> If any target repository contains local uncommitted changes, `odoo-compose` aborts the sync operation.
 > Commit, stash, or discard the changes before running a sync command.
 
 ### Python, virtual environment, and wheelhouse
@@ -926,13 +926,13 @@ Maintenance:
 
 ### Other options
 
-- `--version` — show the installed `odt-env` version and exit.
+- `--version` — show the installed `odoo-compose` version and exit.
 
 ---
 
 ## Project file reference
 
-The `odt-env` project file is an INI file that describes the Odoo workspace to create.
+The `odoo-compose` project file is an INI file that describes the Odoo workspace to create.
 
 At minimum, the project file must contain this section:
 
@@ -949,7 +949,7 @@ The following sections are supported:
 
 ### General rules
 
-- The project file can have any filename when passed explicitly. When `INI` is omitted, `odt-env` uses the existing `ROOT/odoo-project.ini`; if it is missing, use `--init-project` to create it explicitly from the bundled default template. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
+- The project file can have any filename when passed explicitly. When `INI` is omitted, `odoo-compose` uses the existing `ROOT/odoo-project.ini`; if it is missing, use `--init-project` to create it explicitly from the bundled default template. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
 - Multiple INI layers can be composed with `-i/--include`. Later layers override earlier layers; multi-line values are replaced as whole option values, not appended.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
@@ -985,14 +985,14 @@ db_password = odoo
 CLI override example:
 
 ```bash
-odt-env odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
+odoo-compose odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
 ```
 
 ### `[virtualenv]`
 
 This section is optional.
 
-- `python_version` — Python version for the virtual environment. If omitted, `odt-env` chooses a default version based on the selected Odoo version.
+- `python_version` — Python version for the virtual environment. If omitted, `odoo-compose` chooses a default version based on the selected Odoo version.
 - `managed_python` — whether `uv` should install and manage Python automatically. Default: `true`.
 - `requirements` — additional Python requirements to install. Multi-line list.
 - `constraints` — dependency constraints used during resolution without installing packages by themselves. Explicit `requirements` take priority over matching constraints. Multi-line list.
@@ -1093,13 +1093,13 @@ This section is optional.
 
 When present, it contains Odoo server configuration values written into `ROOT/odoo-configs/odoo-server.conf`.
 
-When omitted, `odt-env` still generates a valid config file with generated values such as `addons_path` and `data_dir`.
+When omitted, `odoo-compose` still generates a valid config file with generated values such as `addons_path` and `data_dir`.
 
 You can define standard Odoo configuration options here.
 
 Special rules:
 
-- `addons_path` must not be set in `[config]`. `odt-env` always generates it automatically.
+- `addons_path` must not be set in `[config]`. `odoo-compose` always generates it automatically.
 - `data_dir` may be set in `[config]`. If provided, it overrides the default data directory location.
 
 Example:

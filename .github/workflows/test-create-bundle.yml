@@ -89,7 +89,7 @@ jobs:
       - name: Provision source workspace and wheelhouse
         shell: bash
         run: |
-          uv run odt-env ./odoo-project.ini \
+          uv run odoo-compose ./odoo-project.ini \
             --sync-all \
             --create-venv \
             --root source-workspace
@@ -107,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          uv run odt-env ./odoo-project.ini \
+          uv run odoo-compose ./odoo-project.ini \
             --root source-workspace \
             --create-bundle \
             > dirty-bundle-rejected.log 2>&1
@@ -122,7 +122,7 @@ jobs:
       - name: Create portable bundle from dirty workspace
         shell: bash
         run: |
-          uv run odt-env ./odoo-project.ini \
+          uv run odoo-compose ./odoo-project.ini \
             --root source-workspace \
             --create-bundle \
             --allow-dirty-bundle
@@ -246,7 +246,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          UV_OFFLINE=1 uv run odt-env \
+          UV_OFFLINE=1 uv run odoo-compose \
             --create-from-bundle bundle-artifacts/tampered.odt.zip \
             --root tampered-workspace \
             > tampered-bundle-rejected.log 2>&1
@@ -268,7 +268,7 @@ jobs:
       - name: Restore workspace from bundle strictly offline
         shell: bash
         run: |
-          UV_OFFLINE=1 uv run odt-env \
+          UV_OFFLINE=1 uv run odoo-compose \
             --create-from-bundle bundle-artifacts/source-workspace.odt.zip \
             --root restored-workspace \
             --set config:db_password=odoo \

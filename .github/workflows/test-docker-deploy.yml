@@ -9,9 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      TEST_IMAGE: odt-env-test/odoo-deploy:${{ github.sha }}
-      TEST_NETWORK: odt-env-deploy-test
-      TEST_DB_CONTAINER: odt-env-deploy-db
+      TEST_IMAGE: odoo-compose-test/odoo-deploy:${{ github.sha }}
+      TEST_NETWORK: odoo-compose-deploy-test
+      TEST_DB_CONTAINER: odoo-compose-deploy-db
 
     steps:
       - name: Checkout repository
@@ -33,7 +33,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odt-env "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
+          uv run odoo-compose "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
             --sync-addons \
             --create-docker-deploy \
             --no-local-docker

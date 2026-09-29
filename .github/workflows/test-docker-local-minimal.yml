@@ -27,7 +27,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odt-env --init-project --sync-addons --set odoo:version=18.0
+          uv run odoo-compose --init-project --sync-addons --set odoo:version=18.0
 
       - name: Check generated local Docker artifacts
         run: |
@@ -102,7 +102,7 @@ jobs:
         working-directory: ./odoo-workspace
         run: |
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
-            'mkdir -p /var/lib/odoo/filestore/odoo && printf %s streaming-backup-test > /var/lib/odoo/filestore/odoo/odt-env-test.txt'
+            'mkdir -p /var/lib/odoo/filestore/odoo && printf %s streaming-backup-test > /var/lib/odoo/filestore/odoo/odoo-compose-test.txt'
 
       - name: Back up database and filestore with generated helpers
         working-directory: ./odoo-workspace
@@ -148,7 +148,7 @@ jobs:
         env:
           RESTIC_REPOSITORY: ${{ github.workspace }}/odoo-workspace/restic-test-repo
           RESTIC_PASSWORD: test-restic-password
-          RESTIC_HOST: odt-env-ci
+          RESTIC_HOST: odoo-compose-ci
         run: |
           ./docker/local/scripts/restic.sh init
 
@@ -156,7 +156,7 @@ jobs:
             ./docker/local/scripts/backup-filestore-restic.sh
 
           ./docker/local/scripts/restic.sh snapshots \
-            --host odt-env-ci \
+            --host odoo-compose-ci \
             --path /var/lib/odoo/filestore/odoo \
             --tag filestore
 
@@ -189,10 +189,10 @@ jobs:
           test -z "${missing}"
 
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
-            'test "$(cat /var/lib/odoo/filestore/odoo_restore/odt-env-test.txt)" = streaming-backup-test'
+            'test "$(cat /var/lib/odoo/filestore/odoo_restore/odoo-compose-test.txt)" = streaming-backup-test'
 
           docker compose run --rm --no-deps --entrypoint sh odoo -c \
-            'test "$(cat /var/lib/odoo/filestore/odoo_restic_restore/odt-env-test.txt)" = streaming-backup-test'
+            'test "$(cat /var/lib/odoo/filestore/odoo_restic_restore/odoo-compose-test.txt)" = streaming-backup-test'
 
       - name: Stop Docker Compose services
         if: always()

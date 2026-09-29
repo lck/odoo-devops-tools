@@ -59,7 +59,7 @@ jobs:
       - name: Provision Odoo workspace in workspace root folder
         working-directory: ./odoo-workspace
         run: |
-          uv run odt-env https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-with-oca-addons.ini \
+          uv run odoo-compose https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo18-with-oca-addons.ini \
             --sync-all \
             --create-venv
 
