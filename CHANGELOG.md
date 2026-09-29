@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.22.0 (2026-09-29)
+
+### Added
+
+* Add Odoo 20.0 support.
+
 ## 1.21.4 (2026-09-27)
 
 ### Changed

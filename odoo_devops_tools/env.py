@@ -110,6 +110,7 @@ _ODOO_VENV_SETTINGS = {
     17: ("3.10", "3.12", ["setuptools<82"], ["setuptools<82"]),
     18: ("3.10", "3.12", ["setuptools<82"], ["setuptools<82"]),
     19: ("3.10", "3.12", [], []),
+    20: ("3.12", "3.14", [], []),
 }
 
 _SENSITIVE_KEYS = ("password", "passwd", "secret", "token", "api_key", "apikey", "private_key")
@@ -2808,6 +2809,8 @@ def render_docker_odoo_conf(
 
     lines.append(f"addons_path = {addons_path}")
     lines.append("data_dir = /var/lib/odoo")
+    if _parse_odoo_version(cfg.odoo.version) >= 20:
+        lines.append("http_interface = 0.0.0.0")
 
     # Database connection settings from [config] are runtime-specific and are
     # never copied into generated Docker configs.
