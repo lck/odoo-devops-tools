@@ -210,6 +210,7 @@ On Unix-like systems:
 docker/local/scripts/
 ├── backup-db.sh
 ├── restore-db.sh
+├── neutralize-db.sh
 ├── backup-filestore.sh
 ├── restore-filestore.sh
 ├── restic.sh
@@ -253,6 +254,21 @@ Restore a database dump with `pg_restore`:
 ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
+Database restores use copy semantics by default, matching `click-odoo-restoredb --copy`.
+After `pg_restore`, Odoo database identity parameters are regenerated so the restored
+database can coexist with the source database:
+
+```bash
+./docker/local/scripts/restore-db.sh --copy ./odoo-backups/pre-upgrade.dump
+```
+
+Use `--move` only when the restored database replaces the original database and its
+identity must be preserved:
+
+```bash
+./docker/local/scripts/restore-db.sh --move ./odoo-backups/pre-upgrade.dump
+```
+
 If the target database already exists, the restore is rejected unless `--force` is used. With `--force`, the existing database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
 
 ```bash
@@ -267,7 +283,37 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.3.3. Filestore backup
+#### 1.3.3. Database neutralization
+
+For development or test databases restored from production, run the generated neutralization helper explicitly:
+
+```bash
+./docker/local/scripts/neutralize-db.sh
+```
+
+Override the target database with `ODOO_DB_NAME` when needed:
+
+```bash
+ODOO_DB_NAME=odoo_test ./docker/local/scripts/neutralize-db.sh
+```
+
+For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization mechanism. This applies the `neutralize.sql` scripts provided by installed Odoo modules, disabling or redirecting production-side effects such as scheduled actions, outgoing email, and supported external integrations.
+
+For Odoo 13.0 through 15.0, where the native neutralization framework is not available, the helper applies a deliberately minimal compatibility neutralization through the Odoo ORM: it disables scheduled actions, configured outgoing mail servers, and configured incoming mail servers.
+
+Neutralization is intentionally separate from database restore. A typical test/staging restore workflow is therefore:
+
+```bash
+docker compose stop odoo
+./docker/local/scripts/restore-db.sh --copy ./odoo-backups/production.dump
+./docker/local/scripts/restore-filestore.sh ./odoo-backups/production-filestore.tar.gz
+./docker/local/scripts/neutralize-db.sh
+docker compose up -d odoo
+```
+
+`--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
+
+#### 1.3.4. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -298,7 +344,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.3.4. Filestore restore
+#### 1.3.5. Filestore restore
 
 Restore a filestore archive:
 
@@ -322,7 +368,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.3.5. Restic filestore backup
+#### 1.3.6. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -370,7 +416,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.3.6. Restic filestore restore
+#### 1.3.7. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 

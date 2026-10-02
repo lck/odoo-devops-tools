@@ -38,6 +38,7 @@ jobs:
           $required = @(
             "backup-db.bat",
             "restore-db.bat",
+            "neutralize-db.bat",
             "backup-filestore.bat",
             "restore-filestore.bat",
             "restic.bat",
@@ -65,8 +66,32 @@ jobs:
           }
 
           $batHelpers = Get-ChildItem -LiteralPath $scriptsDir -Filter "*.bat" -File
-          if ($batHelpers.Count -ne 7) {
-            throw "Expected exactly 7 .bat helpers, got $($batHelpers.Count)."
+          if ($batHelpers.Count -ne 8) {
+            throw "Expected exactly 8 .bat helpers, got $($batHelpers.Count)."
+          }
+
+      - name: Generate legacy neutralization helper
+        run: |
+          New-Item -ItemType Directory -Force -Path odoo-workspace-legacy | Out-Null
+          Push-Location odoo-workspace-legacy
+          try {
+            uv run odoo-compose --init-project --set odoo:version=15.0
+          }
+          finally {
+            Pop-Location
+          }
+
+          $legacyHelper = "odoo-workspace-legacy\docker\local\scripts\neutralize-db.bat"
+          if (-not (Test-Path -LiteralPath $legacyHelper -PathType Leaf)) {
+            throw "Legacy neutralization helper not found: $legacyHelper"
+          }
+
+          $legacyContent = Get-Content -LiteralPath $legacyHelper -Raw
+          if ($legacyContent -notlike "*Using legacy minimal neutralization for Odoo 15.*") {
+            throw "Legacy neutralization mode was not generated."
+          }
+          if ($legacyContent -notlike "*--entrypoint click-odoo odoo*") {
+            throw "Legacy neutralization helper does not use click-odoo."
           }
 
       - name: Install mock Docker command
@@ -205,11 +230,14 @@ jobs:
                 throw "Forced database restore did not call '$expected':`n$log"
               }
             }
+            if ($log -notlike "*--entrypoint click-odoo odoo*") {
+              throw "Default database restore did not apply --copy semantics:`n$log"
+            }
 
             $env:ODT_MOCK_DB_EXISTS = "0"
             Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
 
-            & .\docker\local\scripts\restore-db.bat .\odoo-backups\test.dump
+            & .\docker\local\scripts\restore-db.bat --move .\odoo-backups\test.dump
             if ($LASTEXITCODE -ne 0) {
               throw "Restore into a missing database should not require --force."
             }
@@ -223,11 +251,63 @@ jobs:
                 throw "Restore into a missing database did not call '$expected':`n$log"
               }
             }
+            if ($log -like "*--entrypoint click-odoo*") {
+              throw "--move unexpectedly reset the database identity:`n$log"
+            }
           }
           finally {
             Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_FILESTORE_EXISTS -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+          }
+
+      - name: Test database neutralization helpers
+        run: |
+          $env:ODOO_DB_NAME = "odoo_restore"
+          $env:ODT_MOCK_DB_EXISTS = "1"
+          $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "neutralize-db-docker.log"
+
+          try {
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            Push-Location odoo-workspace
+            try {
+              & .\docker\local\scripts\neutralize-db.bat
+              if ($LASTEXITCODE -ne 0) {
+                throw "Native database neutralization helper failed."
+              }
+            }
+            finally {
+              Pop-Location
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*--entrypoint odoo odoo neutralize*") {
+              throw "Odoo 18 helper did not use native neutralization:`n$log"
+            }
+
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            Push-Location odoo-workspace-legacy
+            try {
+              & .\docker\local\scripts\neutralize-db.bat
+              if ($LASTEXITCODE -ne 0) {
+                throw "Legacy database neutralization helper failed."
+              }
+            }
+            finally {
+              Pop-Location
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*--entrypoint click-odoo odoo*") {
+              throw "Odoo 15 helper did not use legacy click-odoo neutralization:`n$log"
+            }
+          }
+          finally {
+            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
           }
 

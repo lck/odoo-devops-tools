@@ -38,6 +38,7 @@ jobs:
           test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
           test -x odoo-workspace/docker/local/scripts/backup-db.sh
           test -x odoo-workspace/docker/local/scripts/restore-db.sh
+          test -x odoo-workspace/docker/local/scripts/neutralize-db.sh
           test -x odoo-workspace/docker/local/scripts/backup-filestore.sh
           test -x odoo-workspace/docker/local/scripts/restore-filestore.sh
           test -x odoo-workspace/docker/local/scripts/restic.sh
@@ -58,6 +59,16 @@ jobs:
 
           cd odoo-workspace
           docker compose config --quiet
+
+      - name: Check legacy neutralization helper generation
+        run: |
+          mkdir -p odoo-workspace-legacy
+          cd odoo-workspace-legacy
+          uv run odoo-compose --init-project --set odoo:version=15.0
+          test -x docker/local/scripts/neutralize-db.sh
+          grep -Fq "Using legacy minimal neutralization for Odoo 15." docker/local/scripts/neutralize-db.sh
+          grep -Fq -- "--entrypoint click-odoo odoo" docker/local/scripts/neutralize-db.sh
+          grep -Fq '"ir.cron", "ir.mail_server", "fetchmail.server"' docker/local/scripts/neutralize-db.sh
 
       - name: Build local Docker image with Compose
         working-directory: ./odoo-workspace
@@ -115,10 +126,36 @@ jobs:
       - name: Restore database and filestore independently
         working-directory: ./odoo-workspace
         run: |
+          source_uuid="$(docker compose exec -T db psql -U odoo -d odoo -tAc \
+            "SELECT value FROM ir_config_parameter WHERE key = 'database.uuid';")"
+          test -n "${source_uuid}"
+
           ODOO_DB_NAME=odoo_restore \
             ./docker/local/scripts/restore-db.sh ./odoo-backups/test.dump
+          ODOO_DB_NAME=odoo_move \
+            ./docker/local/scripts/restore-db.sh --move ./odoo-backups/test.dump
           ODOO_DB_NAME=odoo_restore \
             ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz
+
+          copy_uuid="$(docker compose exec -T db psql -U odoo -d odoo_restore -tAc \
+            "SELECT value FROM ir_config_parameter WHERE key = 'database.uuid';")"
+          move_uuid="$(docker compose exec -T db psql -U odoo -d odoo_move -tAc \
+            "SELECT value FROM ir_config_parameter WHERE key = 'database.uuid';")"
+
+          test -n "${copy_uuid}"
+          test "${copy_uuid}" != "${source_uuid}"
+          test "${move_uuid}" = "${source_uuid}"
+
+      - name: Neutralize restored database
+        working-directory: ./odoo-workspace
+        run: |
+          ODOO_DB_NAME=odoo_restore \
+            ./docker/local/scripts/neutralize-db.sh \
+            2>&1 | tee neutralize-db.log
+
+          grep -Fq "INFO: Using native Odoo neutralization for Odoo 18." neutralize-db.log
+          grep -Fq "Neutralization finished" neutralize-db.log
+          grep -Fq "INFO: Database neutralization completed: odoo_restore" neutralize-db.log
 
       - name: Require force when restoring existing database or filestore
         working-directory: ./odoo-workspace

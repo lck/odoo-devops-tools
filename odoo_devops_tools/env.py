@@ -3024,16 +3024,23 @@ ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 FORCE=false
+RESTORE_MODE=copy
 SOURCE=""
 
 usage() {{
-  echo "Usage: $(basename "$0") [--force] BACKUP.dump" >&2
+  echo "Usage: $(basename "$0") [--force] [--copy|--move] BACKUP.dump" >&2
 }}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force)
       FORCE=true
+      ;;
+    --copy)
+      RESTORE_MODE=copy
+      ;;
+    --move)
+      RESTORE_MODE=move
       ;;
     -*)
       echo "ERROR: unknown option: $1" >&2
@@ -3086,9 +3093,84 @@ docker compose exec -T db \
   pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
   < "${{SOURCE}}"
 
+if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
+  echo "INFO: Resetting copied Odoo database identity for '${{DB_NAME}}'."
+  printf '%s\n' 'env["ir.config_parameter"].init(force=True)' | \
+    docker compose run --rm --no-deps -T \
+      --entrypoint click-odoo odoo \
+      -c /etc/odoo/odoo.conf \
+      -d "${{DB_NAME}}" \
+      --log-level=error
+
+  docker compose exec -T db \
+    psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" <<'SQL'
+DELETE FROM ir_config_parameter
+WHERE key = 'database.enterprise_code';
+
+UPDATE ir_config_parameter
+SET value = 'copy'
+WHERE key = 'database.expiration_reason'
+  AND value != 'demo';
+
+UPDATE ir_config_parameter
+SET value = CURRENT_DATE + INTERVAL '2 month'
+WHERE key = 'database.expiration_date';
+SQL
+else
+  echo "INFO: Preserving Odoo database identity (--move)."
+fi
+
 echo "INFO: Database restore completed: ${{DB_NAME}}"
 """
     return _write_docker_local_script(layout, "restore-db", content)
+
+
+def write_docker_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
+    if odoo_major_version >= 16:
+        neutralize_command = rf"""
+echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
+docker compose run --rm --no-deps -T \
+  --entrypoint odoo odoo \
+  neutralize \
+  -c /etc/odoo/odoo.conf \
+  -d "${{DB_NAME}}"
+"""
+    else:
+        neutralize_command = rf"""
+echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
+printf '%s\n' \
+  '[(model.search([("active", "=", True)]).write({{"active": False}})) for model_name in ("ir.cron", "ir.mail_server", "fetchmail.server") if model_name in env for model in (env[model_name],) if "active" in model._fields]; env.cr.commit()' | \
+  docker compose run --rm --no-deps -T \
+    --entrypoint click-odoo odoo \
+    -c /etc/odoo/odoo.conf \
+    -d "${{DB_NAME}}" \
+    --log-level=error
+"""
+
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+
+cd "${{ROOT_DIR}}"
+
+DATABASES="$(docker compose exec -T db \
+  psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
+if ! grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
+  echo "ERROR: target database '${{DB_NAME}}' does not exist." >&2
+  exit 1
+fi
+
+echo "INFO: Neutralizing Odoo database '${{DB_NAME}}'."
+{neutralize_command}
+echo "INFO: Database neutralization completed: ${{DB_NAME}}"
+"""
+    return _write_docker_local_script(layout, "neutralize-db", content)
 
 
 def write_docker_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
@@ -3446,6 +3528,7 @@ if defined ODOO_DB_NAME (
   set "DB_NAME=%DEFAULT_DB_NAME%"
 )
 set "FORCE=false"
+set "RESTORE_MODE=copy"
 set "SOURCE="
 
 goto parse_args
@@ -3453,6 +3536,8 @@ goto parse_args
 :parse_args
 if "%~1"=="" goto args_done
 if /i "%~1"=="--force" goto force_arg
+if /i "%~1"=="--copy" goto copy_arg
+if /i "%~1"=="--move" goto move_arg
 if "%~1:~0,1%"=="-" goto unknown_option
 if defined SOURCE goto usage_error
 set "SOURCE=%~1"
@@ -3461,6 +3546,16 @@ goto parse_args
 
 :force_arg
 set "FORCE=true"
+shift
+goto parse_args
+
+:copy_arg
+set "RESTORE_MODE=copy"
+shift
+goto parse_args
+
+:move_arg
+set "RESTORE_MODE=move"
 shift
 goto parse_args
 
@@ -3495,6 +3590,18 @@ if errorlevel 1 exit /b 1
 docker compose exec -T db pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "%DB_NAME%" < "%SOURCE%"
 if errorlevel 1 exit /b 1
 
+if /i "%RESTORE_MODE%"=="move" goto restore_done
+
+echo INFO: Resetting copied Odoo database identity for '%DB_NAME%'.
+echo env["ir.config_parameter"].init(force=True^) | docker compose run --rm --no-deps -T --entrypoint click-odoo odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level=error
+if errorlevel 1 exit /b 1
+
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code'; UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo'; UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';"
+if errorlevel 1 exit /b 1
+goto restore_done
+
+:restore_done
+if /i "%RESTORE_MODE%"=="move" echo INFO: Preserving Odoo database identity (--move).
 echo INFO: Database restore completed: %DB_NAME%
 endlocal
 exit /b 0
@@ -3504,10 +3611,58 @@ echo ERROR: unknown option: %~1
 goto usage_error
 
 :usage_error
-echo Usage: %~nx0 [--force] BACKUP.dump
+echo Usage: %~nx0 [--force] [--copy^|--move] BACKUP.dump
 exit /b 2
 """
     return _write_docker_local_script(layout, "restore-db", content, ext="bat")
+
+
+def write_docker_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
+    if odoo_major_version >= 16:
+        neutralize_command = rf"""echo INFO: Using native Odoo neutralization for Odoo {odoo_major_version}.
+docker compose run --rm --no-deps -T --entrypoint odoo odoo neutralize -c /etc/odoo/odoo.conf -d "%DB_NAME%"
+if errorlevel 1 exit /b 1
+"""
+    else:
+        neutralize_command = rf"""echo INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}.
+echo [(model.search([("active", "=", True)]).write({{"active": False}})) for model_name in ("ir.cron", "ir.mail_server", "fetchmail.server") if model_name in env for model in (env[model_name],) if "active" in model._fields]; env.cr.commit() | docker compose run --rm --no-deps -T --entrypoint click-odoo odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level=error
+if errorlevel 1 exit /b 1
+"""
+
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "DB_EXISTS=false"
+for /f "usebackq delims=" %%D in (`docker compose exec -T db psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database"`) do (
+  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
+)
+
+if not "%DB_EXISTS%"=="true" (
+  echo ERROR: target database '%DB_NAME%' does not exist.
+  exit /b 1
+)
+
+echo INFO: Neutralizing Odoo database '%DB_NAME%'.
+{neutralize_command}
+echo INFO: Database neutralization completed: %DB_NAME%
+endlocal
+exit /b 0
+"""
+    return _write_docker_local_script(layout, "neutralize-db", content, ext="bat")
 
 
 def write_docker_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
@@ -3874,6 +4029,7 @@ def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, 
         return {
             "backup_db": write_docker_backup_db_bat(layout, cfg),
             "restore_db": write_docker_restore_db_bat(layout, cfg),
+            "neutralize_db": write_docker_neutralize_db_bat(layout, cfg),
             "backup_filestore": write_docker_backup_filestore_bat(layout, cfg),
             "restore_filestore": write_docker_restore_filestore_bat(layout, cfg),
             "restic": write_docker_restic_bat(layout),
@@ -3884,6 +4040,7 @@ def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, 
     return {
         "backup_db": write_docker_backup_db_sh(layout, cfg),
         "restore_db": write_docker_restore_db_sh(layout, cfg),
+        "neutralize_db": write_docker_neutralize_db_sh(layout, cfg),
         "backup_filestore": write_docker_backup_filestore_sh(layout, cfg),
         "restore_filestore": write_docker_restore_filestore_sh(layout, cfg),
         "restic": write_docker_restic_sh(layout),

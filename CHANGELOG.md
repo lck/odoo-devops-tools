@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.23.1 (2026-10-??)
+
+### Added
+
+* Add `--copy` / `--move` semantics to generated Docker database restore helpers.
+* Add Docker database neutralization helpers.
+
 ## 1.23.0 (2026-09-29)
 
 ### Added
