@@ -95,14 +95,21 @@ Create a new workspace:
 odoo-compose --init ./odoo19
 ```
 
-Start the Docker Compose environment:
+This creates `./odoo19/odoo-project.ini` with this initial content:
+
+```ini
+[odoo]
+version = 19.0
+```
+
+Then start the Docker Compose environment:
 
 ```bash
 cd ./odoo19
-docker compose up -d
+docker compose up -d --build
 ```
 
-Initialize the Odoo database:
+Optionally initialize the Odoo database from the command line instead of through the web interface:
 
 ```bash
 docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
@@ -112,15 +119,6 @@ docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
 ```
 
 Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
-
-The Docker workflow uses the following `odoo-project.ini` configuration:
-
-```ini
-[odoo]
-version = 19.0
-```
-
-Edit this file when you want to add extra addons, change configuration values, pin repositories, or adjust Python dependency handling.
 
 ### 1.1. Adding extra addons
 
@@ -151,7 +149,7 @@ Sync the configured addon repositories and refresh the generated Docker workflow
 
 ```bash
 odoo-compose --sync-addons
-docker compose up --build -d
+docker compose up -d --build
 ```
 
 The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/` and bind-mounted into the Odoo container.
@@ -195,7 +193,7 @@ Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
 odoo-compose --sync-all
-docker compose up --build -d
+docker compose up -d --build
 ```
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
@@ -496,16 +494,7 @@ odoo-compose --init ./odoo19 --sync-all --create-venv \
 > **Note**
 > Make sure PostgreSQL is running at the configured host and the configured database user exists.
 
-Start Odoo with the generated script:
-
-```bash
-cd ./odoo19
-./odoo-scripts/run.sh
-```
-
-Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
-
-The native workflow uses the following `odoo-project.ini` configuration, with PostgreSQL connection settings added to `[config]`:
+This creates `./odoo19/odoo-project.ini` with this initial content:
 
 ```ini
 [odoo]
@@ -518,7 +507,14 @@ db_user = odoo
 db_password = odoo
 ```
 
-Edit this file when you want to add extra addons, change configuration values, pin repositories, or adjust Python dependency handling.
+Then start Odoo with the generated script:
+
+```bash
+cd ./odoo19
+./odoo-scripts/run.sh
+```
+
+Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
 
 ### 2.1. Adding extra addons
 
