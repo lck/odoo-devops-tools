@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.3 (2026-10-03)
+
+### Documentation
+
+- Update Usage.
+
 ## 1.23.2 (2026-10-03)
 
 ### Added
