@@ -6247,11 +6247,11 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
 
   Creating a workspace:
-    odoo-compose --init-project ./odoo18-workspace --sync-all --create-venv \\
+    odoo-compose --init ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0
 
   Creating a workspace with explicit database settings:
-    odoo-compose --init-project ./odoo18-workspace --sync-all --create-venv \\
+    odoo-compose --init ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0 \\
       --set config:db_host=127.0.0.1 \\
       --set config:db_name=odoo \\
@@ -6268,7 +6268,7 @@ Examples:
     odoo-compose git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
 
   Preparing local Docker development:
-    odoo-compose --init-project ./odoo19 --sync-addons
+    odoo-compose --init ./odoo19 --sync-addons
 
   Generating a deploy Docker build context:
     odoo-compose /path/to/odoo-project.ini --sync-addons --create-docker-deploy
@@ -6336,7 +6336,9 @@ Examples:
     )
 
     parser.add_argument(
+        "--init",
         "--init-project",
+        dest="init_project",
         nargs="?",
         const="",
         default=None,
@@ -6345,7 +6347,7 @@ Examples:
             "Create ROOT/odoo-project.ini from the bundled default template if it does not already exist. "
             "An optional ROOT can be supplied directly as shorthand for --root. "
             "If ROOT is supplied here, --root must not also be used. "
-            "Without --init-project, an existing ROOT/odoo-project.ini is required."
+            "Without --init, an existing ROOT/odoo-project.ini is required."
         ),
     )
 
@@ -6592,12 +6594,12 @@ def main() -> None:
 
     if init_project_root_raw and args.root:
         parser.error(
-            "workspace ROOT was specified both as --init-project ROOT and --root; "
+            "workspace ROOT was specified both as --init ROOT and --root; "
             "use only one of them."
         )
 
     if bool(getattr(args, 'show_last_run', False)) and init_project:
-        parser.error("--init-project cannot be used together with --show-last-run.")
+        parser.error("--init cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
         parser.error("--create-from-bundle cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
@@ -6656,7 +6658,7 @@ def main() -> None:
         if getattr(args, 'include_inis', None):
             conflicting_options.append("--include")
         if init_project:
-            conflicting_options.append("--init-project")
+            conflicting_options.append("--init")
         if args.all or args.odoo or args.addons:
             conflicting_options.append("--sync-*")
         if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
@@ -6737,14 +6739,14 @@ def main() -> None:
     project_ini_status: Optional[str] = None
 
     if init_project and not implicit_ini:
-        parser.error("--init-project can only be used when INI is omitted and no -i/--include is provided.")
+        parser.error("--init can only be used when INI is omitted and no -i/--include is provided.")
 
     if implicit_ini:
         if init_project_root_raw:
             root_override = _validate_root_override(
                 parser,
                 init_project_root_raw,
-                option_name="--init-project ROOT",
+                option_name="--init ROOT",
             )
         elif args.root:
             root_override = _validate_root_override(parser, args.root)
@@ -6781,7 +6783,7 @@ def main() -> None:
                     project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                     _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
             elif not ini_path.is_file():
-                suggested_cmd = ["odoo-compose", "--init-project"]
+                suggested_cmd = ["odoo-compose", "--init"]
                 if args.root:
                     suggested_cmd.append(str(root_override))
                 parser.error(

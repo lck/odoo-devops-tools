@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.2 (2026-10-03)
+
+### Added
+
+* Add `--init` as the preferred project initialization option while keeping `--init-project` as a compatibility alias.
+
 ## 1.23.1 (2026-10-03)
 
 ### Added

@@ -27,7 +27,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init-project --sync-addons --set odoo:version=18.0
+          uv run odoo-compose --init --sync-addons --set odoo:version=18.0
 
       - name: Check generated local Docker artifacts
         run: |
@@ -64,7 +64,7 @@ jobs:
         run: |
           mkdir -p odoo-workspace-legacy
           cd odoo-workspace-legacy
-          uv run odoo-compose --init-project --set odoo:version=15.0
+          uv run odoo-compose --init --set odoo:version=15.0
           test -x docker/local/scripts/neutralize-db.sh
           grep -Fq "Using legacy minimal neutralization for Odoo 15." docker/local/scripts/neutralize-db.sh
           grep -Fq -- "--entrypoint click-odoo odoo" docker/local/scripts/neutralize-db.sh

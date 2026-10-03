@@ -31,7 +31,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init-project --set odoo:version=18.0
+          uv run odoo-compose --init --set odoo:version=18.0
 
       - name: Check generated Windows local Docker helpers
         run: |
@@ -75,7 +75,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path odoo-workspace-legacy | Out-Null
           Push-Location odoo-workspace-legacy
           try {
-            uv run odoo-compose --init-project --set odoo:version=15.0
+            uv run odoo-compose --init --set odoo:version=15.0
           }
           finally {
             Pop-Location

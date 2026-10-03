@@ -24,7 +24,7 @@ jobs:
       - name: Verify --set rejects unsupported Docker options
         run: |
           set +e
-          output="$(uv run odoo-compose --init-project ./invalid-workspace \
+          output="$(uv run odoo-compose --init ./invalid-workspace \
             --set docker:not_supported=value 2>&1)"
           status=$?
           set -e
@@ -39,7 +39,7 @@ jobs:
       - name: Generate Odoo 19 workspace Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init-project --sync-all \
+          uv run odoo-compose --init --sync-all \
             --set odoo:version=19.0 \
             --set 'virtualenv:constraints=packaging<1000' \
             --set docker:odoo_source=workspace
@@ -140,7 +140,7 @@ jobs:
 
       - name: Verify explicit requirements override matching constraints
         run: |
-          uv run odoo-compose --init-project ./constraints-workspace \
+          uv run odoo-compose --init ./constraints-workspace \
             --set odoo:version=19.0 \
             --set 'virtualenv:requirements=packaging>=1' \
             --set 'virtualenv:constraints=packaging<1'
