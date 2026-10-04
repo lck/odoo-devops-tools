@@ -36,6 +36,8 @@ jobs:
           test -f odoo-workspace/docker/local/.dockerignore
           test -f odoo-workspace/docker/local/configs/odoo.conf
           test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
+          test -x odoo-workspace/docker/local/scripts/shell.sh
+          test -x odoo-workspace/docker/local/scripts/update.sh
           test -x odoo-workspace/docker/local/scripts/backup-db.sh
           test -x odoo-workspace/docker/local/scripts/restore-db.sh
           test -x odoo-workspace/docker/local/scripts/neutralize-db.sh
@@ -92,6 +94,15 @@ jobs:
             -i fleet \
             --without-demo=all \
             --stop-after-init
+
+      - name: Test Docker shell and update helpers
+        working-directory: ./odoo-workspace
+        run: |
+          printf 'print(env.cr.dbname)\n' | ./docker/local/scripts/shell.sh > shell-output.log
+          grep -Fq "odoo" shell-output.log
+
+          ./docker/local/scripts/update.sh --help > update-help.log 2>&1
+          grep -Fq "Usage:" update-help.log
 
       - name: Verify fleet addon installed
         working-directory: ./odoo-workspace

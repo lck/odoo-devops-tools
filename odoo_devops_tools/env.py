@@ -3125,6 +3125,52 @@ echo "INFO: Database restore completed: ${{DB_NAME}}"
     return _write_docker_local_script(layout, "restore-db", content)
 
 
+def write_docker_shell_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+
+cd "${{ROOT_DIR}}"
+
+echo "INFO: Opening Odoo shell for database '${{DB_NAME}}'."
+exec docker compose run --rm --no-deps \
+  --entrypoint odoo odoo \
+  shell \
+  -c /etc/odoo/odoo.conf \
+  -d "${{DB_NAME}}" \
+  "$@"
+"""
+    return _write_docker_local_script(layout, "shell", content)
+
+
+def write_docker_update_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+DEFAULT_DB_NAME={default_db_name}
+DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+
+cd "${{ROOT_DIR}}"
+
+echo "INFO: Updating Odoo addons for database '${{DB_NAME}}'. Passing through any extra arguments."
+exec docker compose run --rm --no-deps -T \
+  --entrypoint click-odoo-update odoo \
+  -c /etc/odoo/odoo.conf \
+  -d "${{DB_NAME}}" \
+  --log-level debug \
+  "$@"
+"""
+    return _write_docker_local_script(layout, "update", content)
+
+
 def write_docker_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     default_db_name = shlex.quote(_docker_default_db_name(cfg))
     odoo_major_version = _parse_odoo_version(cfg.odoo.version)
@@ -3617,6 +3663,54 @@ exit /b 2
     return _write_docker_local_script(layout, "restore-db", content, ext="bat")
 
 
+def write_docker_shell_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+echo INFO: Opening Odoo shell for database '%DB_NAME%'.
+docker compose run --rm --no-deps --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
+exit /b %ERRORLEVEL%
+"""
+    return _write_docker_local_script(layout, "shell", content, ext="bat")
+
+
+def write_docker_update_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
+set "DEFAULT_DB_NAME={default_db_name}"
+if defined ODOO_DB_NAME (
+  set "DB_NAME=%ODOO_DB_NAME%"
+) else (
+  set "DB_NAME=%DEFAULT_DB_NAME%"
+)
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+echo INFO: Updating Odoo addons for database '%DB_NAME%'. Passing through any extra arguments.
+docker compose run --rm --no-deps -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level debug %*
+exit /b %ERRORLEVEL%
+"""
+    return _write_docker_local_script(layout, "update", content, ext="bat")
+
+
 def write_docker_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
     default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     odoo_major_version = _parse_odoo_version(cfg.odoo.version)
@@ -4027,6 +4121,8 @@ exit /b 2
 def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, Path]:
     if sys.platform.startswith("win"):
         return {
+            "shell": write_docker_shell_bat(layout, cfg),
+            "update": write_docker_update_bat(layout, cfg),
             "backup_db": write_docker_backup_db_bat(layout, cfg),
             "restore_db": write_docker_restore_db_bat(layout, cfg),
             "neutralize_db": write_docker_neutralize_db_bat(layout, cfg),
@@ -4038,6 +4134,8 @@ def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, 
         }
 
     return {
+        "shell": write_docker_shell_sh(layout, cfg),
+        "update": write_docker_update_sh(layout, cfg),
         "backup_db": write_docker_backup_db_sh(layout, cfg),
         "restore_db": write_docker_restore_db_sh(layout, cfg),
         "neutralize_db": write_docker_neutralize_db_sh(layout, cfg),

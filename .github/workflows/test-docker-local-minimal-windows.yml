@@ -36,6 +36,8 @@ jobs:
       - name: Check generated Windows local Docker helpers
         run: |
           $required = @(
+            "shell.bat",
+            "update.bat",
             "backup-db.bat",
             "restore-db.bat",
             "neutralize-db.bat",
@@ -66,8 +68,8 @@ jobs:
           }
 
           $batHelpers = Get-ChildItem -LiteralPath $scriptsDir -Filter "*.bat" -File
-          if ($batHelpers.Count -ne 8) {
-            throw "Expected exactly 8 .bat helpers, got $($batHelpers.Count)."
+          if ($batHelpers.Count -ne 10) {
+            throw "Expected exactly 10 .bat helpers, got $($batHelpers.Count)."
           }
 
       - name: Generate legacy neutralization helper
@@ -182,6 +184,38 @@ jobs:
           }
 
           $mockBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Test Docker shell and update helpers
+        working-directory: ./odoo-workspace
+        run: |
+          $env:ODOO_DB_NAME = "odoo_test"
+          $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "shell-update-docker.log"
+
+          try {
+            Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+
+            & .\docker\local\scripts\shell.bat --no-http
+            if ($LASTEXITCODE -ne 0) {
+              throw "Docker shell helper failed."
+            }
+
+            & .\docker\local\scripts\update.bat --update-all
+            if ($LASTEXITCODE -ne 0) {
+              throw "Docker update helper failed."
+            }
+
+            $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
+            if ($log -notlike "*--entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d odoo_test --no-http*") {
+              throw "Docker shell helper invocation is incorrect:`n$log"
+            }
+            if ($log -notlike "*--entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d odoo_test --log-level debug --update-all*") {
+              throw "Docker update helper invocation is incorrect:`n$log"
+            }
+          }
+          finally {
+            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
+          }
 
       - name: Prepare mock restore inputs
         working-directory: ./odoo-workspace

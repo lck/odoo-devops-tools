@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.4 (2026-10-??)
+
+### Added
+
+* Add Docker shell and database update helpers.
+
 ## 1.23.3 (2026-10-03)
 
 ### Documentation

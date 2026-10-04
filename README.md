@@ -165,10 +165,10 @@ docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
   --stop-after-init
 ```
 
-For subsequent addon updates, run `click-odoo-update` inside the Odoo container:
+For subsequent addon updates, use the generated Docker update helper:
 
 ```bash
-docker compose exec odoo click-odoo-update -c /etc/odoo/odoo.conf -d odoo
+./docker/local/scripts/update.sh
 ```
 
 ### 1.2. Running Odoo from workspace source
@@ -198,14 +198,16 @@ docker compose up -d --build
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
 
-### 1.3. Backup and restore
+### 1.3. Script reference
 
-The Docker workflow generates platform-specific helpers under `ROOT/docker/local/scripts/` for backing up and restoring the PostgreSQL database and Odoo filestore independently. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
+The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
 
 On Unix-like systems:
 
 ```text
 docker/local/scripts/
+├── shell.sh
+├── update.sh
 ├── backup-db.sh
 ├── restore-db.sh
 ├── neutralize-db.sh
@@ -216,15 +218,41 @@ docker/local/scripts/
 └── restore-filestore-restic.sh
 ```
 
-On Windows the same helper names are generated with the `.bat` extension instead. The helpers stream backup data directly between the Docker containers and files on the host. No backup directory is mounted into the containers, and no intermediate backup file is created inside a container. The examples below use the Unix `.sh` form.
+The examples below use the Unix `.sh` form.
 
-The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it for any command with `ODOO_DB_NAME`:
+#### 1.3.1. shell
+
+Opens an Odoo shell for the configured database:
 
 ```bash
-ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
+./docker/local/scripts/shell.sh
 ```
 
-#### 1.3.1. Database backup
+The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it with `ODOO_DB_NAME`:
+
+```bash
+ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
+```
+
+Any extra arguments are passed through to the underlying Odoo shell command.
+
+#### 1.3.2. update
+
+Updates installed addons using `click-odoo-update`:
+
+```bash
+./docker/local/scripts/update.sh
+```
+
+The default database name follows the same `ODOO_DB_NAME` convention as the shell and database helpers.
+
+Any extra arguments are passed through to `click-odoo-update`:
+
+```bash
+./docker/local/scripts/update.sh --update-all
+```
+
+#### 1.3.3. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -244,7 +272,13 @@ Pass an output path explicitly when needed:
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.3.2. Database restore
+The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it for any command with `ODOO_DB_NAME`:
+
+```bash
+ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
+```
+
+#### 1.3.4. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -281,7 +315,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.3.3. Database neutralization
+#### 1.3.5. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
@@ -311,7 +345,7 @@ docker compose up -d odoo
 
 `--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
 
-#### 1.3.4. Filestore backup
+#### 1.3.6. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -342,7 +376,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.3.5. Filestore restore
+#### 1.3.7. Filestore restore
 
 Restore a filestore archive:
 
@@ -366,19 +400,9 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.3.6. Restic filestore backup
+#### 1.3.8. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
-
-The Docker workflow generates platform-specific restic helpers: `.sh` on Unix-like systems and `.bat` on Windows.
-
-```text
-docker/local/scripts/restic.sh
-docker/local/scripts/backup-filestore-restic.sh
-docker/local/scripts/restore-filestore-restic.sh
-```
-
-The corresponding Windows helpers use the same names with the `.bat` extension. The `restic` helper runs the `restic` binary from the generated Odoo image against the same `odoo-data` volume. The restic cache is kept under `/var/lib/odoo/.cache/restic`, outside the filestore directory, so it persists between one-off containers without being included in filestore backups.
 
 Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the Docker host, use an absolute path. The wrapper automatically bind-mounts the repository into the one-off container; Windows drive paths such as `C:\backups\odoo` are supported by `restic.bat`:
 
@@ -414,7 +438,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.3.7. Restic filestore restore
+#### 1.3.9. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
