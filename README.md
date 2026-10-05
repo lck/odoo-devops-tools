@@ -45,7 +45,7 @@ ROOT/
 ## Key features
 
 * **Reproducible workspaces** — define and recreate an Odoo workspace from a single INI configuration.
-* **Docker workflows** — generate local Docker Compose environments and self-contained deploy build contexts.
+* **Docker workflows** — generate local Docker Compose environments with optional [Mailpit](https://mailpit.axllent.org/) mail testing and self-contained deploy build contexts.
 * **Portable workflows** — create verified bundles with sources and Python wheels for reproducible or offline use.
 * **Python dependency management** — manage Python versions, virtual environments and requirements.
 * **Composable configuration** — combine INI layers, variables, and CLI overrides.
@@ -192,7 +192,29 @@ docker compose up -d --build
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
 
-### 1.3. Script reference
+### 1.3. Mail testing with Mailpit
+
+Enable Mailpit in the local Docker workflow when you need to inspect or test email without sending it to a real SMTP server:
+
+```bash
+odoo-compose --set docker:mailpit=true
+docker compose up -d --build
+```
+
+Mailpit is available at http://localhost:8025 by default. When running multiple workspaces, override the host web UI port, for example:
+
+```bash
+odoo-compose --set docker:mailpit=true --set docker:mailpit_webui_port=8026
+docker compose up -d --build
+```
+
+The generated local Odoo configuration sends outgoing email to `mailpit:1025`. When Mailpit is enabled, local Docker SMTP connection settings (`smtp_server`, `smtp_port`, `smtp_ssl`, `smtp_user`, and `smtp_password`) are intentionally overridden; the deploy configuration keeps the values from `[config]` unchanged.
+
+Mailpit also exposes POP3 inside the Compose network at `mailpit:1110`, using `odoo` / `odoo` credentials. This can be used to test Odoo incoming mail and fetchmail flows by configuring an Odoo Incoming Mail Server with POP3, server `mailpit`, port `1110`, and SSL/TLS disabled.
+
+Mailpit is generated only for the local Docker workflow and is not included in the deploy build context.
+
+### 1.4. Script reference
 
 The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
 
@@ -215,7 +237,7 @@ docker/local/scripts/
 
 The examples below use the Unix `.sh` form.
 
-#### 1.3.1. run
+#### 1.4.1. run
 
 Runs Odoo in a one-off Docker container for the configured database:
 
@@ -235,7 +257,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/run.sh -u sale --stop-after-init
 ```
 
-#### 1.3.2. shell
+#### 1.4.2. shell
 
 Opens an Odoo shell for the configured database:
 
@@ -251,7 +273,7 @@ ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
 
 Any extra arguments are passed through to the underlying Odoo shell command.
 
-#### 1.3.3. update
+#### 1.4.3. update
 
 Updates installed addons using `click-odoo-update`:
 
@@ -267,7 +289,7 @@ Any extra arguments are passed through to `click-odoo-update`:
 ./docker/local/scripts/update.sh --update-all
 ```
 
-#### 1.3.4. Database backup
+#### 1.4.4. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -293,7 +315,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### 1.3.5. Database restore
+#### 1.4.5. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -330,7 +352,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.3.6. Database neutralization
+#### 1.4.6. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
@@ -360,7 +382,7 @@ docker compose up -d odoo
 
 `--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
 
-#### 1.3.7. Filestore backup
+#### 1.4.7. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -391,7 +413,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.3.8. Filestore restore
+#### 1.4.8. Filestore restore
 
 Restore a filestore archive:
 
@@ -415,7 +437,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.3.9. Restic filestore backup
+#### 1.4.9. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -453,7 +475,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.3.10. Restic filestore restore
+#### 1.4.10. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -481,7 +503,7 @@ ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/rest
 
 With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
-### 1.4. Creating a Docker deploy build context
+### 1.5. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -1001,7 +1023,7 @@ Maintenance:
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Set `[docker].mailpit = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
@@ -1167,6 +1189,8 @@ This section is optional.
 
 - `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
+- `mailpit` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
+- `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
 
 ### `[config]`
 

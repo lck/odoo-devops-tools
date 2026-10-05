@@ -97,6 +97,84 @@ jobs:
             throw "Legacy neutralization helper does not use click-odoo."
           }
 
+      - name: Test Mailpit local Docker generation
+        run: |
+          New-Item -ItemType Directory -Force -Path odoo-workspace-mailpit | Out-Null
+          Push-Location odoo-workspace-mailpit
+          try {
+            uv run odoo-compose --init `
+              --set odoo:version=18.0 `
+              --set docker:mailpit=true `
+              --set docker:mailpit_webui_port=18025 `
+              --set config:smtp_server=smtp.example.test `
+              --set config:smtp_port=587 `
+              --set config:smtp_ssl=true `
+              --set config:smtp_user=test-user `
+              --set config:smtp_password=test-password
+
+            uv run odoo-compose --create-docker-deploy
+          }
+          finally {
+            Pop-Location
+          }
+
+          $compose = Get-Content -LiteralPath "odoo-workspace-mailpit\compose.yaml" -Raw
+          $localConf = Get-Content -LiteralPath "odoo-workspace-mailpit\docker\local\configs\odoo.conf" -Raw
+          $deployConf = Get-Content -LiteralPath "odoo-workspace-mailpit\docker\deploy\configs\odoo.conf" -Raw
+
+          foreach ($expected in @(
+            "mailpit:",
+            "image: ghcr.io/axllent/mailpit:v1.31.3",
+            "MP_DATABASE: /data/mailpit.db",
+            'MP_DISABLE_VERSION_CHECK: "true"',
+            'MP_POP3_BIND_ADDR: "0.0.0.0:1110"',
+            'MP_POP3_AUTH: "odoo:odoo"',
+            '"18025:8025"',
+            "mailpit-data:/data",
+            "mailpit-data:"
+          )) {
+            if ($compose -notlike "*$expected*") {
+              throw "Generated Mailpit Compose configuration is missing '$expected'."
+            }
+          }
+
+          foreach ($expected in @(
+            "smtp_server = mailpit",
+            "smtp_port = 1025"
+          )) {
+            if ($localConf -notlike "*$expected*") {
+              throw "Generated local Odoo config is missing '$expected'."
+            }
+          }
+
+          foreach ($unexpected in @(
+            "smtp.example.test",
+            "smtp_port = 587",
+            "smtp_ssl = true",
+            "smtp_user = test-user",
+            "smtp_password = test-password"
+          )) {
+            if ($localConf -like "*$unexpected*") {
+              throw "Mailpit local Odoo config unexpectedly contains '$unexpected'."
+            }
+          }
+
+          foreach ($expected in @(
+            "smtp_server = smtp.example.test",
+            "smtp_port = 587",
+            "smtp_ssl = true",
+            "smtp_user = test-user",
+            "smtp_password = test-password"
+          )) {
+            if ($deployConf -notlike "*$expected*") {
+              throw "Deploy Odoo config did not preserve '$expected'."
+            }
+          }
+
+          if ($deployConf -like "*smtp_server = mailpit*") {
+            throw "Mailpit SMTP configuration leaked into deploy Odoo config."
+          }
+
       - name: Install mock Docker command
         run: |
           $mockRoot = Join-Path $env:RUNNER_TEMP "odoo-compose-mock-docker"

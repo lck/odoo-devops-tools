@@ -81,6 +81,11 @@ _DEFAULT_DOCKER_REQUIREMENTS = [
 
 _DEFAULT_DOCKER_UV_VERSION = "0.12.12"
 _DEFAULT_DOCKER_RESTIC_VERSION = "0.19.1"
+_DEFAULT_DOCKER_MAILPIT_IMAGE = "ghcr.io/axllent/mailpit:v1.31.3"
+_DEFAULT_DOCKER_MAILPIT_SMTP_PORT = 1025
+_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT = 8025
+_DEFAULT_DOCKER_MAILPIT_POP3_PORT = 1110
+_DEFAULT_DOCKER_MAILPIT_POP3_AUTH = "odoo:odoo"
 _DEFAULT_DOCKER_HTTP_CONTAINER_PORT = 8069
 _DEFAULT_DOCKER_GEVENT_CONTAINER_PORT = 8072
 _DOCKER_CONTEXT_LOCAL = "local"
@@ -91,6 +96,13 @@ _DOCKER_ODOO_CONTAINER_ROOT = PurePosixPath("/opt/odoo")
 _DOCKER_ADDONS_CONTAINER_ROOT = PurePosixPath("/mnt/extra-addons")
 _DOCKER_HOST_PORT_CONFIG_KEYS = {"http_port", "gevent_port", "longpolling_port"}
 _DOCKER_DB_CONNECTION_CONFIG_KEYS = {"db_host", "db_port", "db_name", "db_user", "db_password"}
+_DOCKER_MAILPIT_OVERRIDDEN_CONFIG_KEYS = {
+    "smtp_server",
+    "smtp_port",
+    "smtp_ssl",
+    "smtp_user",
+    "smtp_password",
+}
 _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS = {
     "addons_path",
     "data_dir",
@@ -135,6 +147,8 @@ _INI_SET_SUPPORTED_OPTIONS = {
     "docker": {
         "base_image",
         "odoo_source",
+        "mailpit",
+        "mailpit_webui_port",
     },
 }
 _INI_SET_ADDON_SUPPORTED_OPTIONS = {
@@ -206,6 +220,8 @@ class VirtualenvConfig:
 class DockerConfig:
     base_image: Optional[str] = None
     odoo_source: str = _DOCKER_ODOO_SOURCE_IMAGE
+    mailpit: bool = False
+    mailpit_webui_port: int = _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
 
 
 @dataclass(frozen=True)
@@ -953,6 +969,23 @@ def _validate_docker_source(value: str, option: str) -> str:
     return source
 
 
+def _validate_tcp_port(value: str, option: str) -> int:
+    raw_value = (value or "").strip()
+    try:
+        port = int(raw_value)
+    except ValueError as e:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected an integer TCP port between 1 and 65535)."
+        ) from e
+    if not 1 <= port <= 65535:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected an integer TCP port between 1 and 65535)."
+        )
+    return port
+
+
 def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str], list[str]]:
     odoo_major_version = _parse_odoo_version(odoo_version)
 
@@ -1142,14 +1175,16 @@ def load_project_config(
     docker = DockerConfig(
         base_image=f"odoo:{odoo_version}",
         odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
+        mailpit=False,
+        mailpit_webui_port=_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT,
     )
     if cp.has_section("docker"):
-        supported_docker_options = {"base_image", "odoo_source"}
+        supported_docker_options = {"base_image", "odoo_source", "mailpit", "mailpit_webui_port"}
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
-                    "Supported options: base_image, odoo_source."
+                    "Supported options: base_image, mailpit, mailpit_webui_port, odoo_source."
                 )
 
         base_image = (
@@ -1165,6 +1200,12 @@ def load_project_config(
         docker = DockerConfig(
             base_image=base_image,
             odoo_source=odoo_source,
+            mailpit=_get_ini_bool(cp, "docker", "mailpit", default=False),
+            mailpit_webui_port=(
+                _validate_tcp_port(cp.get("docker", "mailpit_webui_port"), "mailpit_webui_port")
+                if cp.has_option("docker", "mailpit_webui_port")
+                else _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+            ),
         )
 
     config: Dict[str, Any] = {}
@@ -2817,6 +2858,12 @@ def render_docker_odoo_conf(
     for key, value in cfg.config.items():
         if key in _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS:
             continue
+        if (
+            local_database
+            and cfg.docker.mailpit
+            and key in _DOCKER_MAILPIT_OVERRIDDEN_CONFIG_KEYS
+        ):
+            continue
         lines.append(f"{key} = {_format_conf_value(value)}")
 
     # The generated local Compose environment has a fixed PostgreSQL service
@@ -2831,6 +2878,14 @@ def render_docker_odoo_conf(
             "db_user = odoo",
             "db_password = odoo",
         ])
+        if cfg.docker.mailpit:
+            lines.extend([
+                "smtp_server = mailpit",
+                f"smtp_port = {_DEFAULT_DOCKER_MAILPIT_SMTP_PORT}",
+                "smtp_ssl = False",
+                "smtp_user = False",
+                "smtp_password = False",
+            ])
 
     return "\n".join(lines) + "\n"
 
@@ -2904,6 +2959,34 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     volumes = _render_docker_compose_volumes(layout, cfg)
     build_context = _yaml_quote_scalar(_compose_host_path(layout, layout.docker_local_dir))
 
+    mailpit_service = ""
+    depends_on = ["      - db"]
+    named_volumes = [
+        "  odoo-db-data:",
+        "  odoo-data:",
+    ]
+
+    if cfg.docker.mailpit:
+        mailpit_service = f"""
+  mailpit:
+    image: {_DEFAULT_DOCKER_MAILPIT_IMAGE}
+    restart: unless-stopped
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_DISABLE_VERSION_CHECK: "true"
+      MP_POP3_BIND_ADDR: "0.0.0.0:{_DEFAULT_DOCKER_MAILPIT_POP3_PORT}"
+      MP_POP3_AUTH: "{_DEFAULT_DOCKER_MAILPIT_POP3_AUTH}"
+    ports:
+      - "{cfg.docker.mailpit_webui_port}:{_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT}"
+    volumes:
+      - mailpit-data:/data
+"""
+        depends_on.append("      - mailpit")
+        named_volumes.append("  mailpit-data:")
+
+    depends_on_block = "\n".join(depends_on)
+    named_volumes_block = "\n".join(named_volumes)
+
     return f"""# Generated by odoo-compose for local development.
 services:
   db:
@@ -2920,7 +3003,7 @@ services:
       POSTGRES_PASSWORD: odoo
     volumes:
       - odoo-db-data:/var/lib/postgresql/data
-
+{mailpit_service}
   odoo:
     build:
       context: {build_context}
@@ -2931,7 +3014,7 @@ services:
         max-size: "50m"
         max-file: "10"
     depends_on:
-      - db
+{depends_on_block}
     ports:
 {ports}
     environment:
@@ -2943,8 +3026,7 @@ services:
 {volumes}
 
 volumes:
-  odoo-db-data:
-  odoo-data:
+{named_volumes_block}
 """
 
 

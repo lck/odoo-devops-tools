@@ -27,7 +27,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init --sync-addons --set odoo:version=18.0
+          uv run odoo-compose --init --sync-addons --set odoo:version=18.0 --set docker:mailpit=true --set docker:mailpit_webui_port=18025
 
       - name: Check generated local Docker artifacts
         run: |
@@ -55,6 +55,20 @@ jobs:
           test "$(grep -c '^      driver: local$' odoo-workspace/compose.yaml)" -eq 2
           grep -q '^        max-size: "50m"$' odoo-workspace/compose.yaml
           grep -q '^        max-file: "10"$' odoo-workspace/compose.yaml
+          grep -Fq '  mailpit:' odoo-workspace/compose.yaml
+          grep -Fq 'image: ghcr.io/axllent/mailpit:v1.31.3' odoo-workspace/compose.yaml
+          grep -Fq 'MP_DATABASE: /data/mailpit.db' odoo-workspace/compose.yaml
+          grep -Fq 'MP_DISABLE_VERSION_CHECK: "true"' odoo-workspace/compose.yaml
+          grep -Fq 'MP_POP3_BIND_ADDR: "0.0.0.0:1110"' odoo-workspace/compose.yaml
+          grep -Fq 'MP_POP3_AUTH: "odoo:odoo"' odoo-workspace/compose.yaml
+          grep -Fq '"18025:8025"' odoo-workspace/compose.yaml
+          grep -Fq 'mailpit-data:/data' odoo-workspace/compose.yaml
+          grep -Fq '  mailpit-data:' odoo-workspace/compose.yaml
+          grep -Fq 'smtp_server = mailpit' odoo-workspace/docker/local/configs/odoo.conf
+          grep -Fq 'smtp_port = 1025' odoo-workspace/docker/local/configs/odoo.conf
+          grep -Fq 'smtp_ssl = False' odoo-workspace/docker/local/configs/odoo.conf
+          grep -Fq 'smtp_user = False' odoo-workspace/docker/local/configs/odoo.conf
+          grep -Fq 'smtp_password = False' odoo-workspace/docker/local/configs/odoo.conf
 
           test ! -e odoo-workspace/docker/local/addons
           test ! -e odoo-workspace/docker/deploy
@@ -101,6 +115,52 @@ jobs:
 
           ./docker/local/scripts/update.sh --help > update-help.log 2>&1
           grep -Fq "Usage:" update-help.log
+
+      - name: Test Mailpit SMTP, POP3 and persistence
+        working-directory: ./odoo-workspace
+        run: |
+          curl --fail --silent --show-error \
+            --retry 20 --retry-delay 1 --retry-connrefused \
+            http://localhost:18025/readyz
+
+          docker compose run --rm --no-deps --entrypoint python3 odoo -c '
+          import smtplib
+          from email.message import EmailMessage
+
+          message = EmailMessage()
+          message["From"] = "odoo@example.test"
+          message["To"] = "customer@example.test"
+          message["Subject"] = "odoo-compose Mailpit SMTP test"
+          message.set_content("Mailpit SMTP integration test")
+
+          with smtplib.SMTP("mailpit", 1025) as smtp:
+              smtp.send_message(message)
+          '
+
+          curl --fail --silent --show-error \
+            http://localhost:18025/api/v1/messages \
+            | grep -Fq 'odoo-compose Mailpit SMTP test'
+
+          docker compose run --rm --no-deps --entrypoint python3 odoo -c '
+          import poplib
+
+          pop = poplib.POP3("mailpit", 1110)
+          pop.user("odoo")
+          pop.pass_("odoo")
+          count, _ = pop.stat()
+          assert count >= 1, "Mailpit POP3 inbox is empty"
+          pop.quit()
+          '
+
+          docker compose restart mailpit
+
+          curl --fail --silent --show-error \
+            --retry 20 --retry-delay 1 --retry-connrefused \
+            http://localhost:18025/readyz
+
+          curl --fail --silent --show-error \
+            http://localhost:18025/api/v1/messages \
+            | grep -Fq 'odoo-compose Mailpit SMTP test'
 
       - name: Verify fleet addon installed
         working-directory: ./odoo-workspace

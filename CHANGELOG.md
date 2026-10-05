@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.0 (2026-10-??)
+
+### Added
+
+* Add optional Mailpit support to the local Docker workflow.
+
 ## 1.23.6 (2026-10-05)
 
 ### Fixed
