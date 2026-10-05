@@ -112,10 +112,7 @@ docker compose up -d --build
 Optionally initialize the Odoo database from the command line instead of through the web interface:
 
 ```bash
-docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
-  -i base \
-  --without-demo=all \
-  --stop-after-init
+./docker/local/scripts/run.sh -i base --without-demo=all --stop-after-init
 ```
 
 Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
@@ -159,10 +156,7 @@ If an addon source contains a `requirements.txt` file, its Python dependencies a
 Install the modules from the newly added addon repositories:
 
 ```bash
-docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo \
-  -i web_notify,helpdesk_mgmt \
-  --without-demo=all \
-  --stop-after-init
+./docker/local/scripts/run.sh -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
 ```
 
 For subsequent addon updates, use the generated Docker update helper:
@@ -206,6 +200,7 @@ On Unix-like systems:
 
 ```text
 docker/local/scripts/
+├── run.sh
 ├── shell.sh
 ├── update.sh
 ├── backup-db.sh
@@ -220,7 +215,27 @@ docker/local/scripts/
 
 The examples below use the Unix `.sh` form.
 
-#### 1.3.1. shell
+#### 1.3.1. run
+
+Runs Odoo in a one-off Docker container for the configured database:
+
+```bash
+./docker/local/scripts/run.sh
+```
+
+Any extra arguments are passed through to Odoo:
+
+```bash
+./docker/local/scripts/run.sh -i base --stop-after-init
+```
+
+The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it with `ODOO_DB_NAME`:
+
+```bash
+ODOO_DB_NAME=odoo_test ./docker/local/scripts/run.sh -u sale --stop-after-init
+```
+
+#### 1.3.2. shell
 
 Opens an Odoo shell for the configured database:
 
@@ -228,7 +243,7 @@ Opens an Odoo shell for the configured database:
 ./docker/local/scripts/shell.sh
 ```
 
-The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it with `ODOO_DB_NAME`:
+The database name follows the same `ODOO_DB_NAME` convention as the `run` helper:
 
 ```bash
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
@@ -236,7 +251,7 @@ ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
 
 Any extra arguments are passed through to the underlying Odoo shell command.
 
-#### 1.3.2. update
+#### 1.3.3. update
 
 Updates installed addons using `click-odoo-update`:
 
@@ -244,7 +259,7 @@ Updates installed addons using `click-odoo-update`:
 ./docker/local/scripts/update.sh
 ```
 
-The default database name follows the same `ODOO_DB_NAME` convention as the shell and database helpers.
+The database name follows the same `ODOO_DB_NAME` convention as the `run`, shell, and database helpers.
 
 Any extra arguments are passed through to `click-odoo-update`:
 
@@ -252,7 +267,7 @@ Any extra arguments are passed through to `click-odoo-update`:
 ./docker/local/scripts/update.sh --update-all
 ```
 
-#### 1.3.3. Database backup
+#### 1.3.4. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -278,7 +293,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### 1.3.4. Database restore
+#### 1.3.5. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -315,7 +330,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.3.5. Database neutralization
+#### 1.3.6. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
@@ -345,7 +360,7 @@ docker compose up -d odoo
 
 `--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
 
-#### 1.3.6. Filestore backup
+#### 1.3.7. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -376,7 +391,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.3.7. Filestore restore
+#### 1.3.8. Filestore restore
 
 Restore a filestore archive:
 
@@ -400,7 +415,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.3.8. Restic filestore backup
+#### 1.3.9. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -438,7 +453,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.3.9. Restic filestore restore
+#### 1.3.10. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 

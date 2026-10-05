@@ -36,6 +36,7 @@ jobs:
           test -f odoo-workspace/docker/local/.dockerignore
           test -f odoo-workspace/docker/local/configs/odoo.conf
           test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
+          test -x odoo-workspace/docker/local/scripts/run.sh
           test -x odoo-workspace/docker/local/scripts/shell.sh
           test -x odoo-workspace/docker/local/scripts/update.sh
           test -x odoo-workspace/docker/local/scripts/backup-db.sh
@@ -84,13 +85,10 @@ jobs:
         working-directory: ./odoo-workspace
         run: docker compose up -d db
 
-      - name: Init database with fleet addon
+      - name: Init database with generated run helper
         working-directory: ./odoo-workspace
         run: |
-          docker compose run --rm odoo \
-            -- \
-            -c /etc/odoo/odoo.conf \
-            -d odoo \
+          ./docker/local/scripts/run.sh \
             -i fleet \
             --without-demo=all \
             --stop-after-init

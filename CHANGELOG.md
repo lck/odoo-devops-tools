@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.5 (2026-10-??)
+
+### Added
+
+* Add Docker run helper.
+
 ## 1.23.4 (2026-10-05)
 
 ### Added
