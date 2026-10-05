@@ -3138,7 +3138,7 @@ DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Running Odoo for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec docker compose run --rm odoo \
+exec docker compose run --rm --build odoo \
   -- \
   -c /etc/odoo/odoo.conf \
   -d "${{DB_NAME}}" \
@@ -3160,7 +3160,7 @@ DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Opening Odoo shell for database '${{DB_NAME}}'."
-exec docker compose run --rm --no-deps \
+exec docker compose run --rm --build \
   --entrypoint odoo odoo \
   shell \
   -c /etc/odoo/odoo.conf \
@@ -3183,7 +3183,7 @@ DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Updating Odoo addons for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec docker compose run --rm --no-deps -T \
+exec docker compose run --rm --build -T \
   --entrypoint click-odoo-update odoo \
   -c /etc/odoo/odoo.conf \
   -d "${{DB_NAME}}" \
@@ -3703,7 +3703,7 @@ if defined ODOO_DB_NAME (
 cd /d "%ROOT_DIR%" || exit /b 1
 
 echo INFO: Running Odoo for database '%DB_NAME%'. Passing through any extra arguments.
-docker compose run --rm odoo -- -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
+docker compose run --rm --build odoo -- -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
 exit /b %ERRORLEVEL%
 """
     return _write_docker_local_script(layout, "run", content, ext="bat")
@@ -3727,7 +3727,7 @@ if defined ODOO_DB_NAME (
 cd /d "%ROOT_DIR%" || exit /b 1
 
 echo INFO: Opening Odoo shell for database '%DB_NAME%'.
-docker compose run --rm --no-deps --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
+docker compose run --rm --build --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
 exit /b %ERRORLEVEL%
 """
     return _write_docker_local_script(layout, "shell", content, ext="bat")
@@ -3751,7 +3751,7 @@ if defined ODOO_DB_NAME (
 cd /d "%ROOT_DIR%" || exit /b 1
 
 echo INFO: Updating Odoo addons for database '%DB_NAME%'. Passing through any extra arguments.
-docker compose run --rm --no-deps -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level debug %*
+docker compose run --rm --build -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level debug %*
 exit /b %ERRORLEVEL%
 """
     return _write_docker_local_script(layout, "update", content, ext="bat")

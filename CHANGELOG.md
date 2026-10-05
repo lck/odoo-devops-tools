@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.6 (2026-10-05)
+
+### Fixed
+
+* Ensure Docker run, shell, and update helpers build the Odoo image when needed and start required dependencies.
+
 ## 1.23.5 (2026-10-05)
 
 ### Added
