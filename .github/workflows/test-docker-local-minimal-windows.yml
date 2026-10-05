@@ -211,13 +211,13 @@ jobs:
             }
 
             $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
-            if ($log -notlike "*compose run --rm odoo -- -c /etc/odoo/odoo.conf -d odoo_test -i base --stop-after-init*") {
+            if ($log -notlike "*compose run --rm --build odoo -- -c /etc/odoo/odoo.conf -d odoo_test -i base --stop-after-init*") {
               throw "Docker run helper invocation is incorrect:`n$log"
             }
-            if ($log -notlike "*--entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d odoo_test --no-http*") {
+            if ($log -notlike "*compose run --rm --build --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d odoo_test --no-http*") {
               throw "Docker shell helper invocation is incorrect:`n$log"
             }
-            if ($log -notlike "*--entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d odoo_test --log-level debug --update-all*") {
+            if ($log -notlike "*compose run --rm --build -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d odoo_test --log-level debug --update-all*") {
               throw "Docker update helper invocation is incorrect:`n$log"
             }
           }
