@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "odoo-devops-tools"
-version = "1.23.4"
+version = "1.23.5"
 description = "Build reproducible Odoo workspaces from a single project definition."
 readme = "README.md"
 license = "MIT"
