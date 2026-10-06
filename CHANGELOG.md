@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.0 (2026-10-??)
+
+### Added
+
+* Add configurable read-write Docker shares.
+
 ## 1.23.9 (2026-10-06)
 
 ### Added

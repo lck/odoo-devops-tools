@@ -214,7 +214,21 @@ Mailpit also exposes POP3 inside the Compose network at `mailpit:1110`, using `o
 
 Mailpit is generated only for the local Docker workflow and is not included in the deploy build context.
 
-### 1.4. Script reference
+### 1.4. Sharing host directories
+
+Use `[docker.share.<name>]` sections to expose host directories to the Odoo container as read-write bind mounts:
+
+```ini
+[docker.share.exchange]
+source = /srv/integration/exchange
+target = /mnt/exchange
+```
+
+`source` may be an absolute host path or a path relative to the workspace root. `target` must be an absolute path inside the Odoo container.
+
+`odoo-compose` does not create the source directory or change its ownership or permissions; host provisioning or the deployment process must prepare the directory before Docker starts.
+
+### 1.5. Script reference
 
 The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
 
@@ -239,7 +253,7 @@ On Unix-like hosts where Docker requires `sudo`, run generated Docker helpers wi
 ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
 ```
 
-#### 1.4.1. run
+#### 1.5.1. run
 
 Runs Odoo in a one-off Docker container for the configured database:
 
@@ -259,7 +273,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/run.sh -u sale --stop-after-init
 ```
 
-#### 1.4.2. shell
+#### 1.5.2. shell
 
 Opens an Odoo shell for the configured database:
 
@@ -275,7 +289,7 @@ ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
 
 Any extra arguments are passed through to the underlying Odoo shell command.
 
-#### 1.4.3. update
+#### 1.5.3. update
 
 Updates installed addons using `click-odoo-update`:
 
@@ -291,7 +305,7 @@ Any extra arguments are passed through to `click-odoo-update`:
 ./docker/local/scripts/update.sh --update-all
 ```
 
-#### 1.4.4. Database backup
+#### 1.5.4. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -317,7 +331,7 @@ The default database name is taken from `[config].db_name` when configured, othe
 ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
-#### 1.4.5. Database restore
+#### 1.5.5. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -354,7 +368,7 @@ To restore the same dump into another database without replacing the default dat
 ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.4.6. Database neutralization
+#### 1.5.6. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
@@ -384,7 +398,7 @@ docker compose up -d odoo
 
 `--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
 
-#### 1.4.7. Filestore backup
+#### 1.5.7. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -415,7 +429,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.4.8. Filestore restore
+#### 1.5.8. Filestore restore
 
 Restore a filestore archive:
 
@@ -439,7 +453,7 @@ ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-bac
 
 Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
 
-#### 1.4.9. Restic filestore backup
+#### 1.5.9. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -477,7 +491,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.4.10. Restic filestore restore
+#### 1.5.10. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -505,7 +519,7 @@ ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/rest
 
 With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
-### 1.5. Creating a Docker deploy build context
+### 1.6. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -986,7 +1000,7 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 - `--init [ROOT]` — create `ROOT/odoo-project.ini` from the bundled default template if it does not already exist. `ROOT` is optional; when supplied, it is a shorthand for selecting the workspace root directly, for example `odoo-compose --init ./odoo19`. When the optional value is omitted, `--root ROOT` remains supported for backward compatibility. Do not supply both `--init ROOT` and `--root ROOT`; the command exits with an error instead of choosing one implicitly. This option is valid only when `INI` is omitted and no `-i/--include` is provided. Existing project files are not overwritten.
 - `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated.
-- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, and `[docker]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
+- `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, `[docker]`, and `[docker.share.<name>]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
 - `--no-configs` — do not generate config files.
 - `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`.
 - `--no-data-dir` — do not create the Odoo data directory.
@@ -1025,7 +1039,7 @@ Maintenance:
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. Set `[docker].mailpit = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
@@ -1050,6 +1064,7 @@ The following sections are supported:
 - `[odoo]` — required Odoo source settings
 - `[addons.<name>]` — optional addon sources
 - `[docker]` — optional Docker workflow/deploy generation settings
+- `[docker.share.<name>]` — optional host-directory shares mounted into the Odoo container
 - `[config]` — optional Odoo server configuration values
 
 ### General rules
@@ -1193,6 +1208,31 @@ This section is optional.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
 - `mailpit` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
+
+### `[docker.share.<name>]`
+
+Each section defines one read-write host-directory bind mount for the generated Odoo Compose service.
+
+- `source` — required host directory. Relative paths are resolved relative to `ROOT/`; absolute paths are preserved.
+- `target` — required absolute path inside the Odoo container.
+
+The generated mount always sets `bind.create_host_path: false`. The source directory must therefore be created or mounted, and its permissions prepared, by host provisioning or the deployment process before Docker starts. `odoo-compose` does not create, `chmod`, or `chown` share sources.
+
+Example:
+
+```ini
+[docker.share.exchange]
+source = /mnt/nfs/exchange
+target = /mnt/exchange
+```
+
+The same share can be configured through the CLI:
+
+```bash
+odoo-compose \
+  --set docker.share.exchange:source=/mnt/nfs/exchange \
+  --set docker.share.exchange:target=/mnt/exchange
+```
 
 ### `[config]`
 

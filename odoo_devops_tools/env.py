@@ -24,7 +24,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
@@ -158,6 +158,10 @@ _INI_SET_ADDON_SUPPORTED_OPTIONS = {
     "shallow",
     "path",
 }
+_INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS = {
+    "source",
+    "target",
+}
 
 
 # -----------------------------
@@ -217,11 +221,18 @@ class VirtualenvConfig:
 
 
 @dataclass(frozen=True)
+class DockerShareSpec:
+    source: str
+    target: str
+
+
+@dataclass(frozen=True)
 class DockerConfig:
     base_image: Optional[str] = None
     odoo_source: str = _DOCKER_ODOO_SOURCE_IMAGE
     mailpit: bool = False
     mailpit_webui_port: int = _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+    shares: Dict[str, DockerShareSpec] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -874,11 +885,27 @@ def _validate_ini_overrides(
                     "Invalid -S/--set override: addon section name must be in the form [addons.<name>]."
                 )
             supported = _INI_SET_ADDON_SUPPORTED_OPTIONS
+        elif section.startswith("docker.share."):
+            share_name = section.split(".", 2)[2].strip()
+            if not share_name:
+                raise Exception(
+                    "Invalid -S/--set override: Docker share section name must be in the form "
+                    "[docker.share.<name>]."
+                )
+            supported = _INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS
         else:
             supported = _INI_SET_SUPPORTED_OPTIONS.get(section)
             if supported is None:
                 supported_sections = ", ".join(
-                    ["vars", "virtualenv", "odoo", "addons.<name>", "docker", "config"]
+                    [
+                        "vars",
+                        "virtualenv",
+                        "odoo",
+                        "addons.<name>",
+                        "docker",
+                        "docker.share.<name>",
+                        "config",
+                    ]
                 )
                 raise Exception(
                     f"Invalid -S/--set override: unsupported section [{section}]. "
@@ -1056,6 +1083,7 @@ def load_project_config(
     #   [odoo]
     #   [addons.<name>] for each addon (optional)
     #   [docker] (optional)
+    #   [docker.share.<name>] for each host-directory share (optional)
     #   [config] (optional)
 
     odoo_version = _require_ini_option(cp, "odoo", "version").strip()
@@ -1172,11 +1200,61 @@ def load_project_config(
                 shallow=_get_ini_bool(cp, sec, "shallow", default=True),
             )
 
+    docker_shares: Dict[str, DockerShareSpec] = {}
+    share_targets: set[str] = set()
+    for sec in cp.sections():
+        if sec == "docker.share":
+            raise Exception(
+                "Invalid section [docker.share] (expected [docker.share.<name>])."
+            )
+        if not sec.startswith("docker.share."):
+            continue
+
+        name = sec.split(".", 2)[2].strip()
+        if not name:
+            raise Exception(
+                f"Invalid section [{sec}] (expected [docker.share.<name>] with a non-empty name)."
+            )
+
+        for key in cp._sections.get(sec, {}).keys():
+            if key not in _INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS:
+                supported_keys = ", ".join(sorted(_INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS))
+                raise Exception(
+                    f"Unsupported option '{key}' in section [{sec}]. "
+                    f"Supported options: {supported_keys}."
+                )
+
+        source = _require_ini_option(cp, sec, "source").strip()
+        target = _require_ini_option(cp, sec, "target").strip()
+        if not source:
+            raise Exception(
+                f"Invalid option 'source' in section [{sec}] (expected non-empty path)."
+            )
+        if not target:
+            raise Exception(
+                f"Invalid option 'target' in section [{sec}] (expected non-empty path)."
+            )
+
+        target_path = PurePosixPath(target)
+        if not target_path.is_absolute() or ".." in target_path.parts:
+            raise Exception(
+                f"Invalid option 'target' in section [{sec}] "
+                "(expected absolute container path without '..')."
+            )
+        target = str(target_path)
+        if target in share_targets:
+            raise Exception(
+                f"Duplicate Docker share target '{target}' in section [{sec}]."
+            )
+        share_targets.add(target)
+        docker_shares[name] = DockerShareSpec(source=source, target=target)
+
     docker = DockerConfig(
         base_image=f"odoo:{odoo_version}",
         odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
         mailpit=False,
         mailpit_webui_port=_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT,
+        shares=docker_shares,
     )
     if cp.has_section("docker"):
         supported_docker_options = {"base_image", "odoo_source", "mailpit", "mailpit_webui_port"}
@@ -1206,6 +1284,7 @@ def load_project_config(
                 if cp.has_option("docker", "mailpit_webui_port")
                 else _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
             ),
+            shares=docker_shares,
         )
 
     config: Dict[str, Any] = {}
@@ -2936,6 +3015,21 @@ def _render_docker_local_addon_volumes(layout: Layout, cfg: ProjectConfig) -> li
     return volumes
 
 
+def _render_docker_share_volumes(layout: Layout, cfg: ProjectConfig) -> list[str]:
+    """Render configured host-directory shares as read-write bind mounts."""
+    volumes: list[str] = []
+    for spec in cfg.docker.shares.values():
+        source = _resolve_workspace_path(layout, spec.source, layout.root)
+        volumes.extend([
+            "      - type: bind",
+            f"        source: {_yaml_quote_scalar(_compose_host_path(layout, source))}",
+            f"        target: {_yaml_quote_scalar(spec.target)}",
+            "        bind:",
+            "          create_host_path: false",
+        ])
+    return volumes
+
+
 def _render_docker_compose_volumes(layout: Layout, cfg: ProjectConfig) -> str:
     volumes = [
         "      - ./docker/local/configs:/etc/odoo:ro",
@@ -2949,6 +3043,7 @@ def _render_docker_compose_volumes(layout: Layout, cfg: ProjectConfig) -> str:
             "        read_only: true",
         ])
     volumes.extend(_render_docker_local_addon_volumes(layout, cfg))
+    volumes.extend(_render_docker_share_volumes(layout, cfg))
     volumes.append("      - odoo-data:/var/lib/odoo")
     return "\n".join(volumes)
 

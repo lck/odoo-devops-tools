@@ -27,7 +27,12 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init --sync-addons --set odoo:version=18.0 --set docker:mailpit=true --set docker:mailpit_webui_port=18025
+          uv run odoo-compose --init --sync-addons \
+            --set odoo:version=18.0 \
+            --set docker:mailpit=true \
+            --set docker:mailpit_webui_port=18025 \
+            --set docker.share.exchange:source=shared/exchange \
+            --set docker.share.exchange:target=/mnt/exchange
 
       - name: Check generated local Docker artifacts
         run: |
@@ -77,6 +82,9 @@ jobs:
           grep -Fq 'smtp_ssl = False' odoo-workspace/docker/local/configs/odoo.conf
           grep -Fq 'smtp_user = False' odoo-workspace/docker/local/configs/odoo.conf
           grep -Fq 'smtp_password = False' odoo-workspace/docker/local/configs/odoo.conf
+          grep -Fq 'source: "./shared/exchange"' odoo-workspace/compose.yaml
+          grep -Fq 'target: "/mnt/exchange"' odoo-workspace/compose.yaml
+          grep -Fq 'create_host_path: false' odoo-workspace/compose.yaml
 
           test ! -e odoo-workspace/docker/local/addons
           test ! -e odoo-workspace/docker/deploy
@@ -98,6 +106,29 @@ jobs:
       - name: Build local Docker image with Compose
         working-directory: ./odoo-workspace
         run: docker compose build odoo
+
+      - name: Test configured Docker share
+        working-directory: ./odoo-workspace
+        run: |
+          test ! -e shared/exchange
+
+          set +e
+          docker compose run --rm --no-deps --entrypoint true odoo > share-missing.log 2>&1
+          status=$?
+          set -e
+          test "${status}" -ne 0
+          cat share-missing.log
+
+          mkdir -p shared/exchange
+          chmod 0777 shared/exchange
+          printf 'from-host\n' > shared/exchange/from-host.txt
+
+          docker compose run --rm --no-deps --entrypoint sh odoo -c '
+            test "$(cat /mnt/exchange/from-host.txt)" = "from-host"
+            printf "from-container\n" > /mnt/exchange/from-container.txt
+          '
+
+          grep -Fxq 'from-container' shared/exchange/from-container.txt
 
       - name: Verify restic is installed in the local Docker image
         working-directory: ./odoo-workspace

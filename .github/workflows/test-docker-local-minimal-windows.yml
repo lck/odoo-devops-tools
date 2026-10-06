@@ -31,7 +31,10 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init --set odoo:version=18.0
+          uv run odoo-compose --init `
+            --set odoo:version=18.0 `
+            --set docker.share.exchange:source=shared/exchange `
+            --set docker.share.exchange:target=/mnt/exchange
 
       - name: Check generated Windows local Docker helpers
         run: |
@@ -71,6 +74,17 @@ jobs:
           $batHelpers = Get-ChildItem -LiteralPath $scriptsDir -Filter "*.bat" -File
           if ($batHelpers.Count -ne 11) {
             throw "Expected exactly 11 .bat helpers, got $($batHelpers.Count)."
+          }
+
+          $compose = Get-Content -LiteralPath "odoo-workspace\compose.yaml" -Raw
+          foreach ($expected in @(
+            'source: "./shared/exchange"',
+            'target: "/mnt/exchange"',
+            'create_host_path: false'
+          )) {
+            if ($compose -notlike "*$expected*") {
+              throw "Generated Docker share configuration is missing '$expected'."
+            }
           }
 
       - name: Generate legacy neutralization helper
