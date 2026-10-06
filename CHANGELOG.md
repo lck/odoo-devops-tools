@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.8 (2026-10-06)
+
+### Fixed
+
+* Prevent Docker helpers from rebuilding or starting dependencies.
+
 ## 1.23.7 (2026-10-06)
 
 ### Added

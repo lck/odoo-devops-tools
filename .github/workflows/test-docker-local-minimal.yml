@@ -95,9 +95,9 @@ jobs:
         working-directory: ./odoo-workspace
         run: docker compose run --rm --no-deps --entrypoint restic odoo version
 
-      - name: Start the PostgreSQL service
+      - name: Start required services
         working-directory: ./odoo-workspace
-        run: docker compose up -d db
+        run: docker compose up -d db mailpit
 
       - name: Init database with generated run helper
         working-directory: ./odoo-workspace
