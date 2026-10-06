@@ -218,8 +218,6 @@ Mailpit is generated only for the local Docker workflow and is not included in t
 
 The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
 
-On Unix-like systems:
-
 ```text
 docker/local/scripts/
 ├── run.sh
@@ -235,7 +233,11 @@ docker/local/scripts/
 └── restore-filestore-restic.sh
 ```
 
-The examples below use the Unix `.sh` form.
+On Unix-like hosts where Docker requires `sudo`, run generated Docker helpers with `ODOO_DOCKER_SUDO=1`.
+
+```bash
+ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
+```
 
 #### 1.4.1. run
 

@@ -47,6 +47,14 @@ jobs:
           test -x odoo-workspace/docker/local/scripts/restic.sh
           test -x odoo-workspace/docker/local/scripts/backup-filestore-restic.sh
           test -x odoo-workspace/docker/local/scripts/restore-filestore-restic.sh
+
+          for helper in \
+            run shell update backup-db restore-db neutralize-db \
+            backup-filestore restore-filestore restic restore-filestore-restic; do
+            grep -Fq 'ODOO_DOCKER_SUDO' "odoo-workspace/docker/local/scripts/${helper}.sh"
+            grep -Fq 'DOCKER=(sudo docker)' "odoo-workspace/docker/local/scripts/${helper}.sh"
+          done
+
           test ! -e odoo-workspace/docker/local/requirements/all-requirements.lock.txt
           grep -q 'uv pip compile .*all-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
           grep -q 'uv pip install .*all-requirements.lock.txt' odoo-workspace/docker/local/Dockerfile
@@ -115,6 +123,9 @@ jobs:
 
           ./docker/local/scripts/update.sh --help > update-help.log 2>&1
           grep -Fq "Usage:" update-help.log
+
+          ODOO_DOCKER_SUDO=1 ./docker/local/scripts/update.sh --help > update-sudo-help.log 2>&1
+          grep -Fq "Usage:" update-sudo-help.log
 
       - name: Test Mailpit SMTP, POP3 and persistence
         working-directory: ./odoo-workspace

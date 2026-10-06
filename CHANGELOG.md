@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.9 (2026-10-06)
+
+### Added
+
+* Allow Unix Docker helpers to run Docker through `sudo` via `ODOO_DOCKER_SUDO=1`.
+
 ## 1.23.8 (2026-10-06)
 
 ### Fixed

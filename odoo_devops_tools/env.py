@@ -3072,6 +3072,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
@@ -3085,7 +3090,7 @@ rm -f "${{TMP_OUTPUT}}"
 trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
 
 echo "INFO: Backing up PostgreSQL database '${{DB_NAME}}' to '${{OUTPUT}}'."
-docker compose exec -T db \
+"${{DOCKER[@]}}" compose exec -T db \
   pg_dump --format=custom --no-owner --no-acl -U odoo "${{DB_NAME}}" \
   > "${{TMP_OUTPUT}}"
 
@@ -3103,6 +3108,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 FORCE=false
@@ -3154,7 +3164,7 @@ SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
 cd "${{ROOT_DIR}}"
 
 DB_EXISTS=false
-DATABASES="$(docker compose exec -T db \
+DATABASES="$("${{DOCKER[@]}}" compose exec -T db \
   psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
 if grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
   DB_EXISTS=true
@@ -3168,23 +3178,23 @@ fi
 echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
 echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
 if [[ "${{DB_EXISTS}}" == true ]]; then
-  docker compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+  "${{DOCKER[@]}}" compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
 fi
-docker compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
-docker compose exec -T db \
+"${{DOCKER[@]}}" compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
+"${{DOCKER[@]}}" compose exec -T db \
   pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
   < "${{SOURCE}}"
 
 if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
   echo "INFO: Resetting copied Odoo database identity for '${{DB_NAME}}'."
   printf '%s\n' 'env["ir.config_parameter"].init(force=True)' | \
-    docker compose run --rm --no-deps -T \
+    "${{DOCKER[@]}}" compose run --rm --no-deps -T \
       --entrypoint click-odoo odoo \
       -c /etc/odoo/odoo.conf \
       -d "${{DB_NAME}}" \
       --log-level=error
 
-  docker compose exec -T db \
+  "${{DOCKER[@]}}" compose exec -T db \
     psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" <<'SQL'
 DELETE FROM ir_config_parameter
 WHERE key = 'database.enterprise_code';
@@ -3214,13 +3224,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Running Odoo for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec docker compose run --rm --no-deps odoo \
+exec "${{DOCKER[@]}}" compose run --rm --no-deps odoo \
   -- \
   -c /etc/odoo/odoo.conf \
   -d "${{DB_NAME}}" \
@@ -3236,13 +3251,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Opening Odoo shell for database '${{DB_NAME}}'."
-exec docker compose run --rm --no-deps \
+exec "${{DOCKER[@]}}" compose run --rm --no-deps \
   --entrypoint odoo odoo \
   shell \
   -c /etc/odoo/odoo.conf \
@@ -3259,13 +3279,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 
 cd "${{ROOT_DIR}}"
 
 echo "INFO: Updating Odoo addons for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec docker compose run --rm --no-deps -T \
+exec "${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --entrypoint click-odoo-update odoo \
   -c /etc/odoo/odoo.conf \
   -d "${{DB_NAME}}" \
@@ -3281,7 +3306,7 @@ def write_docker_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     if odoo_major_version >= 16:
         neutralize_command = rf"""
 echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
-docker compose run --rm --no-deps -T \
+"${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --entrypoint odoo odoo \
   neutralize \
   -c /etc/odoo/odoo.conf \
@@ -3292,7 +3317,7 @@ docker compose run --rm --no-deps -T \
 echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
 printf '%s\n' \
   '[(model.search([("active", "=", True)]).write({{"active": False}})) for model_name in ("ir.cron", "ir.mail_server", "fetchmail.server") if model_name in env for model in (env[model_name],) if "active" in model._fields]; env.cr.commit()' | \
-  docker compose run --rm --no-deps -T \
+  "${{DOCKER[@]}}" compose run --rm --no-deps -T \
     --entrypoint click-odoo odoo \
     -c /etc/odoo/odoo.conf \
     -d "${{DB_NAME}}" \
@@ -3304,12 +3329,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 
 cd "${{ROOT_DIR}}"
 
-DATABASES="$(docker compose exec -T db \
+DATABASES="$("${{DOCKER[@]}}" compose exec -T db \
   psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
 if ! grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
   echo "ERROR: target database '${{DB_NAME}}' does not exist." >&2
@@ -3330,6 +3360,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
@@ -3343,7 +3378,7 @@ rm -f "${{TMP_OUTPUT}}"
 trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
 
 echo "INFO: Backing up filestore for database '${{DB_NAME}}' to '${{OUTPUT}}'."
-docker compose run --rm --no-deps -T \
+"${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --entrypoint tar odoo \
   -C "/var/lib/odoo/filestore/${{DB_NAME}}" -czf - . \
   > "${{TMP_OUTPUT}}"
@@ -3362,6 +3397,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
 FORCE=false
@@ -3406,7 +3446,7 @@ SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
 cd "${{ROOT_DIR}}"
 
 FILESTORE_EXISTS=false
-FILESTORE_STATE="$(docker compose run --rm --no-deps -T \
+FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
   -e ODOO_DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
   -c 'if [ -d "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}" ]; then echo exists; else echo missing; fi')"
@@ -3421,7 +3461,7 @@ fi
 
 echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
 echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
-docker compose run --rm --no-deps -T \
+"${{DOCKER[@]}}" compose run --rm --no-deps -T \
   -e ODOO_DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
   -c 'set -eu
@@ -3442,6 +3482,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${ODOO_DOCKER_SUDO:-0}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $(basename "$0") RESTIC_COMMAND [ARGS...]" >&2
@@ -3489,7 +3534,7 @@ else
   exit 1
 fi
 
-exec docker "${DOCKER_ARGS[@]}" --entrypoint restic odoo "$@"
+exec "${DOCKER[@]}" "${DOCKER_ARGS[@]}" --entrypoint restic odoo "$@"
 '''
     return _write_docker_local_script(layout, "restic", content)
 
@@ -3536,6 +3581,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
+
+DOCKER=(docker)
+if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
+  DOCKER=(sudo docker)
+fi
 RESTIC="${{SCRIPT_DIR}}/restic.sh"
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
@@ -3581,7 +3631,7 @@ fi
 cd "${{ROOT_DIR}}"
 
 FILESTORE_EXISTS=false
-FILESTORE_STATE="$(docker compose run --rm --no-deps -T \
+FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --user 0:0 \
   -e ODOO_DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
@@ -3598,7 +3648,7 @@ fi
 echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
 echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
 
-docker compose run --rm --no-deps -T \
+"${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --user 0:0 \
   -e ODOO_DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
