@@ -239,6 +239,19 @@ jobs:
                       File.AppendAllText(logPath, joined + Environment.NewLine);
                   }
 
+                  if (joined.Contains("psql -v ON_ERROR_STOP=1", StringComparison.Ordinal))
+                  {
+                      var stdin = Console.In.ReadToEnd();
+                      if (!string.IsNullOrEmpty(logPath))
+                      {
+                          File.AppendAllText(
+                              logPath,
+                              "STDIN: " + stdin.Replace("\r", " ").Replace("\n", " ") + Environment.NewLine
+                          );
+                      }
+                      return 0;
+                  }
+
                   if (joined.Contains("SELECT datname FROM pg_database", StringComparison.Ordinal))
                   {
                       if (Environment.GetEnvironmentVariable("ODT_MOCK_DB_EXISTS") == "1")
@@ -417,6 +430,10 @@ jobs:
           try {
             Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
 
+            New-Item -ItemType Directory -Force -Path odoo-workspace\neutralize | Out-Null
+            Set-Content -LiteralPath odoo-workspace\neutralize\10-first.sql -Value "SELECT 'workspace-first';" -Encoding ASCII
+            Set-Content -LiteralPath odoo-workspace\neutralize\20-second.sql -Value "SELECT 'workspace-second';" -Encoding ASCII
+
             Push-Location odoo-workspace
             try {
               & .\docker\local\scripts\neutralize-db.bat
@@ -431,6 +448,18 @@ jobs:
             $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
             if ($log -notlike "*--entrypoint odoo odoo neutralize*") {
               throw "Odoo 18 helper did not use native neutralization:`n$log"
+            }
+            $workspacePsqlCount = ([regex]::Matches(
+              $log,
+              [regex]::Escape("compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d odoo_restore")
+            )).Count
+            if ($workspacePsqlCount -ne 2) {
+              throw "Expected two workspace neutralization SQL invocations, got ${workspacePsqlCount}:`n$log"
+            }
+            $firstIndex = $log.IndexOf("workspace-first", [StringComparison]::Ordinal)
+            $secondIndex = $log.IndexOf("workspace-second", [StringComparison]::Ordinal)
+            if ($firstIndex -lt 0 -or $secondIndex -le $firstIndex) {
+              throw "Workspace neutralization scripts did not run in filename order:`n$log"
             }
 
             Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue

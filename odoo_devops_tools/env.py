@@ -1327,7 +1327,13 @@ def load_project_config(
             )
         config[key] = cp.get("config", key)
 
-    return ProjectConfig(virtualenv=venv, odoo=odoo, addons=addons, config=config, docker=docker)
+    return ProjectConfig(
+        virtualenv=venv,
+        odoo=odoo,
+        addons=addons,
+        config=config,
+        docker=docker,
+    )
 
 
 def require_venv(
@@ -3465,6 +3471,7 @@ if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
 fi
 DEFAULT_DB_NAME={default_db_name}
 DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+NEUTRALIZE_DIR="${{ROOT_DIR}}/neutralize"
 
 cd "${{ROOT_DIR}}"
 
@@ -3477,6 +3484,17 @@ fi
 
 echo "INFO: Neutralizing Odoo database '${{DB_NAME}}'."
 {neutralize_command}
+if [[ -d "${{NEUTRALIZE_DIR}}" ]]; then
+  shopt -s nullglob
+  NEUTRALIZE_SQL_FILES=("${{NEUTRALIZE_DIR}}"/*.sql)
+  shopt -u nullglob
+  for SQL_FILE in "${{NEUTRALIZE_SQL_FILES[@]}}"; do
+    echo "INFO: Running workspace neutralization script: ${{SQL_FILE##*/}}"
+    "${{DOCKER[@]}}" compose exec -T db \
+      psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" < "${{SQL_FILE}}"
+  done
+fi
+
 echo "INFO: Database neutralization completed: ${{DB_NAME}}"
 """
     return _write_docker_local_script(layout, "neutralize-db", content)
@@ -4044,6 +4062,7 @@ if defined ODOO_DB_NAME (
 ) else (
   set "DB_NAME=%DEFAULT_DB_NAME%"
 )
+set "NEUTRALIZE_DIR=%ROOT_DIR%\neutralize"
 
 cd /d "%ROOT_DIR%" || exit /b 1
 
@@ -4059,6 +4078,14 @@ if not "%DB_EXISTS%"=="true" (
 
 echo INFO: Neutralizing Odoo database '%DB_NAME%'.
 {neutralize_command}
+if exist "%NEUTRALIZE_DIR%\." (
+  for /f "delims=" %%F in ('dir /b /a-d /on "%NEUTRALIZE_DIR%\*.sql" 2^>nul') do (
+    echo INFO: Running workspace neutralization script: %%F
+    type "%NEUTRALIZE_DIR%\%%F" | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%"
+    if errorlevel 1 exit /b 1
+  )
+)
+
 echo INFO: Database neutralization completed: %DB_NAME%
 endlocal
 exit /b 0

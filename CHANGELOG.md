@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.11 (2026-10-??)
+
+### Added
+
+* Add support for running custom SQL scripts during Docker database neutralization.
+
 ## 1.23.10 (2026-10-07)
 
 ### Added

@@ -386,6 +386,19 @@ For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization m
 
 For Odoo 13.0 through 15.0, where the native neutralization framework is not available, the helper applies a deliberately minimal compatibility neutralization through the Odoo ORM: it disables scheduled actions, configured outgoing mail servers, and configured incoming mail servers.
 
+Workspace-specific SQL can be run after the standard neutralization by placing scripts in `ROOT/neutralize/`:
+
+```text
+neutralize/
+├── 01-delete-fetchmail-servers.sql
+├── 02-disable-outgoing-mail-servers.sql
+└── 03-set-ir-config-params.sql
+```
+
+If the `neutralize/` directory does not exist, only the standard Odoo/legacy neutralization runs. When the directory exists, all `*.sql` files directly inside it are executed in lexicographic filename order against the selected database. SQL execution stops on the first error. Subdirectories are not traversed.
+
+Ready-to-adapt SQL examples are available in `examples/neutralize/`. They demonstrate removing incoming mail servers, disabling outgoing mail servers, and overriding environment-specific `ir.config_parameter` values.
+
 Neutralization is intentionally separate from database restore. A typical test/staging restore workflow is therefore:
 
 ```bash
@@ -1205,7 +1218,7 @@ commit = abcdef1
 This section is optional.
 
 - `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
-- `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`.
+- `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`. PostgreSQL 17 and older use `/var/lib/postgresql/data`; PostgreSQL 18 and newer use `/var/lib/postgresql`. Changing this value does not upgrade an existing PostgreSQL data volume.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
 - `mailpit` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
