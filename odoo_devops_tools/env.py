@@ -3277,7 +3277,7 @@ if [[ "${{DB_EXISTS}}" == true ]]; then
 fi
 "${{DOCKER[@]}}" compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
 "${{DOCKER[@]}}" compose exec -T db \
-  pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
+  pg_restore --verbose --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
   < "${{SOURCE}}"
 
 if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
@@ -3882,7 +3882,7 @@ if "%DB_EXISTS%"=="true" (
 )
 docker compose exec -T db createdb -U odoo --maintenance-db=postgres "%DB_NAME%"
 if errorlevel 1 exit /b 1
-docker compose exec -T db pg_restore --exit-on-error --no-owner --no-acl -U odoo -d "%DB_NAME%" < "%SOURCE%"
+docker compose exec -T db pg_restore --verbose --exit-on-error --no-owner --no-acl -U odoo -d "%DB_NAME%" < "%SOURCE%"
 if errorlevel 1 exit /b 1
 
 if /i "%RESTORE_MODE%"=="move" goto restore_done

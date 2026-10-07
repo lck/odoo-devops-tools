@@ -6,6 +6,10 @@
 
 * Add configurable read-write Docker shares.
 
+### Changed
+
+* Show verbose output during Docker database restores.
+
 ## 1.23.9 (2026-10-06)
 
 ### Added
