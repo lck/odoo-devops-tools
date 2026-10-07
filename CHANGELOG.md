@@ -1,10 +1,11 @@
 # Changelog
 
-## 1.23.10 (2026-10-07)
+## 1.23.10 (2026-10-??)
 
 ### Added
 
 * Add configurable read-write Docker shares.
+* Add configurable PostgreSQL version to the local Docker workflow.
 
 ### Changed
 

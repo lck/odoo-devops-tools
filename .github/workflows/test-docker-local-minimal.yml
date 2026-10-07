@@ -29,6 +29,7 @@ jobs:
         run: |
           uv run odoo-compose --init --sync-addons \
             --set odoo:version=18.0 \
+            --set docker:postgres_version=18 \
             --set docker:mailpit=true \
             --set docker:mailpit_webui_port=18025 \
             --set docker.share.exchange:source=shared/exchange \
@@ -85,6 +86,9 @@ jobs:
           grep -Fq 'source: "./shared/exchange"' odoo-workspace/compose.yaml
           grep -Fq 'target: "/mnt/exchange"' odoo-workspace/compose.yaml
           grep -Fq 'create_host_path: false' odoo-workspace/compose.yaml
+          grep -Fq 'image: postgres:18' odoo-workspace/compose.yaml
+          grep -Fxq '      - odoo-db-data:/var/lib/postgresql' odoo-workspace/compose.yaml
+          ! grep -Fq 'odoo-db-data:/var/lib/postgresql/data' odoo-workspace/compose.yaml
 
           test ! -e odoo-workspace/docker/local/addons
           test ! -e odoo-workspace/docker/deploy

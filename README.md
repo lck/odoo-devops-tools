@@ -1205,6 +1205,7 @@ commit = abcdef1
 This section is optional.
 
 - `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
+- `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
 - `mailpit` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.

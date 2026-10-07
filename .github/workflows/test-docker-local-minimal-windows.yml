@@ -33,6 +33,7 @@ jobs:
         run: |
           uv run odoo-compose --init `
             --set odoo:version=18.0 `
+            --set docker:postgres_version=18 `
             --set docker.share.exchange:source=shared/exchange `
             --set docker.share.exchange:target=/mnt/exchange
 
@@ -85,6 +86,16 @@ jobs:
             if ($compose -notlike "*$expected*") {
               throw "Generated Docker share configuration is missing '$expected'."
             }
+          }
+
+          if ($compose -notlike "*image: postgres:18*") {
+            throw "Generated Docker Compose does not use PostgreSQL 18."
+          }
+          if ($compose -notmatch '(?m)^\s+- odoo-db-data:/var/lib/postgresql\s*$') {
+            throw "Generated PostgreSQL 18 data volume does not use /var/lib/postgresql."
+          }
+          if ($compose -like "*odoo-db-data:/var/lib/postgresql/data*") {
+            throw "Generated PostgreSQL 18 data volume unexpectedly uses the pre-18 data path."
           }
 
       - name: Generate legacy neutralization helper
