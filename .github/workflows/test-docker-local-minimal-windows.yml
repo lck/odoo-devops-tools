@@ -118,8 +118,27 @@ jobs:
           if ($legacyContent -notlike "*Using legacy minimal neutralization for Odoo 15.*") {
             throw "Legacy neutralization mode was not generated."
           }
-          if ($legacyContent -notlike "*--entrypoint click-odoo odoo*") {
-            throw "Legacy neutralization helper does not use click-odoo."
+          foreach ($expected in @(
+            "INFO: Disabling scheduled actions.",
+            "INFO: Disabling outgoing mail servers.",
+            "INFO: Disabling incoming mail servers if fetchmail is installed.",
+            "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;",
+            "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;",
+            "to_regclass('fetchmail_server')"
+          )) {
+            if ($legacyContent -notlike "*$expected*") {
+              throw "Legacy neutralization helper is missing '$expected'."
+            }
+          }
+          if ($legacyContent -like "*--entrypoint click-odoo odoo*") {
+            throw "Legacy neutralization helper unexpectedly uses click-odoo."
+          }
+          $legacyPsqlCount = ([regex]::Matches(
+            $legacyContent,
+            [regex]::Escape('psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c ')
+          )).Count
+          if ($legacyPsqlCount -ne 3) {
+            throw "Expected three legacy neutralization psql commands, got ${legacyPsqlCount}."
           }
 
       - name: Test Mailpit local Docker generation
@@ -241,13 +260,16 @@ jobs:
 
                   if (joined.Contains("psql -v ON_ERROR_STOP=1", StringComparison.Ordinal))
                   {
-                      var stdin = Console.In.ReadToEnd();
-                      if (!string.IsNullOrEmpty(logPath))
+                      if (!joined.Contains(" -c ", StringComparison.Ordinal))
                       {
-                          File.AppendAllText(
-                              logPath,
-                              "STDIN: " + stdin.Replace("\r", " ").Replace("\n", " ") + Environment.NewLine
-                          );
+                          var stdin = Console.In.ReadToEnd();
+                          if (!string.IsNullOrEmpty(logPath))
+                          {
+                              File.AppendAllText(
+                                  logPath,
+                                  "STDIN: " + stdin.Replace("\r", " ").Replace("\n", " ") + Environment.NewLine
+                              );
+                          }
                       }
                       return 0;
                   }
@@ -476,8 +498,24 @@ jobs:
             }
 
             $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
-            if ($log -notlike "*--entrypoint click-odoo odoo*") {
-              throw "Odoo 15 helper did not use legacy click-odoo neutralization:`n$log"
+            $legacyPsqlCount = ([regex]::Matches(
+              $log,
+              [regex]::Escape("compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d odoo_restore -c")
+            )).Count
+            if ($legacyPsqlCount -ne 3) {
+              throw "Expected three legacy neutralization SQL invocations, got ${legacyPsqlCount}:`n$log"
+            }
+            foreach ($expected in @(
+              "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;",
+              "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;",
+              "to_regclass('fetchmail_server')"
+            )) {
+              if ($log -notlike "*$expected*") {
+                throw "Odoo 15 legacy neutralization did not execute '$expected':`n$log"
+              }
+            }
+            if ($log -like "*--entrypoint click-odoo odoo*") {
+              throw "Odoo 15 legacy neutralization unexpectedly used click-odoo:`n$log"
             }
           }
           finally {

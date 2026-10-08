@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.12 (2026-10-08)
+
+### Changed
+
+* Use direct PostgreSQL commands for legacy Docker database neutralization.
+
 ## 1.23.11 (2026-10-08)
 
 ### Added

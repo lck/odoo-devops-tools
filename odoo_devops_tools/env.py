@@ -3450,13 +3450,21 @@ echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
     else:
         neutralize_command = rf"""
 echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
-printf '%s\n' \
-  '[(model.search([("active", "=", True)]).write({{"active": False}})) for model_name in ("ir.cron", "ir.mail_server", "fetchmail.server") if model_name in env for model in (env[model_name],) if "active" in model._fields]; env.cr.commit()' | \
-  "${{DOCKER[@]}}" compose run --rm --no-deps -T \
-    --entrypoint click-odoo odoo \
-    -c /etc/odoo/odoo.conf \
-    -d "${{DB_NAME}}" \
-    --log-level=error
+
+echo "INFO: Disabling scheduled actions."
+"${{DOCKER[@]}}" compose exec -T db \
+  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
+  -c 'UPDATE ir_cron SET active = FALSE WHERE active = TRUE;'
+
+echo "INFO: Disabling outgoing mail servers."
+"${{DOCKER[@]}}" compose exec -T db \
+  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
+  -c 'UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;'
+
+echo "INFO: Disabling incoming mail servers if fetchmail is installed."
+"${{DOCKER[@]}}" compose exec -T db \
+  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
+  -c "DO \$\$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END \$\$;"
 """
 
     content = fr"""#!/usr/bin/env bash
@@ -4046,7 +4054,17 @@ if errorlevel 1 exit /b 1
 """
     else:
         neutralize_command = rf"""echo INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}.
-echo [(model.search([("active", "=", True)]).write({{"active": False}})) for model_name in ("ir.cron", "ir.mail_server", "fetchmail.server") if model_name in env for model in (env[model_name],) if "active" in model._fields]; env.cr.commit() | docker compose run --rm --no-deps -T --entrypoint click-odoo odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level=error
+
+echo INFO: Disabling scheduled actions.
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;"
+if errorlevel 1 exit /b 1
+
+echo INFO: Disabling outgoing mail servers.
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;"
+if errorlevel 1 exit /b 1
+
+echo INFO: Disabling incoming mail servers if fetchmail is installed.
+docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "DO $$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END $$;"
 if errorlevel 1 exit /b 1
 """
 
