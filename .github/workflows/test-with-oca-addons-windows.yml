@@ -106,6 +106,14 @@ jobs:
           $requiredPaths = @(
             "odoo-workspace\odoo-scripts\run.bat",
             "odoo-workspace\odoo-scripts\update.bat",
+            "odoo-workspace\odoo-scripts\backup-db.bat",
+            "odoo-workspace\odoo-scripts\restore-db.bat",
+            "odoo-workspace\odoo-scripts\neutralize-db.bat",
+            "odoo-workspace\odoo-scripts\backup-filestore.bat",
+            "odoo-workspace\odoo-scripts\restore-filestore.bat",
+            "odoo-workspace\odoo-scripts\restic.bat",
+            "odoo-workspace\odoo-scripts\backup-filestore-restic.bat",
+            "odoo-workspace\odoo-scripts\restore-filestore-restic.bat",
             "odoo-workspace\docker\local\scripts\backup-db.bat",
             "odoo-workspace\docker\local\scripts\restore-db.bat",
             "odoo-workspace\docker\local\scripts\backup-filestore.bat",
@@ -130,9 +138,96 @@ jobs:
             throw "Unix Docker helpers must not be generated on Windows: $($unixDockerHelpers.Name -join ', ')"
           }
 
+      - name: Verify native helper format
+        run: |
+          $nativeScripts = Get-ChildItem -LiteralPath "odoo-workspace\odoo-scripts" -Filter *.bat -File
+          foreach ($script in $nativeScripts) {
+            $content = Get-Content -LiteralPath $script.FullName -Raw
+            if ($content -match '_backup_restore|click-odoo-backupdb|click-odoo-restoredb') {
+              throw "Obsolete native helper implementation: $($script.Name)"
+            }
+          }
+
+      - name: Verify native binary path validation
+        working-directory: odoo-workspace
+        env:
+          RESTIC_REPOSITORY: ${{ runner.temp }}/native-bin-validation
+          RESTIC_PASSWORD: native-test
+        run: |
+          $pgDump = (Get-Command pg_dump).Source
+          # Use an installed executable to test the restic wrapper's path validation and argument forwarding.
+          $env:RESTIC_BIN = $pgDump
+          & .\odoo-scripts\restic.bat --version
+          if ($LASTEXITCODE -ne 0) { throw "Restic wrapper rejected an executable file." }
+
+          $env:RESTIC_BIN = Split-Path -Parent $pgDump
+          & .\odoo-scripts\restic.bat --version
+          if ($LASTEXITCODE -eq 0) { throw "Restic wrapper accepted a directory as an executable." }
+
+          $env:RESTIC_BIN = Join-Path $env:RUNNER_TEMP "missing-restic.exe"
+          & .\odoo-scripts\restic.bat --version
+          if ($LASTEXITCODE -eq 0) { throw "Restic wrapper accepted a missing executable." }
+
+          $env:POSTGRES_BIN = $pgDump
+          $output = Join-Path $env:RUNNER_TEMP "invalid-native-bin.dump"
+          & .\odoo-scripts\backup-db.bat $output
+          if ($LASTEXITCODE -eq 0) { throw "Database backup accepted a file as POSTGRES_BIN." }
+
+          $invalidBin = Join-Path $env:RUNNER_TEMP "native invalid bin"
+          New-Item -ItemType Directory -Force -Path (Join-Path $invalidBin "pg_dump.exe") | Out-Null
+          $env:POSTGRES_BIN = $invalidBin
+          & .\odoo-scripts\backup-db.bat $output
+          if ($LASTEXITCODE -eq 0) { throw "Database backup accepted a directory as pg_dump.exe." }
+          if ((Test-Path -LiteralPath $output) -or (Test-Path -LiteralPath "$output.tmp")) {
+            throw "Invalid binary paths created backup output."
+          }
+          $global:LASTEXITCODE = 0
+
       - name: Init database with OCA addons
         working-directory: odoo-workspace
         run: .\odoo-scripts\run.bat -i web_notify,helpdesk_mgmt --stop-after-init
+
+      - name: Test native database and filestore backup/restore
+        working-directory: odoo-workspace
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: odoo
+          PGPASSWORD: odoo
+        run: |
+          psql -d odoo -v ON_ERROR_STOP=1 -c "UPDATE ir_config_parameter SET value='native-source-identity' WHERE key='database.uuid';"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to prepare source database." }
+          New-Item -ItemType Directory -Force -Path odoo-data\filestore\odoo | Out-Null
+          Set-Content -LiteralPath odoo-data\filestore\odoo\attachment -Value "native-test" -Encoding ASCII
+          $env:POSTGRES_BIN = Split-Path -Parent (Get-Command pg_dump).Source
+          & .\odoo-scripts\backup-db.bat .\odoo-backups\native.dump
+          if ($LASTEXITCODE -ne 0) { throw "Database backup failed." }
+          & .\odoo-scripts\backup-filestore.bat .\odoo-backups\native-filestore.tar.gz
+          if ($LASTEXITCODE -ne 0) { throw "Filestore backup failed." }
+          uv run odoo-compose ..\odoo-project.ini --root . --no-local-docker --set config:db_name=odoo_native_restore
+          if ($LASTEXITCODE -ne 0) { throw "Failed to regenerate native helpers." }
+          & .\odoo-scripts\restore-db.bat .\odoo-backups\native.dump
+          if ($LASTEXITCODE -ne 0) { throw "Copy restore failed." }
+          $uuid = (psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not $uuid -or $uuid -eq "native-source-identity") {
+            throw "Copy restore did not regenerate database identity."
+          }
+          & .\odoo-scripts\restore-db.bat .\odoo-backups\native.dump
+          if ($LASTEXITCODE -eq 0) { throw "Database restore succeeded without --force." }
+          & .\odoo-scripts\restore-db.bat --move .\odoo-backups\native.dump --force
+          if ($LASTEXITCODE -ne 0) { throw "Move restore failed." }
+          $uuid = (psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $uuid -ne "native-source-identity") {
+            throw "Move restore did not preserve database identity."
+          }
+          & .\odoo-scripts\restore-filestore.bat .\odoo-backups\native-filestore.tar.gz
+          if ($LASTEXITCODE -ne 0) { throw "Filestore restore failed." }
+          & .\odoo-scripts\restore-filestore.bat .\odoo-backups\native-filestore.tar.gz
+          if ($LASTEXITCODE -eq 0) { throw "Filestore restore succeeded without --force." }
+          & .\odoo-scripts\restore-filestore.bat --force .\odoo-backups\native-filestore.tar.gz
+          if ($LASTEXITCODE -ne 0) { throw "Forced filestore restore failed." }
+          $attachment = (Get-Content -LiteralPath odoo-data\filestore\odoo_native_restore\attachment -Raw).Trim()
+          if ($attachment -ne "native-test") { throw "Restored filestore content is incorrect." }
 
       - name: Verify OCA addons installed in database
         env:

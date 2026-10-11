@@ -31,7 +31,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git \
-            postgresql-client \
+            postgresql-client-16 \
+            restic \
             build-essential \
             libffi-dev \
             libjpeg-dev \
@@ -101,6 +102,10 @@ jobs:
       - name: Check generated scripts
         run: |
           test -x odoo-workspace/odoo-scripts/run.sh
+          for helper in backup-db restore-db neutralize-db backup-filestore \
+            restore-filestore restic backup-filestore-restic restore-filestore-restic; do
+            test -x "odoo-workspace/odoo-scripts/${helper}.sh"
+          done
           ls -la odoo-workspace/odoo-scripts
 
       - name: Init database
@@ -110,6 +115,72 @@ jobs:
       - name: Update addons
         working-directory: odoo-workspace
         run: ./odoo-scripts/update.sh
+
+      - name: Back up native database and filestore
+        working-directory: odoo-workspace
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: odoo
+          PGPASSWORD: odoo
+        run: |
+          psql -d odoo -v ON_ERROR_STOP=1 -c "UPDATE ir_config_parameter SET value='test-source-identity' WHERE key='database.uuid';"
+          mkdir -p odoo-data/filestore/odoo
+          printf '%s' 'native-filestore-test' > odoo-data/filestore/odoo/attachment
+          export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+          ./odoo-scripts/backup-db.sh ./odoo-backups/native.dump
+          ./odoo-scripts/backup-filestore.sh ./odoo-backups/native-filestore.tar.gz
+          pg_restore --list ./odoo-backups/native.dump >/dev/null
+          tar -tzf ./odoo-backups/native-filestore.tar.gz
+
+      - name: Test native copy/move restore and force protection
+        working-directory: odoo-workspace
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: odoo
+          PGPASSWORD: odoo
+        run: |
+          export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+          uv run odoo-compose --no-local-docker --set config:db_name=odoo_native_restore
+          ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump
+          ./odoo-scripts/restore-filestore.sh ./odoo-backups/native-filestore.tar.gz
+          copied_uuid="$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")"
+          test -n "$copied_uuid"
+          test "$copied_uuid" != test-source-identity
+          test "$(cat odoo-data/filestore/odoo_native_restore/attachment)" = native-filestore-test
+          if ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump; then
+            echo 'Database restore succeeded without --force'; exit 1
+          fi
+          if ./odoo-scripts/restore-filestore.sh ./odoo-backups/native-filestore.tar.gz; then
+            echo 'Filestore restore succeeded without --force'; exit 1
+          fi
+          ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump --force --move
+          test "$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")" = test-source-identity
+          ./odoo-scripts/restore-filestore.sh --force ./odoo-backups/native-filestore.tar.gz
+          mkdir -p neutralize
+          printf '%s\n' "SELECT 1;" > neutralize/10-first.sql
+          printf '%s\n' "UPDATE ir_config_parameter SET value='neutralized' WHERE key='database.uuid';" > neutralize/20-last.sql
+          ./odoo-scripts/neutralize-db.sh
+          test "$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")" = neutralized
+
+      - name: Test native restic filestore roundtrip
+        working-directory: odoo-workspace
+        env:
+          RESTIC_REPOSITORY: ${{ runner.temp }}/native-restic-repo
+          RESTIC_PASSWORD: native-test-password
+          RESTIC_HOST: native-ci
+        run: |
+          export RESTIC_BIN="$(command -v restic)"
+          ./odoo-scripts/restic.sh init
+          ./odoo-scripts/backup-filestore-restic.sh
+          uv run odoo-compose --no-local-docker --set config:db_name=odoo_native_restic
+          RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh
+          test "$(cat odoo-data/filestore/odoo_native_restic/attachment)" = native-filestore-test
+          if RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh; then
+            echo 'Restic restore succeeded without --force'; exit 1
+          fi
+          RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh --force
 
       - name: Show generated workspace
         if: always()

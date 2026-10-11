@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+* Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
+
 ### Removed
 
 * Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.

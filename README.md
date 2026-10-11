@@ -32,7 +32,7 @@ ROOT/
 │   ├── oca-web/
 │   └── oca-helpdesk/
 ├── odoo-configs/           # generated Odoo configuration
-├── odoo-scripts/           # run, test, shell, backup, restore, update
+├── odoo-scripts/           # run, test, shell, update, database/filestore helpers
 ├── odoo-data/              # Odoo data directory
 ├── odoo-logs/              # runtime logs
 ├── odoo-backups/           # backups created by helper scripts
@@ -638,35 +638,280 @@ This recreates the virtual environment at `ROOT/venv` using the system Python.
 
 ### 2.3. Script reference
 
-This section describes the native helpers under `ROOT/odoo-scripts/`. Docker backup/restore helpers are documented in the Docker workflow section above.
+The native venv workflow generates platform-specific helper scripts under `ROOT/odoo-scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers. `instance.sh` is available only on Unix-like systems.
 
-Most helper scripts are generated in both Unix (`.sh`) and Windows (`.bat`) variants. `instance.sh` is available only on Unix-like systems.
+```text
+odoo-scripts/
+├── run.sh
+├── shell.sh
+├── update.sh
+├── backup-db.sh
+├── restore-db.sh
+├── neutralize-db.sh
+├── backup-filestore.sh
+├── restore-filestore.sh
+├── restic.sh
+├── backup-filestore-restic.sh
+├── restore-filestore-restic.sh
+├── instance.sh
+└── test.sh
+```
 
-Native database backup and restore scripts are generated only when `[config].db_name` is configured.
+Database and filestore helpers use `[config].db_name` from `odoo-project.ini`, or `odoo` when it is not configured.
 
-The examples below use the Unix form.
+Install PostgreSQL client tools (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`) on the host.
+
+Select a specific installed tool version with environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `POSTGRES_BIN` | Directory containing the PostgreSQL client executables (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`; `.exe` on Windows). |
+| `RESTIC_BIN` | Path to the restic executable (`restic.exe` on Windows). |
+
+These variables are read when a helper runs, so script regeneration is not required.
+
+```bash
+export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+export RESTIC_BIN=/opt/restic/restic
+
+./odoo-scripts/backup-db.sh
+./odoo-scripts/backup-filestore-restic.sh
+```
+
+On Windows, set the variables in the command prompt before running the `.bat` helpers:
+
+```bat
+set "POSTGRES_BIN=C:\Program Files\PostgreSQL\16\bin"
+set "RESTIC_BIN=C:\Tools\restic\restic.exe"
+
+odoo-scripts\backup-db.bat
+odoo-scripts\backup-filestore-restic.bat
+```
 
 #### 2.3.1. run
 
-Starts Odoo in the foreground.
-
-Any extra arguments are forwarded to the underlying command `odoo-bin`.
-
-Examples:
+Runs Odoo in the foreground using the workspace venv and generated configuration:
 
 ```bash
 ./odoo-scripts/run.sh
-./odoo-scripts/run.sh --dev=all
-./odoo-scripts/run.sh -i sale,crm --without-demo=all
 ```
 
-#### 2.3.2. instance
+Any extra arguments are passed through to Odoo:
 
-Manages Odoo as a background service on Unix-like systems.
+```bash
+./odoo-scripts/run.sh -i base --stop-after-init
+```
 
-Logs are written to `ROOT/odoo-logs/odoo-server.log` and the PID is stored in `ROOT/odoo-logs/odoo-server.pid`.
+#### 2.3.2. shell
 
-Examples:
+Opens an Odoo shell using the workspace venv and generated configuration:
+
+```bash
+./odoo-scripts/shell.sh
+```
+
+Any extra arguments are passed through to the underlying Odoo shell command.
+
+#### 2.3.3. update
+
+Updates installed addons using `click-odoo-update`:
+
+```bash
+./odoo-scripts/update.sh
+```
+
+Any extra arguments are passed through to `click-odoo-update`:
+
+```bash
+./odoo-scripts/update.sh --update-all
+```
+
+#### 2.3.4. Database backup
+
+Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
+
+```bash
+./odoo-scripts/backup-db.sh
+```
+
+The default output name is timestamped, for example:
+
+```text
+odoo-backups/odoo_20260923_093000.dump
+```
+
+Pass an output path explicitly when needed:
+
+```bash
+./odoo-scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
+```
+
+#### 2.3.5. Database restore
+
+Restore a database dump with `pg_restore`:
+
+```bash
+./odoo-scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
+```
+
+Database restores use copy semantics by default, matching `click-odoo-restoredb --copy`.
+After `pg_restore`, Odoo database identity parameters are regenerated so the restored
+database can coexist with the source database:
+
+```bash
+./odoo-scripts/restore-db.sh --copy ./odoo-backups/pre-upgrade.dump
+```
+
+Use `--move` only when the restored database replaces the original database and its
+identity must be preserved:
+
+```bash
+./odoo-scripts/restore-db.sh --move ./odoo-backups/pre-upgrade.dump
+```
+
+If the target database already exists, the restore is rejected unless `--force` is used. With `--force`, the existing database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
+
+```bash
+./odoo-scripts/restore-db.sh --force ./odoo-backups/pre-upgrade.dump
+```
+
+#### 2.3.6. Database neutralization
+
+For development or test databases restored from production, run the generated neutralization helper explicitly:
+
+```bash
+./odoo-scripts/neutralize-db.sh
+```
+
+For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization mechanism. This applies the `neutralize.sql` scripts provided by installed Odoo modules, disabling or redirecting production-side effects such as scheduled actions, outgoing email, and supported external integrations.
+
+For Odoo 13.0 through 15.0, where the native neutralization framework is not available, the helper applies a deliberately minimal compatibility neutralization through PostgreSQL commands: it disables scheduled actions, configured outgoing mail servers, and configured incoming mail servers.
+
+Workspace-specific SQL can be run after the standard neutralization by placing scripts in `ROOT/neutralize/`:
+
+```text
+neutralize/
+├── 01-delete-fetchmail-servers.sql
+├── 02-disable-outgoing-mail-servers.sql
+└── 03-set-ir-config-params.sql
+```
+
+If the `neutralize/` directory does not exist, only the standard Odoo/legacy neutralization runs. When the directory exists, all `*.sql` files directly inside it are executed in lexicographic filename order against the selected database. SQL execution stops on the first error. Subdirectories are not traversed.
+
+Ready-to-adapt SQL examples are available in `examples/neutralize/`. They demonstrate removing incoming mail servers, disabling outgoing mail servers, and overriding environment-specific `ir.config_parameter` values.
+
+Neutralization is intentionally separate from database restore. A typical test/staging restore workflow is therefore:
+
+```bash
+./odoo-scripts/restore-db.sh --copy ./odoo-backups/production.dump
+./odoo-scripts/restore-filestore.sh ./odoo-backups/production-filestore.tar.gz
+./odoo-scripts/neutralize-db.sh
+```
+
+#### 2.3.7. Filestore backup
+
+Create a compressed tar archive of the selected database filestore:
+
+```bash
+./odoo-scripts/backup-filestore.sh
+```
+
+The default output name is timestamped, for example:
+
+```text
+odoo-backups/odoo_20260923_093000_filestore.tar.gz
+```
+
+Pass an output path explicitly when needed:
+
+```bash
+./odoo-scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+The helper reads the native filestore under `ROOT/odoo-data/filestore/<database>`, so the Odoo service does not need to be running.
+
+When creating a matching database and filestore backup for migration or disaster recovery, stop Odoo first to prevent writes while both parts are captured:
+
+```bash
+./odoo-scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
+./odoo-scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+#### 2.3.8. Filestore restore
+
+Restore a filestore archive:
+
+```bash
+./odoo-scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+If the target filestore already exists, the restore is rejected unless `--force` is used. With `--force`, the existing filestore directory is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
+
+```bash
+./odoo-scripts/restore-filestore.sh --force ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+#### 2.3.9. Restic filestore backup
+
+Install `restic` on the host and make it available on `PATH`, or select its executable with `RESTIC_BIN`, to use these helpers. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
+
+Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the host, use an absolute path. Windows drive paths such as `C:\backups\odoo` are supported by `restic.bat`:
+
+```bash
+export RESTIC_REPOSITORY=/srv/restic/odoo
+export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
+
+./odoo-scripts/restic.sh init
+```
+
+A remote restic repository URL can be used instead of a local path. Backend-specific authentication or external helper programs, when required by that backend, must also be made available on the host.
+
+Create a restic snapshot of the selected database filestore:
+
+```bash
+./odoo-scripts/backup-filestore-restic.sh
+```
+
+The database name comes from `[config].db_name`. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the native host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
+
+An optional backup identifier can be added as another snapshot tag:
+
+```bash
+RESTIC_BACKUP_ID=20260923_020000 ./odoo-scripts/backup-filestore-restic.sh
+```
+
+This is useful for pairing a PostgreSQL dump with the corresponding filestore snapshot.
+
+List or inspect snapshots through the generic wrapper:
+
+```bash
+./odoo-scripts/restic.sh snapshots
+./odoo-scripts/restic.sh check
+```
+
+#### 2.3.10. Restic filestore restore
+
+Restore the latest matching filestore snapshot:
+
+```bash
+./odoo-scripts/restore-filestore-restic.sh --force
+```
+
+If the target filestore does not exist yet, `--force` is not required. If it already exists, the restore is rejected unless `--force` is used.
+
+Or restore a specific snapshot ID:
+
+```bash
+./odoo-scripts/restore-filestore-restic.sh --force SNAPSHOT_ID
+```
+
+With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
+
+Set `RESTIC_SOURCE_DB_NAME` to restore another database's filestore into the selected database. Snapshots record the absolute native filestore path, so use the same workspace/data path when restoring from another host.
+
+#### 2.3.11. instance
+
+Manages Odoo as a background service on Unix-like systems:
 
 ```bash
 ./odoo-scripts/instance.sh start
@@ -675,69 +920,20 @@ Examples:
 ./odoo-scripts/instance.sh status
 ```
 
-#### 2.3.3. test
+Logs are written to `ROOT/odoo-logs/odoo-server.log` and the PID is stored in `ROOT/odoo-logs/odoo-server.pid`.
 
-Runs Odoo tests.
+#### 2.3.12. test
 
-The script always adds `--test-enable --stop-after-init`.
-
-Any extra arguments are forwarded to the underlying command `odoo-bin`.
-
-Examples:
+Runs Odoo tests with `--test-enable --stop-after-init`:
 
 ```bash
 ./odoo-scripts/test.sh
+```
+
+Any extra arguments are passed through to Odoo:
+
+```bash
 ./odoo-scripts/test.sh -i sale --test-tags /sale
-```
-
-#### 2.3.4. shell
-
-Opens an Odoo shell.
-
-Examples:
-
-```bash
-./odoo-scripts/shell.sh
-```
-
-#### 2.3.5. backup
-
-Creates a timestamped ZIP backup under `ROOT/odoo-backups/`.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-backupdb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-backupdb-beta) package.
-
-Examples:
-
-```bash
-./odoo-scripts/backup.sh
-```
-
-#### 2.3.6. restore
-
-Restores a backup into the configured database.
-
-The script always adds `--copy --neutralize`.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-restoredb` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-restoredb-beta) package.
-
-Examples:
-
-```bash
-./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip
-./odoo-scripts/restore.sh ./odoo-backups/odoo_20260331_221443.zip --force
-```
-
-#### 2.3.7. update
-
-Updates an Odoo database automatically detecting addons to update based on a hash of their file content.
-
-Any extra arguments are forwarded to the underlying command `click-odoo-update` from [`click-odoo-contrib`](https://pypi.org/project/click-odoo-contrib/#click-odoo-update-stable) package.
-
-Examples:
-
-```bash
-./odoo-scripts/update.sh
-./odoo-scripts/update.sh --update-all
 ```
 
 ---

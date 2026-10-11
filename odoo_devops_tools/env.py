@@ -2372,168 +2372,1180 @@ def write_shell_bat(layout: Layout) -> None:
     )
 
 
-def write_backup_sh(layout: Layout, db_name: str) -> None:
-    content = f"""#!/usr/bin/env bash
+_NATIVE_BACKUP_SCRIPT_NAMES = (
+    "backup-db", "restore-db", "neutralize-db", "backup-filestore",
+    "restore-filestore", "restic", "backup-filestore-restic",
+    "restore-filestore-restic",
+)
+
+
+def _native_default_db_name(cfg: ProjectConfig) -> str:
+    db_name = _docker_default_db_name(cfg)
+    if db_name in (".", "..") or any(c in db_name for c in ("/", "\\", "\x00", "\r", "\n")):
+        raise Exception("Database helpers require a single database name, not a path.")
+    return db_name
+
+
+def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
+    # libpq reads these environment variables, keeping passwords out of command
+    # arguments. Missing/False options leave libpq defaults and .pgpass intact.
+    values: dict[str, str] = {}
+    for key, variable in (
+        ("db_host", "PGHOST"), ("db_port", "PGPORT"), ("db_user", "PGUSER"),
+        ("db_password", "PGPASSWORD"), ("db_sslmode", "PGSSLMODE"),
+    ):
+        value = _format_conf_value(cfg.config.get(key, "")).strip()
+        if value and value.lower() not in ("false", "none"):
+            values[variable] = value
+    return values
+
+
+def _native_pg_env_sh(cfg: ProjectConfig) -> str:
+    return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in _native_pg_env(cfg).items())
+
+
+def _native_pg_env_bat(cfg: ProjectConfig) -> str:
+    lines: list[str] = []
+    for key, value in _native_pg_env(cfg).items():
+        if "\r" in value or "\n" in value:
+            raise Exception("Native batch PostgreSQL connection settings must be single-line values.")
+        # SET without enclosing quotes lets caret escaping preserve embedded
+        # quotes as well as cmd metacharacters. Delayed expansion stays disabled.
+        value = value.replace("^", "^^").replace("%", "%%")
+        for character in '&|<>()"':
+            value = value.replace(character, "^" + character)
+        lines.append(f"set {key}={value}")
+    return "\n".join(lines)
+
+
+def _native_pg_commands_sh(*commands: str) -> str:
+    content = r'''POSTGRES_BIN="${POSTGRES_BIN:-}"
+if [[ -n "${POSTGRES_BIN}" ]]; then
+  if [[ ! -d "${POSTGRES_BIN}" ]]; then
+    echo "ERROR: PostgreSQL bin directory not found: ${POSTGRES_BIN}" >&2
+    exit 1
+  fi
+  POSTGRES_BIN="$(cd "${POSTGRES_BIN}" && pwd)"
+fi
+'''
+    for command in commands:
+        content += f'{command.upper()}="${{POSTGRES_BIN:+${{POSTGRES_BIN}}/}}{command}"\n'
+    command_vars = " ".join(f'"${{{command.upper()}}}"' for command in commands)
+    content += 'for COMMAND in ' + command_vars + r'''; do
+  if ! command -v "${COMMAND}" >/dev/null 2>&1; then
+    echo "ERROR: PostgreSQL command not found/executable: ${COMMAND}" >&2
+    exit 1
+  fi
+done
+'''
+    return content
+
+
+def _native_pg_commands_bat(*commands: str) -> str:
+    content = r"""if not defined POSTGRES_BIN goto postgres_from_path
+for %%I in ("%POSTGRES_BIN%") do set "POSTGRES_ATTRIBUTES=%%~aI"
+if /i not "%POSTGRES_ATTRIBUTES:~0,1%"=="d" (
+  echo ERROR: PostgreSQL bin directory not found: "%POSTGRES_BIN%"
+  exit /b 1
+)
+for %%I in ("%POSTGRES_BIN%") do set "POSTGRES_BIN=%%~fI"
+"""
+    for command in commands:
+        variable = command.upper()
+        content += rf'''set "{variable}=%POSTGRES_BIN%\{command}.exe"
+if not exist "%{variable}%" (
+  echo ERROR: PostgreSQL command not found: "%{variable}%"
+  exit /b 1
+)
+for %%I in ("%{variable}%") do set "POSTGRES_ATTRIBUTES=%%~aI"
+if not "%POSTGRES_ATTRIBUTES:~0,1%"=="-" (
+  echo ERROR: PostgreSQL command must be an executable file: "%{variable}%"
+  exit /b 1
+)
+'''
+    content += "goto postgres_commands_ready\n\n:postgres_from_path\n"
+    for command in commands:
+        content += f'''set "{command.upper()}={command}"
+where {command} >nul 2>&1
+if errorlevel 1 (
+  echo ERROR: PostgreSQL command not found on PATH: {command}
+  exit /b 1
+)
+'''
+    content += "\n:postgres_commands_ready\n"
+    return content
+
+
+def _native_restic_command_sh() -> str:
+    return r'''RESTIC_EXE="${RESTIC_BIN:-restic}"
+if ! RESTIC_EXE="$(command -v "${RESTIC_EXE}")"; then
+  echo "ERROR: restic command not found/executable: ${RESTIC_BIN:-restic}" >&2
+  exit 1
+fi
+if [[ "${RESTIC_EXE}" == */* ]]; then
+  RESTIC_EXE="$(cd "$(dirname "${RESTIC_EXE}")" && pwd)/$(basename "${RESTIC_EXE}")"
+fi
+export RESTIC_BIN="${RESTIC_EXE}"
+'''
+
+
+def _native_restic_command_bat() -> str:
+    return r"""set "RESTIC_EXE="
+if not defined RESTIC_BIN goto restic_from_path
+if not exist "%RESTIC_BIN%" (
+  echo ERROR: restic executable not found: "%RESTIC_BIN%"
+  exit /b 1
+)
+for %%I in ("%RESTIC_BIN%") do set "RESTIC_ATTRIBUTES=%%~aI"
+if not "%RESTIC_ATTRIBUTES:~0,1%"=="-" (
+  echo ERROR: RESTIC_BIN must be an executable file: "%RESTIC_BIN%"
+  exit /b 1
+)
+for %%I in ("%RESTIC_BIN%") do set "RESTIC_EXE=%%~fI"
+goto restic_command_ready
+
+:restic_from_path
+for /f "delims=" %%I in ('where restic 2^>nul') do if not defined RESTIC_EXE set "RESTIC_EXE=%%I"
+if not defined RESTIC_EXE (
+  echo ERROR: restic not found on PATH.
+  exit /b 1
+)
+
+:restic_command_ready
+set "RESTIC_BIN=%RESTIC_EXE%"
+"""
+
+
+def write_native_backup_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    pg_env = _native_pg_env_sh(cfg)
+    pg_commands = _native_pg_commands_sh("pg_dump")
+    content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve script directory
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
 
-VENV_DIR="${{ROOT_DIR}}/venv"
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-BACKUP_BIN="${{VENV_DIR}}/bin/click-odoo-backupdb"
-CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
+DB_NAME={configured_db_name}
+{pg_env}
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}.dump}}"
+TMP_OUTPUT="${{OUTPUT}}.tmp"
 
-TODAY=$(date +%Y%m%d)
-TIME=$(date +%H%M%S)
-BACKUP_FILENAME="{db_name}_${{TODAY}}_${{TIME}}.zip"
-FULL_BACKUP_PATH="${{BACKUPS_DIR}}/${{BACKUP_FILENAME}}"
+{pg_commands}
+cd "${{ROOT_DIR}}"
+mkdir -p "$(dirname "${{OUTPUT}}")"
+rm -f "${{TMP_OUTPUT}}"
+trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
 
-if [[ ! -d "${{VENV_DIR}}" ]]; then
-  echo "ERROR: required venv directory not found at ${{VENV_DIR}}" >&2
-  exit 1
-fi
-if [[ ! -d "${{BACKUPS_DIR}}" ]]; then
-  echo "ERROR: required odoo-backups directory not found at ${{BACKUPS_DIR}}" >&2
-  exit 1
-fi
-if [[ ! -x "${{BACKUP_BIN}}" ]]; then
-  echo "ERROR: click-odoo-backupdb not found/executable at ${{BACKUP_BIN}}" >&2
-  exit 1
-fi
-if [[ ! -f "${{CONF}}" ]]; then
-  echo "ERROR: Odoo config not found at ${{CONF}}" >&2
-  exit 1
-fi
+echo "INFO: Backing up PostgreSQL database '${{DB_NAME}}' to '${{OUTPUT}}'."
+"${{PG_DUMP}}" --format=custom --no-owner --no-acl "${{DB_NAME}}" \
+  > "${{TMP_OUTPUT}}"
 
-echo "INFO: Creating new backup '${{FULL_BACKUP_PATH}}' using config ${{CONF}}. Passing through any extra arguments."
-exec "${{BACKUP_BIN}}" -c "${{CONF}}" --format zip "{db_name}" "${{FULL_BACKUP_PATH}}" --log-level debug "$@"
+mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
+trap - EXIT
+echo "INFO: Database backup created: ${{OUTPUT}}"
 """
-    _write_script(layout, "backup", "sh", content)
+    return _write_script(layout, "backup-db", "sh", content)
 
 
-def write_backup_bat(layout: Layout, db_name: str) -> None:
-    content = rf"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set BACKUPS_DIR=%ROOT_DIR%\odoo-backups
-set BACKUP_BIN=%VENV_DIR%\Scripts\click-odoo-backupdb.exe
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%BACKUPS_DIR%" (
-  echo ERROR: required odoo-backups directory not found at %BACKUPS_DIR%
-  exit /b 1
-)
-if not exist "%BACKUP_BIN%" (
-  echo ERROR: click-odoo-backupdb not found at %BACKUP_BIN%
-  exit /b 1
-)
-if not exist "%CONF%" (
-  echo ERROR: Odoo config not found at %CONF%
-  exit /b 1
-)
-
-REM Build timestamped filename (yyyyMMdd_HHmmss) via PowerShell for reliable formatting
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set TODAY=%%i
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format HHmmss"') do set TIME=%%i
-
-set BACKUP_FILENAME={db_name}_%TODAY%_%TIME%.zip
-set FULL_BACKUP_PATH=%BACKUPS_DIR%\%BACKUP_FILENAME%
-
-echo INFO: Creating new backup "%FULL_BACKUP_PATH%" using config %CONF%. Passing through any extra arguments.
-"%BACKUP_BIN%" -c "%CONF%" --format zip "{db_name}" "%FULL_BACKUP_PATH%" --log-level debug %*
-
-endlocal
-"""
-    _write_script(layout, "backup", "bat", content)
-
-
-def write_restore_sh(layout: Layout, db_name: str) -> None:
-    content = f"""#!/usr/bin/env bash
+def write_native_restore_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    pg_env = _native_pg_env_sh(cfg)
+    pg_commands = _native_pg_commands_sh("psql", "dropdb", "createdb", "pg_restore")
+    content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
-# Resolve script directory
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
 
-VENV_DIR="${{ROOT_DIR}}/venv"
-RESTORE_BIN="${{VENV_DIR}}/bin/click-odoo-restoredb"
 CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
+CLICK_ODOO="${{ROOT_DIR}}/venv/bin/click-odoo"
+DB_NAME={configured_db_name}
+{pg_env}
+FORCE=false
+RESTORE_MODE=copy
+SOURCE=""
 
-if [[ ! -d "${{VENV_DIR}}" ]]; then
-  echo "ERROR: required venv directory not found at ${{VENV_DIR}}" >&2
-  exit 1
-fi
-if [[ ! -x "${{RESTORE_BIN}}" ]]; then
-  echo "ERROR: click-odoo-restoredb not found/executable at ${{RESTORE_BIN}}" >&2
-  exit 1
-fi
-if [[ ! -f "${{CONF}}" ]]; then
-  echo "ERROR: Odoo config not found at ${{CONF}}" >&2
-  exit 1
-fi
+usage() {{
+  echo "Usage: $(basename "$0") [--force] [--copy|--move] BACKUP.dump" >&2
+}}
 
-if [[ $# -lt 1 ]]; then
-  echo "ERROR: missing restore source (backup file/path). Provide it as the first argument." >&2
-  echo "Example: ./restore.sh /path/to/backup.zip" >&2
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    --copy)
+      RESTORE_MODE=copy
+      ;;
+    --move)
+      RESTORE_MODE=move
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "${{SOURCE}}" ]]; then
+        usage
+        exit 2
+      fi
+      SOURCE="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${{SOURCE}}" ]]; then
+  usage
   exit 2
 fi
 
-echo "INFO: Restoring Odoo database '{db_name}' using config ${{CONF}}. Passing through any extra arguments."
-exec "${{RESTORE_BIN}}" -c "${{CONF}}" --copy --neutralize --log-level debug "{db_name}" "$@"
+if [[ ! -f "${{SOURCE}}" ]]; then
+  echo "ERROR: database backup not found: ${{SOURCE}}" >&2
+  exit 1
+fi
+SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
+
+{pg_commands}
+cd "${{ROOT_DIR}}"
+
+DB_EXISTS=false
+DATABASES="$("${{PSQL}}" -X -d postgres -Atqc "SELECT datname FROM pg_database")"
+if grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
+  DB_EXISTS=true
+fi
+
+if [[ "${{DB_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
+
+if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
+  if [[ ! -x "${{CLICK_ODOO}}" || ! -f "${{CONF}}" ]]; then
+    echo "ERROR: copy restore requires venv click-odoo and Odoo config: ${{CONF}}" >&2
+    exit 1
+  fi
+fi
+
+echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
+echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
+if [[ "${{DB_EXISTS}}" == true ]]; then
+  "${{DROPDB}}" --force --maintenance-db=postgres "${{DB_NAME}}"
+fi
+"${{CREATEDB}}" --maintenance-db=postgres "${{DB_NAME}}"
+"${{PG_RESTORE}}" --verbose --exit-on-error --no-owner --no-acl -d "${{DB_NAME}}" \
+  < "${{SOURCE}}"
+
+if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
+  echo "INFO: Resetting copied Odoo database identity for '${{DB_NAME}}'."
+  printf '%s\n' 'env["ir.config_parameter"].init(force=True)' | \
+    "${{CLICK_ODOO}}" -c "${{CONF}}" -d "${{DB_NAME}}" --log-level=error
+
+  "${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" <<'SQL'
+DELETE FROM ir_config_parameter
+WHERE key = 'database.enterprise_code';
+
+UPDATE ir_config_parameter
+SET value = 'copy'
+WHERE key = 'database.expiration_reason'
+  AND value != 'demo';
+
+UPDATE ir_config_parameter
+SET value = CURRENT_DATE + INTERVAL '2 month'
+WHERE key = 'database.expiration_date';
+SQL
+else
+  echo "INFO: Preserving Odoo database identity (--move)."
+fi
+
+echo "INFO: Database restore completed: ${{DB_NAME}}"
 """
-    _write_script(layout, "restore", "sh", content)
+    return _write_script(layout, "restore-db", "sh", content)
 
 
-def write_restore_bat(layout: Layout, db_name: str) -> None:
+def write_native_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    odoo_bin = _script_odoo_bin_sh(layout)
+    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
+    if odoo_major_version >= 16:
+        neutralize_command = rf"""
+if [[ ! -x "${{PY}}" || ! -f "${{ODOO_BIN}}" || ! -f "${{CONF}}" ]]; then
+  echo "ERROR: native neutralization requires venv python, odoo-bin and Odoo config." >&2
+  exit 1
+fi
+echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
+"${{PY}}" "${{ODOO_BIN}}" neutralize -c "${{CONF}}" -d "${{DB_NAME}}"
+"""
+    else:
+        neutralize_command = rf"""
+echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
+
+echo "INFO: Disabling scheduled actions."
+"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
+  -c 'UPDATE ir_cron SET active = FALSE WHERE active = TRUE;'
+
+echo "INFO: Disabling outgoing mail servers."
+"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
+  -c 'UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;'
+
+echo "INFO: Disabling incoming mail servers if fetchmail is installed."
+"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
+  -c "DO \$\$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END \$\$;"
+"""
+
+    pg_env = _native_pg_env_sh(cfg)
+    pg_commands = _native_pg_commands_sh("psql")
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
+
+PY="${{ROOT_DIR}}/venv/bin/python"
+ODOO_BIN="{odoo_bin}"
+CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
+DB_NAME={configured_db_name}
+{pg_env}
+NEUTRALIZE_DIR="${{ROOT_DIR}}/neutralize"
+
+{pg_commands}
+cd "${{ROOT_DIR}}"
+
+DATABASES="$("${{PSQL}}" -X -d postgres -Atqc "SELECT datname FROM pg_database")"
+if ! grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
+  echo "ERROR: target database '${{DB_NAME}}' does not exist." >&2
+  exit 1
+fi
+
+echo "INFO: Neutralizing Odoo database '${{DB_NAME}}'."
+{neutralize_command}
+if [[ -d "${{NEUTRALIZE_DIR}}" ]]; then
+  shopt -s nullglob
+  NEUTRALIZE_SQL_FILES=("${{NEUTRALIZE_DIR}}"/*.sql)
+  shopt -u nullglob
+  for SQL_FILE in "${{NEUTRALIZE_SQL_FILES[@]}}"; do
+    echo "INFO: Running workspace neutralization script: ${{SQL_FILE##*/}}"
+    "${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" < "${{SQL_FILE}}"
+  done
+fi
+
+echo "INFO: Database neutralization completed: ${{DB_NAME}}"
+"""
+    return _write_script(layout, "neutralize-db", "sh", content)
+
+
+def write_native_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
+
+BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
+DB_NAME={configured_db_name}
+FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
+TMP_OUTPUT="${{OUTPUT}}.tmp"
+
+cd "${{ROOT_DIR}}"
+mkdir -p "$(dirname "${{OUTPUT}}")"
+rm -f "${{TMP_OUTPUT}}"
+trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
+
+echo "INFO: Backing up filestore for database '${{DB_NAME}}' to '${{OUTPUT}}'."
+tar -C "${{FILESTORE_PATH}}" -czf - . > "${{TMP_OUTPUT}}"
+
+mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
+trap - EXIT
+echo "INFO: Filestore backup created: ${{OUTPUT}}"
+"""
+    return _write_script(layout, "backup-filestore", "sh", content)
+
+
+def write_native_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    content = fr"""#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
+
+DB_NAME={configured_db_name}
+FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+FORCE=false
+SOURCE=""
+
+usage() {{
+  echo "Usage: $(basename "$0") [--force] FILESTORE.tar.gz" >&2
+}}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ -n "${{SOURCE}}" ]]; then
+        usage
+        exit 2
+      fi
+      SOURCE="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ -z "${{SOURCE}}" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ ! -f "${{SOURCE}}" ]]; then
+  echo "ERROR: filestore backup not found: ${{SOURCE}}" >&2
+  exit 1
+fi
+SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
+
+cd "${{ROOT_DIR}}"
+
+FILESTORE_EXISTS=false
+if [[ -e "${{FILESTORE_PATH}}" ]]; then
+  FILESTORE_EXISTS=true
+fi
+
+if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
+
+echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
+echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
+rm -rf -- "${{FILESTORE_PATH}}"
+mkdir -p "${{FILESTORE_PATH}}"
+tar -xzf - -C "${{FILESTORE_PATH}}" < "${{SOURCE}}"
+
+echo "INFO: Filestore restore completed: ${{DB_NAME}}"
+"""
+    return _write_script(layout, "restore-filestore", "sh", content)
+
+
+def write_native_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    content = fr'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
+RESTIC="${{SCRIPT_DIR}}/restic.sh"
+DB_NAME={configured_db_name}
+RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
+FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+
+if [[ ! -x "${{RESTIC}}" ]]; then
+  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
+  exit 1
+fi
+
+EXTRA_TAG_ARGS=()
+if [[ -n "${{RESTIC_BACKUP_ID:-}}" ]]; then
+  EXTRA_TAG_ARGS+=(--tag "backup-id:${{RESTIC_BACKUP_ID}}")
+fi
+
+echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
+"${{RESTIC}}" backup \
+  --host "${{RESTIC_HOST_NAME}}" \
+  --tag odoo \
+  --tag filestore \
+  --tag "db:${{DB_NAME}}" \
+  "${{EXTRA_TAG_ARGS[@]}}" \
+  "$@" \
+  "${{FILESTORE_PATH}}"
+'''
+    return _write_script(layout, "backup-filestore-restic", "sh", content)
+
+
+def write_native_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    restic_command = _native_restic_command_sh()
+    content = fr'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
+
+RESTIC="${{SCRIPT_DIR}}/restic.sh"
+DB_NAME={configured_db_name}
+SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
+RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
+FORCE=false
+SNAPSHOT="latest"
+SNAPSHOT_SET=false
+SOURCE_FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{SOURCE_DB_NAME}}"
+TARGET_FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+
+usage() {{
+  echo "Usage: $(basename "$0") [--force] [SNAPSHOT]" >&2
+}}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      FORCE=true
+      ;;
+    -*)
+      echo "ERROR: unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
+    *)
+      if [[ "${{SNAPSHOT_SET}}" == true ]]; then
+        usage
+        exit 2
+      fi
+      SNAPSHOT="$1"
+      SNAPSHOT_SET=true
+      ;;
+  esac
+  shift
+done
+
+if [[ ! -x "${{RESTIC}}" ]]; then
+  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
+  exit 1
+fi
+
+{restic_command}
+cd "${{ROOT_DIR}}"
+
+FILESTORE_EXISTS=false
+if [[ -e "${{TARGET_FILESTORE_PATH}}" ]]; then
+  FILESTORE_EXISTS=true
+fi
+
+if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
+  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
+  exit 1
+fi
+
+echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
+echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
+
+rm -rf -- "${{TARGET_FILESTORE_PATH}}"
+mkdir -p "${{TARGET_FILESTORE_PATH}}"
+
+RESTORE_ARGS=(restore "${{SNAPSHOT}}:${{SOURCE_FILESTORE_PATH}}" --target "${{TARGET_FILESTORE_PATH}}")
+if [[ "${{SNAPSHOT}}" == "latest" ]]; then
+  RESTORE_ARGS+=(--host "${{RESTIC_HOST_NAME}}" --path "${{SOURCE_FILESTORE_PATH}}")
+fi
+
+"${{RESTIC}}" "${{RESTORE_ARGS[@]}}"
+
+echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
+'''
+    return _write_script(layout, "restore-filestore-restic", "sh", content)
+
+
+def write_native_restic_sh(layout: Layout) -> Path:
+    content = r'''#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $(basename "$0") RESTIC_COMMAND [ARGS...]" >&2
+  exit 2
+fi
+__RESTIC_COMMAND__
+if [[ -z "${RESTIC_REPOSITORY:-}" ]]; then
+  echo "ERROR: RESTIC_REPOSITORY is not set." >&2
+  exit 1
+fi
+
+cd "${ROOT_DIR}"
+if [[ "${RESTIC_REPOSITORY}" == /* ]]; then
+  mkdir -p "${RESTIC_REPOSITORY}"
+elif [[ "${RESTIC_REPOSITORY}" != *:* ]]; then
+  echo "ERROR: local RESTIC_REPOSITORY must be an absolute host path." >&2
+  exit 1
+fi
+if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
+  if [[ ! -f "${RESTIC_PASSWORD_FILE}" ]]; then
+    echo "ERROR: RESTIC_PASSWORD_FILE not found: ${RESTIC_PASSWORD_FILE}" >&2
+    exit 1
+  fi
+elif [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+  echo "ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD." >&2
+  exit 1
+fi
+exec "${RESTIC_EXE}" "$@"
+'''
+    content = content.replace("__RESTIC_COMMAND__", _native_restic_command_sh())
+    return _write_script(layout, "restic", "sh", content)
+
+
+def write_native_backup_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    pg_env = _native_pg_env_bat(cfg)
+    pg_commands = _native_pg_commands_bat("pg_dump")
     content = rf"""@echo off
-setlocal enabledelayedexpansion
+setlocal DisableDelayedExpansion
 
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
+set "DB_NAME={configured_db_name}"
+{pg_env}
 
-set VENV_DIR=%ROOT_DIR%\venv
-set RESTORE_BIN=%VENV_DIR%\Scripts\click-odoo-restoredb.exe
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
+for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
+if "%~1"=="" (
+  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%.dump"
+) else (
+  for %%I in ("%~1") do set "OUTPUT=%%~fI"
+)
+for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
+set "TMP_OUTPUT=%OUTPUT%.tmp"
 
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
+{pg_commands}
+cd /d "%ROOT_DIR%" || exit /b 1
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+if errorlevel 1 exit /b 1
+if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+
+echo INFO: Backing up PostgreSQL database '%DB_NAME%' to '%OUTPUT%'.
+"%PG_DUMP%" --format=custom --no-owner --no-acl "%DB_NAME%" > "%TMP_OUTPUT%"
+if errorlevel 1 (
+  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
   exit /b 1
 )
-if not exist "%RESTORE_BIN%" (
-  echo ERROR: click-odoo-restoredb not found at %RESTORE_BIN%
+move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
+if errorlevel 1 exit /b 1
+
+echo INFO: Database backup created: %OUTPUT%
+endlocal
+"""
+    return _write_script(layout, "backup-db", "bat", content)
+
+
+def write_native_restore_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    pg_env = _native_pg_env_bat(cfg)
+    pg_commands = _native_pg_commands_bat("psql", "dropdb", "createdb", "pg_restore")
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf"
+set "CLICK_ODOO=%ROOT_DIR%\venv\Scripts\click-odoo.exe"
+set "DB_NAME={configured_db_name}"
+{pg_env}
+set "FORCE=false"
+set "RESTORE_MODE=copy"
+set "SOURCE="
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+if /i "%~1"=="--copy" goto copy_arg
+if /i "%~1"=="--move" goto move_arg
+set "ARG=%~1"
+if "%ARG:~0,1%"=="-" goto unknown_option
+if defined SOURCE goto usage_error
+set "SOURCE=%~1"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:copy_arg
+set "RESTORE_MODE=copy"
+shift
+goto parse_args
+
+:move_arg
+set "RESTORE_MODE=move"
+shift
+goto parse_args
+
+:args_done
+if not defined SOURCE goto usage_error
+if not exist "%SOURCE%" (
+  echo ERROR: database backup not found: %SOURCE%
+  exit /b 1
+)
+for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
+
+{pg_commands}
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "DATABASES_FILE=%TEMP%\odt-env-databases-%RANDOM%-%RANDOM%.txt"
+"%PSQL%" -X -d postgres -Atqc "SELECT datname FROM pg_database" > "%DATABASES_FILE%"
+if errorlevel 1 (
+  del /q "%DATABASES_FILE%" >nul 2>&1
+  exit /b 1
+)
+set "DB_EXISTS=false"
+for /f "usebackq delims=" %%D in ("%DATABASES_FILE%") do (
+  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
+)
+del /q "%DATABASES_FILE%" >nul 2>&1
+
+if "%DB_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+if /i "%RESTORE_MODE%"=="copy" (
+  if not exist "%CLICK_ODOO%" (
+    echo ERROR: click-odoo not found at %CLICK_ODOO%
+    exit /b 1
+  )
+  if not exist "%CONF%" (
+    echo ERROR: Odoo config not found at %CONF%
+    exit /b 1
+  )
+)
+
+echo INFO: Restoring PostgreSQL database '%DB_NAME%' from '%SOURCE%'.
+echo INFO: Stop the Odoo service first when restoring a database that is currently in use.
+if "%DB_EXISTS%"=="true" (
+  "%DROPDB%" --force --maintenance-db=postgres "%DB_NAME%"
+  if errorlevel 1 exit /b 1
+)
+"%CREATEDB%" --maintenance-db=postgres "%DB_NAME%"
+if errorlevel 1 exit /b 1
+"%PG_RESTORE%" --verbose --exit-on-error --no-owner --no-acl -d "%DB_NAME%" < "%SOURCE%"
+if errorlevel 1 exit /b 1
+
+if /i "%RESTORE_MODE%"=="move" goto restore_done
+
+echo INFO: Resetting copied Odoo database identity for '%DB_NAME%'.
+echo env["ir.config_parameter"].init(force=True^) | "%CLICK_ODOO%" -c "%CONF%" -d "%DB_NAME%" --log-level=error
+if errorlevel 1 exit /b 1
+
+"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code'; UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo'; UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';"
+if errorlevel 1 exit /b 1
+goto restore_done
+
+:restore_done
+if /i "%RESTORE_MODE%"=="move" echo INFO: Preserving Odoo database identity (--move).
+echo INFO: Database restore completed: %DB_NAME%
+endlocal
+exit /b 0
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] [--copy^|--move] BACKUP.dump
+exit /b 2
+"""
+    return _write_script(layout, "restore-db", "bat", content)
+
+
+def write_native_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    odoo_bin = _script_odoo_bin_bat(layout)
+    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
+    if odoo_major_version >= 16:
+        neutralize_command = rf"""if not exist "%PY%" (
+  echo ERROR: venv python not found at %PY%
+  exit /b 1
+)
+if not exist "%ODOO_BIN%" (
+  echo ERROR: odoo-bin not found at %ODOO_BIN%
   exit /b 1
 )
 if not exist "%CONF%" (
   echo ERROR: Odoo config not found at %CONF%
   exit /b 1
 )
+echo INFO: Using native Odoo neutralization for Odoo {odoo_major_version}.
+"%PY%" "%ODOO_BIN%" neutralize -c "%CONF%" -d "%DB_NAME%"
+if errorlevel 1 exit /b 1
+"""
+    else:
+        neutralize_command = rf"""echo INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}.
 
-if "%~1"=="" (
-  echo ERROR: missing restore source ^(backup file/path^). Provide it as the first argument.
-  echo Example: restore.bat C:\path\to\backup.zip
-  exit /b 2
+echo INFO: Disabling scheduled actions.
+"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;"
+if errorlevel 1 exit /b 1
+
+echo INFO: Disabling outgoing mail servers.
+"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;"
+if errorlevel 1 exit /b 1
+
+echo INFO: Disabling incoming mail servers if fetchmail is installed.
+"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "DO $$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END $$;"
+if errorlevel 1 exit /b 1
+"""
+
+    pg_env = _native_pg_env_bat(cfg)
+    pg_commands = _native_pg_commands_bat("psql")
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "PY=%ROOT_DIR%\venv\Scripts\python.exe"
+set "ODOO_BIN={odoo_bin}"
+set "CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf"
+set "DB_NAME={configured_db_name}"
+{pg_env}
+set "NEUTRALIZE_DIR=%ROOT_DIR%\neutralize"
+
+{pg_commands}
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "DATABASES_FILE=%TEMP%\odt-env-databases-%RANDOM%-%RANDOM%.txt"
+"%PSQL%" -X -d postgres -Atqc "SELECT datname FROM pg_database" > "%DATABASES_FILE%"
+if errorlevel 1 (
+  del /q "%DATABASES_FILE%" >nul 2>&1
+  exit /b 1
+)
+set "DB_EXISTS=false"
+for /f "usebackq delims=" %%D in ("%DATABASES_FILE%") do (
+  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
+)
+del /q "%DATABASES_FILE%" >nul 2>&1
+
+if not "%DB_EXISTS%"=="true" (
+  echo ERROR: target database '%DB_NAME%' does not exist.
+  exit /b 1
 )
 
-echo INFO: Restoring Odoo database "{db_name}" using config %CONF%. Passing through any extra arguments.
-"%RESTORE_BIN%" -c "%CONF%" --copy --neutralize --log-level debug "{db_name}" %*
+echo INFO: Neutralizing Odoo database '%DB_NAME%'.
+{neutralize_command}
+if exist "%NEUTRALIZE_DIR%\." (
+  for /f "delims=" %%F in ('dir /b /a-d /on "%NEUTRALIZE_DIR%\*.sql" 2^>nul') do (
+    echo INFO: Running workspace neutralization script: %%F
+    type "%NEUTRALIZE_DIR%\%%F" | "%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%"
+    if errorlevel 1 exit /b 1
+  )
+)
 
+echo INFO: Database neutralization completed: %DB_NAME%
+endlocal
+exit /b 0
+"""
+    return _write_script(layout, "neutralize-db", "bat", content)
+
+
+def write_native_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
+set "DB_NAME={configured_db_name}"
+set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+
+for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
+if "%~1"=="" (
+  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%_filestore.tar.gz"
+) else (
+  for %%I in ("%~1") do set "OUTPUT=%%~fI"
+)
+for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
+set "TMP_OUTPUT=%OUTPUT%.tmp"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+if errorlevel 1 exit /b 1
+if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+
+echo INFO: Backing up filestore for database '%DB_NAME%' to '%OUTPUT%'.
+tar -C "%FILESTORE_PATH%" -czf - . > "%TMP_OUTPUT%"
+if errorlevel 1 (
+  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
+  exit /b 1
+)
+move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
+if errorlevel 1 exit /b 1
+
+echo INFO: Filestore backup created: %OUTPUT%
 endlocal
 """
-    _write_script(layout, "restore", "bat", content)
+    return _write_script(layout, "backup-filestore", "bat", content)
+
+
+def write_native_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "DB_NAME={configured_db_name}"
+set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+set "FORCE=false"
+set "SOURCE="
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+set "ARG=%~1"
+if "%ARG:~0,1%"=="-" goto unknown_option
+if defined SOURCE goto usage_error
+set "SOURCE=%~1"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:args_done
+if not defined SOURCE goto usage_error
+if not exist "%SOURCE%" (
+  echo ERROR: filestore backup not found: %SOURCE%
+  exit /b 1
+)
+for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
+
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "FILESTORE_EXISTS=false"
+if exist "%FILESTORE_PATH%" set "FILESTORE_EXISTS=true"
+
+if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+echo INFO: Restoring filestore for database '%DB_NAME%' from '%SOURCE%'.
+echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
+if exist "%FILESTORE_PATH%" rmdir /s /q "%FILESTORE_PATH%"
+if errorlevel 1 exit /b 1
+mkdir "%FILESTORE_PATH%"
+if errorlevel 1 exit /b 1
+tar -xzf - -C "%FILESTORE_PATH%" < "%SOURCE%"
+if errorlevel 1 exit /b 1
+
+echo INFO: Filestore restore completed: %DB_NAME%
+endlocal
+exit /b 0
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] FILESTORE.tar.gz
+exit /b 2
+"""
+    return _write_script(layout, "restore-filestore", "bat", content)
+
+
+def write_native_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "RESTIC=%SCRIPT_DIR%\restic.bat"
+set "DB_NAME={configured_db_name}"
+if defined RESTIC_HOST (
+  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
+) else (
+  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
+)
+set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+
+if not exist "%RESTIC%" (
+  echo ERROR: restic helper not found: %RESTIC%
+  exit /b 1
+)
+
+echo INFO: Backing up filestore for database '%DB_NAME%' with restic.
+if defined RESTIC_BACKUP_ID goto with_backup_id
+
+call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" %* "%FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:with_backup_id
+call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" --tag "backup-id:%RESTIC_BACKUP_ID%" %* "%FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+"""
+    return _write_script(layout, "backup-filestore-restic", "bat", content)
+
+
+def write_native_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
+    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    restic_command = _native_restic_command_bat()
+    content = rf"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+set "RESTIC=%SCRIPT_DIR%\restic.bat"
+set "DB_NAME={configured_db_name}"
+if defined RESTIC_SOURCE_DB_NAME (
+  set "SOURCE_DB_NAME=%RESTIC_SOURCE_DB_NAME%"
+) else (
+  set "SOURCE_DB_NAME=%DB_NAME%"
+)
+if defined RESTIC_HOST (
+  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
+) else (
+  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
+)
+set "FORCE=false"
+set "SNAPSHOT=latest"
+set "SNAPSHOT_SET=false"
+set "SOURCE_FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%SOURCE_DB_NAME%"
+set "TARGET_FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+
+goto parse_args
+
+:parse_args
+if "%~1"=="" goto args_done
+if /i "%~1"=="--force" goto force_arg
+set "ARG=%~1"
+if "%ARG:~0,1%"=="-" goto unknown_option
+if /i "%SNAPSHOT_SET%"=="true" goto usage_error
+set "SNAPSHOT=%~1"
+set "SNAPSHOT_SET=true"
+shift
+goto parse_args
+
+:force_arg
+set "FORCE=true"
+shift
+goto parse_args
+
+:args_done
+if not exist "%RESTIC%" (
+  echo ERROR: restic helper not found: %RESTIC%
+  exit /b 1
+)
+
+{restic_command}
+cd /d "%ROOT_DIR%" || exit /b 1
+
+set "FILESTORE_EXISTS=false"
+if exist "%TARGET_FILESTORE_PATH%" set "FILESTORE_EXISTS=true"
+
+if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
+  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
+  exit /b 1
+)
+
+echo INFO: Restoring filestore for database '%DB_NAME%' from restic snapshot '%SNAPSHOT%'.
+echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
+
+if exist "%TARGET_FILESTORE_PATH%" rmdir /s /q "%TARGET_FILESTORE_PATH%"
+if errorlevel 1 exit /b 1
+mkdir "%TARGET_FILESTORE_PATH%"
+if errorlevel 1 exit /b 1
+set "SOURCE_TREE_PATH=%SOURCE_FILESTORE_PATH:\=/%"
+set "SOURCE_TREE_PATH=/%SOURCE_TREE_PATH::=%"
+
+if /i "%SNAPSHOT%"=="latest" goto restore_latest
+call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_TREE_PATH%" --target "%TARGET_FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:restore_latest
+call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_TREE_PATH%" --target "%TARGET_FILESTORE_PATH%" --host "%RESTIC_HOST_NAME%" --path "%SOURCE_FILESTORE_PATH%"
+exit /b %ERRORLEVEL%
+
+:unknown_option
+echo ERROR: unknown option: %~1
+goto usage_error
+
+:usage_error
+echo Usage: %~nx0 [--force] [SNAPSHOT]
+exit /b 2
+"""
+    return _write_script(layout, "restore-filestore-restic", "bat", content)
+
+
+def write_native_restic_bat(layout: Layout) -> Path:
+    content = r"""@echo off
+setlocal DisableDelayedExpansion
+
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
+if "%~1"=="" (
+  echo Usage: %~nx0 RESTIC_COMMAND [ARGS...]
+  exit /b 2
+)
+__RESTIC_COMMAND__
+if not defined RESTIC_REPOSITORY (
+  echo ERROR: RESTIC_REPOSITORY is not set.
+  exit /b 1
+)
+cd /d "%ROOT_DIR%" || exit /b 1
+if defined RESTIC_PASSWORD_FILE goto password_file
+if defined RESTIC_PASSWORD goto run_restic
+echo ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD.
+exit /b 1
+
+:password_file
+if not exist "%RESTIC_PASSWORD_FILE%" (
+  echo ERROR: RESTIC_PASSWORD_FILE not found: %RESTIC_PASSWORD_FILE%
+  exit /b 1
+)
+
+:run_restic
+"%RESTIC_EXE%" %*
+exit /b %ERRORLEVEL%
+"""
+    content = content.replace("__RESTIC_COMMAND__", _native_restic_command_bat())
+    return _write_script(layout, "restic", "bat", content)
+
+
+def write_native_backup_scripts(layout: Layout, cfg: ProjectConfig, *, windows: bool) -> None:
+    if windows:
+        write_native_backup_db_bat(layout, cfg)
+        write_native_restore_db_bat(layout, cfg)
+        write_native_neutralize_db_bat(layout, cfg)
+        write_native_backup_filestore_bat(layout, cfg)
+        write_native_restore_filestore_bat(layout, cfg)
+        write_native_backup_filestore_restic_bat(layout, cfg)
+        write_native_restore_filestore_restic_bat(layout, cfg)
+        write_native_restic_bat(layout)
+    else:
+        write_native_backup_db_sh(layout, cfg)
+        write_native_restore_db_sh(layout, cfg)
+        write_native_neutralize_db_sh(layout, cfg)
+        write_native_backup_filestore_sh(layout, cfg)
+        write_native_restore_filestore_sh(layout, cfg)
+        write_native_backup_filestore_restic_sh(layout, cfg)
+        write_native_restore_filestore_restic_sh(layout, cfg)
+        write_native_restic_sh(layout)
 
 
 def write_update_sh(layout: Layout) -> None:
@@ -5743,19 +6755,7 @@ def _sync_project_impl(
             write_shell_sh(layout)
             write_update_sh(layout)
 
-        db_name = cfg.config.get("db_name")
-        if not isinstance(db_name, str) or not db_name.strip():
-            _logger.warning(
-                "Missing or invalid '[config].db_name' (expected non-empty string). "
-                "Database scripts (backup/restore/restore-force) will NOT be generated."
-            )
-        else:
-            if is_windows:
-                write_backup_bat(layout, db_name.strip())
-                write_restore_bat(layout, db_name.strip())
-            else:
-                write_backup_sh(layout, db_name.strip())
-                write_restore_sh(layout, db_name.strip())
+        write_native_backup_scripts(layout, cfg, windows=is_windows)
     else:
         _logger.info("Skipping script generation (--no-scripts).")
 
@@ -5862,21 +6862,10 @@ def _sync_project_impl(
     if no_scripts:
         _logger.info("  Scripts:            SKIPPED (--no-scripts)")
     else:
-        _logger.info(f"  Scripts:")
-        if is_windows:
-            _logger.info(f"  - run:              {layout.script("run", "bat")}")
-            _logger.info(f"  - test:             {layout.script("test", "bat")}")
-            _logger.info(f"  - shell:            {layout.script("shell", "bat")}")
-            _logger.info(f"  - backup:           {layout.script("backup", "bat")}")
-            _logger.info(f"  - restore:          {layout.script("restore", "bat")}")
-            _logger.info(f"  - update:           {layout.script("update", "bat")}")
-        else:
-            _logger.info(f"  - run:              {layout.script("run", "sh")}")
-            _logger.info(f"  - test:             {layout.script("test", "sh")}")
-            _logger.info(f"  - shell:            {layout.script("shell", "sh")}")
-            _logger.info(f"  - backup:           {layout.script("backup", "sh")}")
-            _logger.info(f"  - restore:          {layout.script("restore", "sh")}")
-            _logger.info(f"  - update:           {layout.script("update", "sh")}")
+        ext = "bat" if is_windows else "sh"
+        _logger.info("  Scripts:")
+        for name in ("run", "test", "shell", "update", *_NATIVE_BACKUP_SCRIPT_NAMES):
+            _logger.info("  - %-20s %s", name + ":", layout.script(name, ext))
 
     if project_ini_status:
         _logger.info("  Project INI:")
