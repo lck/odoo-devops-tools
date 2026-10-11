@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+* Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.
+
 ## 1.23.12 (2026-10-08)
 
 ### Changed

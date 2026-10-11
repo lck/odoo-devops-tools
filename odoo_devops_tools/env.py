@@ -3201,7 +3201,7 @@ def _write_docker_local_script(
 
 
 def write_docker_backup_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3213,8 +3213,7 @@ if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}.dump}}"
 TMP_OUTPUT="${{OUTPUT}}.tmp"
@@ -3237,7 +3236,7 @@ echo "INFO: Database backup created: ${{OUTPUT}}"
 
 
 def write_docker_restore_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3248,8 +3247,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 FORCE=false
 RESTORE_MODE=copy
 SOURCE=""
@@ -3353,7 +3351,7 @@ echo "INFO: Database restore completed: ${{DB_NAME}}"
 
 
 def write_docker_run_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3364,8 +3362,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 
 cd "${{ROOT_DIR}}"
 
@@ -3380,7 +3377,7 @@ exec "${{DOCKER[@]}}" compose run --rm --no-deps odoo \
 
 
 def write_docker_shell_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3391,8 +3388,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 
 cd "${{ROOT_DIR}}"
 
@@ -3408,7 +3404,7 @@ exec "${{DOCKER[@]}}" compose run --rm --no-deps \
 
 
 def write_docker_update_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3419,8 +3415,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 
 cd "${{ROOT_DIR}}"
 
@@ -3436,7 +3431,7 @@ exec "${{DOCKER[@]}}" compose run --rm --no-deps -T \
 
 
 def write_docker_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     odoo_major_version = _parse_odoo_version(cfg.odoo.version)
     if odoo_major_version >= 16:
         neutralize_command = rf"""
@@ -3477,8 +3472,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 NEUTRALIZE_DIR="${{ROOT_DIR}}/neutralize"
 
 cd "${{ROOT_DIR}}"
@@ -3509,7 +3503,7 @@ echo "INFO: Database neutralization completed: ${{DB_NAME}}"
 
 
 def write_docker_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3521,8 +3515,7 @@ if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
 TMP_OUTPUT="${{OUTPUT}}.tmp"
@@ -3546,7 +3539,7 @@ echo "INFO: Filestore backup created: ${{OUTPUT}}"
 
 
 def write_docker_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3557,8 +3550,7 @@ DOCKER=(docker)
 if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 FORCE=false
 SOURCE=""
 
@@ -3602,9 +3594,9 @@ cd "${{ROOT_DIR}}"
 
 FILESTORE_EXISTS=false
 FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  -e DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
-  -c 'if [ -d "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}" ]; then echo exists; else echo missing; fi')"
+  -c 'if [ -d "/var/lib/odoo/filestore/${{DB_NAME}}" ]; then echo exists; else echo missing; fi')"
 if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
   FILESTORE_EXISTS=true
 fi
@@ -3617,10 +3609,10 @@ fi
 echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
 echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
 "${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  -e DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
   -c 'set -eu
-target="/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"
+target="/var/lib/odoo/filestore/${{DB_NAME}}"
 rm -rf "${{target}}"
 mkdir -p "${{target}}"
 tar -xzf - -C "${{target}}"' \
@@ -3695,14 +3687,13 @@ exec "${DOCKER[@]}" "${DOCKER_ARGS[@]}" --entrypoint restic odoo "$@"
 
 
 def write_docker_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr'''#!/usr/bin/env bash
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
 FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
 
@@ -3730,7 +3721,7 @@ echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
 
 
 def write_docker_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = shlex.quote(_docker_default_db_name(cfg))
+    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
     content = fr'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -3742,8 +3733,7 @@ if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
   DOCKER=(sudo docker)
 fi
 RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DEFAULT_DB_NAME={default_db_name}
-DB_NAME="${{ODOO_DB_NAME:-${{DEFAULT_DB_NAME}}}}"
+DB_NAME={configured_db_name}
 SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
 RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
 FORCE=false
@@ -3788,9 +3778,9 @@ cd "${{ROOT_DIR}}"
 FILESTORE_EXISTS=false
 FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --user 0:0 \
-  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  -e DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
-  -c 'if [ -d "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}" ]; then echo exists; else echo missing; fi')"
+  -c 'if [ -d "/var/lib/odoo/filestore/${{DB_NAME}}" ]; then echo exists; else echo missing; fi')"
 if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
   FILESTORE_EXISTS=true
 fi
@@ -3805,11 +3795,11 @@ echo "INFO: Stop the Odoo service first when restoring a filestore that is curre
 
 "${{DOCKER[@]}}" compose run --rm --no-deps -T \
   --user 0:0 \
-  -e ODOO_DB_NAME="${{DB_NAME}}" \
+  -e DB_NAME="${{DB_NAME}}" \
   --entrypoint sh odoo \
   -c 'set -eu
-rm -rf "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"
-mkdir -p "/var/lib/odoo/filestore/${{ODOO_DB_NAME}}"'
+rm -rf "/var/lib/odoo/filestore/${{DB_NAME}}"
+mkdir -p "/var/lib/odoo/filestore/${{DB_NAME}}"'
 
 RESTORE_ARGS=(restore "${{SNAPSHOT}}:${{SOURCE_FILESTORE_PATH}}" --target "${{TARGET_FILESTORE_PATH}}")
 if [[ "${{SNAPSHOT}}" == "latest" ]]; then
@@ -3824,7 +3814,7 @@ echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
 
 
 def write_docker_backup_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
@@ -3832,12 +3822,7 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
 set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
 if "%~1"=="" (
@@ -3869,19 +3854,14 @@ endlocal
 
 
 def write_docker_restore_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 set "FORCE=false"
 set "RESTORE_MODE=copy"
 set "SOURCE="
@@ -3973,19 +3953,14 @@ exit /b 2
 
 
 def write_docker_run_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 
 cd /d "%ROOT_DIR%" || exit /b 1
 
@@ -3997,19 +3972,14 @@ exit /b %ERRORLEVEL%
 
 
 def write_docker_shell_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 
 cd /d "%ROOT_DIR%" || exit /b 1
 
@@ -4021,19 +3991,14 @@ exit /b %ERRORLEVEL%
 
 
 def write_docker_update_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 
 cd /d "%ROOT_DIR%" || exit /b 1
 
@@ -4045,7 +4010,7 @@ exit /b %ERRORLEVEL%
 
 
 def write_docker_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     odoo_major_version = _parse_odoo_version(cfg.odoo.version)
     if odoo_major_version >= 16:
         neutralize_command = rf"""echo INFO: Using native Odoo neutralization for Odoo {odoo_major_version}.
@@ -4074,12 +4039,7 @@ setlocal
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 set "NEUTRALIZE_DIR=%ROOT_DIR%\neutralize"
 
 cd /d "%ROOT_DIR%" || exit /b 1
@@ -4112,7 +4072,7 @@ exit /b 0
 
 
 def write_docker_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
@@ -4120,12 +4080,7 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
 set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
 if "%~1"=="" (
@@ -4157,19 +4112,14 @@ endlocal
 
 
 def write_docker_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 set "FORCE=false"
 set "SOURCE="
 
@@ -4200,7 +4150,7 @@ for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
 cd /d "%ROOT_DIR%" || exit /b 1
 
 set "STATE_FILE=%TEMP%\odt-env-filestore-state-%RANDOM%-%RANDOM%.txt"
-docker compose run --rm --no-deps -T -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
+docker compose run --rm --no-deps -T -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
 if errorlevel 1 (
   if exist "%STATE_FILE%" del /q "%STATE_FILE%"
   exit /b 1
@@ -4217,7 +4167,7 @@ if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
 
 echo INFO: Restoring filestore for database '%DB_NAME%' from '%SOURCE%'.
 echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
-docker compose run --rm --no-deps -T -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; target=/var/lib/odoo/filestore/$ODOO_DB_NAME; rm -rf $target; mkdir -p $target; tar -xzf - -C $target" < "%SOURCE%"
+docker compose run --rm --no-deps -T -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; target=/var/lib/odoo/filestore/$DB_NAME; rm -rf $target; mkdir -p $target; tar -xzf - -C $target" < "%SOURCE%"
 if errorlevel 1 exit /b 1
 
 echo INFO: Filestore restore completed: %DB_NAME%
@@ -4335,19 +4285,14 @@ exit /b %ERRORLEVEL%
 
 
 def write_docker_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
 set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 if defined RESTIC_HOST (
   set "RESTIC_HOST_NAME=%RESTIC_HOST%"
 ) else (
@@ -4374,7 +4319,7 @@ exit /b %ERRORLEVEL%
 
 
 def write_docker_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    default_db_name = _docker_default_db_name(cfg).replace("%", "%%")
+    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
     content = rf"""@echo off
 setlocal
 
@@ -4382,12 +4327,7 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
 set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DEFAULT_DB_NAME={default_db_name}"
-if defined ODOO_DB_NAME (
-  set "DB_NAME=%ODOO_DB_NAME%"
-) else (
-  set "DB_NAME=%DEFAULT_DB_NAME%"
-)
+set "DB_NAME={configured_db_name}"
 if defined RESTIC_SOURCE_DB_NAME (
   set "SOURCE_DB_NAME=%RESTIC_SOURCE_DB_NAME%"
 ) else (
@@ -4430,7 +4370,7 @@ if not exist "%RESTIC%" (
 cd /d "%ROOT_DIR%" || exit /b 1
 
 set "STATE_FILE=%TEMP%\odt-env-restic-filestore-state-%RANDOM%-%RANDOM%.txt"
-docker compose run --rm --no-deps -T --user 0:0 -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
+docker compose run --rm --no-deps -T --user 0:0 -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
 if errorlevel 1 (
   if exist "%STATE_FILE%" del /q "%STATE_FILE%"
   exit /b 1
@@ -4448,7 +4388,7 @@ if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
 echo INFO: Restoring filestore for database '%DB_NAME%' from restic snapshot '%SNAPSHOT%'.
 echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
 
-docker compose run --rm --no-deps -T --user 0:0 -e "ODOO_DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; rm -rf /var/lib/odoo/filestore/$ODOO_DB_NAME; mkdir -p /var/lib/odoo/filestore/$ODOO_DB_NAME"
+docker compose run --rm --no-deps -T --user 0:0 -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; rm -rf /var/lib/odoo/filestore/$DB_NAME; mkdir -p /var/lib/odoo/filestore/$DB_NAME"
 if errorlevel 1 exit /b 1
 
 if /i "%SNAPSHOT%"=="latest" goto restore_latest

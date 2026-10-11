@@ -253,6 +253,8 @@ On Unix-like hosts where Docker requires `sudo`, run generated Docker helpers wi
 ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
 ```
 
+All generated helpers use `[config].db_name` from `odoo-project.ini`, or `odoo` when it is not configured.
+
 #### 1.5.1. run
 
 Runs Odoo in a one-off Docker container for the configured database:
@@ -267,24 +269,12 @@ Any extra arguments are passed through to Odoo:
 ./docker/local/scripts/run.sh -i base --stop-after-init
 ```
 
-The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it with `ODOO_DB_NAME`:
-
-```bash
-ODOO_DB_NAME=odoo_test ./docker/local/scripts/run.sh -u sale --stop-after-init
-```
-
 #### 1.5.2. shell
 
 Opens an Odoo shell for the configured database:
 
 ```bash
 ./docker/local/scripts/shell.sh
-```
-
-The database name follows the same `ODOO_DB_NAME` convention as the `run` helper:
-
-```bash
-ODOO_DB_NAME=odoo_test ./docker/local/scripts/shell.sh
 ```
 
 Any extra arguments are passed through to the underlying Odoo shell command.
@@ -296,8 +286,6 @@ Updates installed addons using `click-odoo-update`:
 ```bash
 ./docker/local/scripts/update.sh
 ```
-
-The database name follows the same `ODOO_DB_NAME` convention as the `run`, shell, and database helpers.
 
 Any extra arguments are passed through to `click-odoo-update`:
 
@@ -323,12 +311,6 @@ Pass an output path explicitly when needed:
 
 ```bash
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
-The default database name is taken from `[config].db_name` when configured, otherwise it is `odoo`. Override it for any command with `ODOO_DB_NAME`:
-
-```bash
-ODOO_DB_NAME=odoo_test ./docker/local/scripts/backup-db.sh
 ```
 
 #### 1.5.5. Database restore
@@ -362,24 +344,12 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-To restore the same dump into another database without replacing the default database:
-
-```bash
-ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
 #### 1.5.6. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
 ```bash
 ./docker/local/scripts/neutralize-db.sh
-```
-
-Override the target database with `ODOO_DB_NAME` when needed:
-
-```bash
-ODOO_DB_NAME=odoo_test ./docker/local/scripts/neutralize-db.sh
 ```
 
 For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization mechanism. This applies the `neutralize.sql` scripts provided by installed Odoo modules, disabling or redirecting production-side effects such as scheduled actions, outgoing email, and supported external integrations.
@@ -408,8 +378,6 @@ docker compose stop odoo
 ./docker/local/scripts/neutralize-db.sh
 docker compose up -d odoo
 ```
-
-`--copy` / `--move` and neutralization serve different purposes: copy/move controls restored database identity, while neutralization controls production side effects.
 
 #### 1.5.7. Filestore backup
 
@@ -458,14 +426,6 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-A filestore can also be restored under another database name:
-
-```bash
-ODOO_DB_NAME=odoo_restore ./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-Database and filestore backups are intentionally separate. This allows either part to be restored independently while still making it possible to create matching database and filestore backups when both are needed.
-
 #### 1.5.9. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
@@ -487,7 +447,7 @@ Create a restic snapshot of the selected database filestore:
 ./docker/local/scripts/backup-filestore-restic.sh
 ```
 
-The default database name follows the same `ODOO_DB_NAME` convention as the archive helpers. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the Docker host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
+The database name comes from `[config].db_name`. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the Docker host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
 
 An optional backup identifier can be added as another snapshot tag:
 
@@ -522,12 +482,6 @@ Or restore a specific snapshot ID:
 docker compose stop odoo
 ./docker/local/scripts/restore-filestore-restic.sh --force SNAPSHOT_ID
 docker compose up -d odoo
-```
-
-To restore a filestore backed up under one database name into another database, set the target with `ODOO_DB_NAME` and the source snapshot path with `RESTIC_SOURCE_DB_NAME`:
-
-```bash
-ODOO_DB_NAME=odoo_restore RESTIC_SOURCE_DB_NAME=odoo ./docker/local/scripts/restore-filestore-restic.sh SNAPSHOT_ID
 ```
 
 With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.

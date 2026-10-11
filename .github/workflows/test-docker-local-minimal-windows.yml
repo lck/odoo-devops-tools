@@ -34,6 +34,7 @@ jobs:
           uv run odoo-compose --init `
             --set odoo:version=18.0 `
             --set docker:postgres_version=18 `
+            --set config:db_name=odoo_test `
             --set docker.share.exchange:source=shared/exchange `
             --set docker.share.exchange:target=/mnt/exchange
 
@@ -279,7 +280,7 @@ jobs:
                       if (Environment.GetEnvironmentVariable("ODT_MOCK_DB_EXISTS") == "1")
                       {
                           Console.WriteLine(
-                              Environment.GetEnvironmentVariable("ODOO_DB_NAME") ?? "odoo"
+                              Environment.GetEnvironmentVariable("ODT_MOCK_EXISTING_DB") ?? "odoo"
                           );
                       }
 
@@ -287,7 +288,7 @@ jobs:
                   }
 
                   if (joined.Contains(
-                      "if [ -d /var/lib/odoo/filestore/$ODOO_DB_NAME ]",
+                      "if [ -d /var/lib/odoo/filestore/$DB_NAME ]",
                       StringComparison.Ordinal
                   ))
                   {
@@ -327,7 +328,6 @@ jobs:
       - name: Test Docker run, shell and update helpers
         working-directory: ./odoo-workspace
         run: |
-          $env:ODOO_DB_NAME = "odoo_test"
           $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "run-shell-update-docker.log"
 
           try {
@@ -360,7 +360,6 @@ jobs:
             }
           }
           finally {
-            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
           }
 
@@ -374,7 +373,9 @@ jobs:
       - name: Test database restore force protection
         working-directory: ./odoo-workspace
         run: |
-          $env:ODOO_DB_NAME = "odoo_restore"
+          uv run odoo-compose --set config:db_name=odoo_restore
+          if ($LASTEXITCODE -ne 0) { throw "Failed to configure restore target database." }
+          $env:ODT_MOCK_EXISTING_DB = "odoo_restore"
           $env:ODT_MOCK_DB_EXISTS = "1"
           $env:ODT_MOCK_FILESTORE_EXISTS = "0"
           $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-db-docker.log"
@@ -437,7 +438,7 @@ jobs:
             }
           }
           finally {
-            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_EXISTING_DB -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_FILESTORE_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
@@ -445,7 +446,7 @@ jobs:
 
       - name: Test database neutralization helpers
         run: |
-          $env:ODOO_DB_NAME = "odoo_restore"
+          $env:ODT_MOCK_EXISTING_DB = "odoo_restore"
           $env:ODT_MOCK_DB_EXISTS = "1"
           $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "neutralize-db-docker.log"
 
@@ -486,6 +487,7 @@ jobs:
 
             Remove-Item -LiteralPath $env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
 
+            $env:ODT_MOCK_EXISTING_DB = "odoo"
             Push-Location odoo-workspace-legacy
             try {
               & .\docker\local\scripts\neutralize-db.bat
@@ -500,7 +502,7 @@ jobs:
             $log = Get-Content -LiteralPath $env:ODT_MOCK_DOCKER_LOG -Raw
             $legacyPsqlCount = ([regex]::Matches(
               $log,
-              [regex]::Escape("compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d odoo_restore -c")
+              [regex]::Escape("compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d odoo -c")
             )).Count
             if ($legacyPsqlCount -ne 3) {
               throw "Expected three legacy neutralization SQL invocations, got ${legacyPsqlCount}:`n$log"
@@ -519,7 +521,7 @@ jobs:
             }
           }
           finally {
-            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_EXISTING_DB -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
           }
@@ -527,7 +529,6 @@ jobs:
       - name: Test archive filestore restore force protection
         working-directory: ./odoo-workspace
         run: |
-          $env:ODOO_DB_NAME = "odoo_restore"
           $env:ODT_MOCK_DB_EXISTS = "0"
           $env:ODT_MOCK_FILESTORE_EXISTS = "1"
           $env:ODT_MOCK_DOCKER_LOG = Join-Path $env:RUNNER_TEMP "restore-filestore-docker.log"
@@ -577,7 +578,7 @@ jobs:
             }
           }
           finally {
-            Remove-Item Env:ODOO_DB_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:ODT_MOCK_EXISTING_DB -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DB_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_FILESTORE_EXISTS -ErrorAction SilentlyContinue
             Remove-Item Env:ODT_MOCK_DOCKER_LOG -ErrorAction SilentlyContinue
@@ -586,7 +587,8 @@ jobs:
       - name: Test restic filestore restore force protection
         working-directory: ./odoo-workspace
         run: |
-          $env:ODOO_DB_NAME = "odoo_restic_restore"
+          uv run odoo-compose --set config:db_name=odoo_restic_restore
+          if ($LASTEXITCODE -ne 0) { throw "Failed to configure restic restore target database." }
           $env:RESTIC_SOURCE_DB_NAME = "odoo"
           $env:RESTIC_REPOSITORY = "mock:repository"
           $env:RESTIC_PASSWORD = "test-password"
@@ -644,11 +646,11 @@ jobs:
           }
           finally {
             foreach ($name in @(
-              "ODOO_DB_NAME",
               "RESTIC_SOURCE_DB_NAME",
               "RESTIC_REPOSITORY",
               "RESTIC_PASSWORD",
               "RESTIC_HOST",
+              "ODT_MOCK_EXISTING_DB",
               "ODT_MOCK_DB_EXISTS",
               "ODT_MOCK_FILESTORE_EXISTS",
               "ODT_MOCK_DOCKER_LOG"
