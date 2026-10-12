@@ -82,7 +82,7 @@ _DEFAULT_DOCKER_REQUIREMENTS = [
 _DEFAULT_DOCKER_UV_VERSION = "0.12.12"
 _DEFAULT_DOCKER_RESTIC_VERSION = "0.19.1"
 _DEFAULT_DOCKER_POSTGRES_VERSION = 16
-_DEFAULT_DOCKER_MAILPIT_IMAGE = "ghcr.io/axllent/mailpit:v1.31.3"
+_DEFAULT_DOCKER_MAILPIT_VERSION = "v1.31.3"
 _DEFAULT_DOCKER_MAILPIT_SMTP_PORT = 1025
 _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT = 8025
 _DEFAULT_DOCKER_MAILPIT_POP3_PORT = 1110
@@ -149,7 +149,9 @@ _INI_SET_SUPPORTED_OPTIONS = {
         "base_image",
         "odoo_source",
         "postgres_version",
-        "mailpit",
+        "restic_version",
+        "mailpit_enabled",
+        "mailpit_version",
         "mailpit_webui_port",
     },
 }
@@ -233,7 +235,9 @@ class DockerConfig:
     base_image: Optional[str] = None
     odoo_source: str = _DOCKER_ODOO_SOURCE_IMAGE
     postgres_version: int = _DEFAULT_DOCKER_POSTGRES_VERSION
-    mailpit: bool = False
+    restic_version: str = _DEFAULT_DOCKER_RESTIC_VERSION
+    mailpit_enabled: bool = False
+    mailpit_version: str = _DEFAULT_DOCKER_MAILPIT_VERSION
     mailpit_webui_port: int = _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
     shares: Dict[str, DockerShareSpec] = field(default_factory=dict)
 
@@ -987,6 +991,22 @@ def _validate_docker_image(value: str, option: str) -> str:
     return image
 
 
+def _validate_docker_image_version(value: str, option: str) -> str:
+    """Accept an explicit release version, not a floating Docker tag."""
+    version = (value or "").strip()
+    if not re.fullmatch(
+        r"v?[0-9]+\.[0-9]+\.[0-9]+(?:[-._][A-Za-z0-9][A-Za-z0-9._-]*)?",
+        version,
+        flags=re.ASCII,
+    ) or len(version) > 128:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected a specific version, for example '0.19.1' or 'v1.31.3'; "
+            "empty values and floating tags such as 'latest' are not allowed)."
+        )
+    return version
+
+
 def _validate_docker_source(value: str, option: str) -> str:
     source = (value or "").strip().lower()
     supported = {_DOCKER_ODOO_SOURCE_IMAGE, _DOCKER_ODOO_SOURCE_WORKSPACE}
@@ -1266,7 +1286,9 @@ def load_project_config(
         base_image=f"odoo:{odoo_version}",
         odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
         postgres_version=_DEFAULT_DOCKER_POSTGRES_VERSION,
-        mailpit=False,
+        restic_version=_DEFAULT_DOCKER_RESTIC_VERSION,
+        mailpit_enabled=False,
+        mailpit_version=_DEFAULT_DOCKER_MAILPIT_VERSION,
         mailpit_webui_port=_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT,
         shares=docker_shares,
     )
@@ -1275,15 +1297,17 @@ def load_project_config(
             "base_image",
             "odoo_source",
             "postgres_version",
-            "mailpit",
+            "restic_version",
+            "mailpit_enabled",
+            "mailpit_version",
             "mailpit_webui_port",
         }
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
-                    "Supported options: base_image, mailpit, mailpit_webui_port, "
-                    "odoo_source, postgres_version."
+                    "Supported options: base_image, mailpit_enabled, mailpit_version, "
+                    "mailpit_webui_port, odoo_source, postgres_version, restic_version."
                 )
 
         base_image = (
@@ -1307,7 +1331,17 @@ def load_project_config(
                 if cp.has_option("docker", "postgres_version")
                 else _DEFAULT_DOCKER_POSTGRES_VERSION
             ),
-            mailpit=_get_ini_bool(cp, "docker", "mailpit", default=False),
+            restic_version=(
+                _validate_docker_image_version(cp.get("docker", "restic_version"), "restic_version")
+                if cp.has_option("docker", "restic_version")
+                else _DEFAULT_DOCKER_RESTIC_VERSION
+            ),
+            mailpit_enabled=_get_ini_bool(cp, "docker", "mailpit_enabled", default=False),
+            mailpit_version=(
+                _validate_docker_image_version(cp.get("docker", "mailpit_version"), "mailpit_version")
+                if cp.has_option("docker", "mailpit_version")
+                else _DEFAULT_DOCKER_MAILPIT_VERSION
+            ),
             mailpit_webui_port=(
                 _validate_tcp_port(cp.get("docker", "mailpit_webui_port"), "mailpit_webui_port")
                 if cp.has_option("docker", "mailpit_webui_port")
@@ -1708,12 +1742,15 @@ def pip_install_requirements_file(
 # -----------------------------
 
 def _run(cmd: list[str], cwd: Optional[Path] = None) -> str:
-    # Log every git command we execute (stdout only; configured in main()).
+    # Git 2.54+ can spawn background maintenance that races with a subsequent
+    # shallow fetch and rewrites .git/shallow while it is being read.
+    # Disable automatic maintenance for our Git commands without changing the
+    # user's persistent Git configuration.
+    run_cmd = ["git", "-c", "maintenance.auto=false", *cmd[1:]] if cmd and cmd[0] == "git" else cmd
     if cmd and cmd[0] == "git":
-        _logger.info("git: %s (cwd=%s)", " ".join(cmd), str(cwd) if cwd else "<cwd>")
-
+        _logger.info("git: %s (cwd=%s)", " ".join(run_cmd), str(cwd) if cwd else "<cwd>")
     p = subprocess.run(
-        cmd,
+        run_cmd,
         cwd=str(cwd) if cwd else None,
         text=True,
         capture_output=True,
@@ -1863,7 +1900,13 @@ def ensure_repo(
     _run(cmd)
 
 
-def checkout_branch(dest: Path, branch: str, fetch_all: bool = True, depth: Optional[int] = None) -> None:
+def checkout_branch(
+        dest: Path,
+        branch: str,
+        fetch_all: bool = True,
+        depth: Optional[int] = None,
+        already_fetched: bool = False,
+) -> None:
     """
     Checkout the requested `branch` in an existing repo.
 
@@ -1873,17 +1916,20 @@ def checkout_branch(dest: Path, branch: str, fetch_all: bool = True, depth: Opti
     - fetch_all=False: fetch ONLY `origin/<branch>` (optionally shallow via depth),
       then force local branch `<branch>` to match `origin/<branch>`.
       This is intended for the Odoo repo where we want single-branch + shallow clones.
+    - already_fetched=True: reuse the fetch performed by ensure_repo() instead
+      of fetching the same branch again.
     """
     _logger.info("checkout_branch: %s @ %s (fetch_all=%s, depth=%s)", dest, branch, fetch_all, depth)
     assert_clean_worktree(dest)
 
     if fetch_all:
-        # If the caller wants a full clone/fetch and the repo is currently shallow
-        # or restricted to a single branch, convert it.
-        if depth is None:
-            _ensure_full_origin_refspec(dest)
-            _unshallow_if_needed(dest)
-        _run(["git", "fetch", "--all", "--tags", "--prune"], cwd=dest)
+        if not already_fetched:
+            # If the caller wants a full clone/fetch and the repo is currently shallow
+            # or restricted to a single branch, convert it.
+            if depth is None:
+                _ensure_full_origin_refspec(dest)
+                _unshallow_if_needed(dest)
+            _run(["git", "fetch", "--all", "--tags", "--prune"], cwd=dest)
 
         try:
             _run(["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=dest)
@@ -1899,7 +1945,9 @@ def checkout_branch(dest: Path, branch: str, fetch_all: bool = True, depth: Opti
 
     # Narrow fetch: ensure origin/<branch> exists even if origin was cloned
     # with --single-branch and has a restricted remote.origin.fetch refspec.
-    _fetch_branch(dest, branch=branch, depth=depth)
+    # ensure_repo() already fetched this ref when already_fetched=True.
+    if not already_fetched:
+        _fetch_branch(dest, branch=branch, depth=depth)
 
     _run(["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=dest)
     _run(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=dest)
@@ -3986,7 +4034,7 @@ def render_docker_odoo_conf(
             continue
         if (
             local_database
-            and cfg.docker.mailpit
+            and cfg.docker.mailpit_enabled
             and key in _DOCKER_MAILPIT_OVERRIDDEN_CONFIG_KEYS
         ):
             continue
@@ -4004,7 +4052,7 @@ def render_docker_odoo_conf(
             "db_user = odoo",
             "db_password = odoo",
         ])
-        if cfg.docker.mailpit:
+        if cfg.docker.mailpit_enabled:
             lines.extend([
                 "smtp_server = mailpit",
                 f"smtp_port = {_DEFAULT_DOCKER_MAILPIT_SMTP_PORT}",
@@ -4113,10 +4161,10 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
         "  odoo-data:",
     ]
 
-    if cfg.docker.mailpit:
+    if cfg.docker.mailpit_enabled:
         mailpit_service = f"""
   mailpit:
-    image: {_DEFAULT_DOCKER_MAILPIT_IMAGE}
+    image: ghcr.io/axllent/mailpit:{cfg.docker.mailpit_version}
     restart: unless-stopped
     environment:
       MP_DATABASE: /data/mailpit.db
@@ -5523,7 +5571,7 @@ FROM {base_image}
 
 USER root
 {workspace_base_odoo_cleanup_step}
-COPY --from=restic/restic:{_DEFAULT_DOCKER_RESTIC_VERSION} /usr/bin/restic /usr/bin/restic
+COPY --from=restic/restic:{cfg.docker.restic_version} /usr/bin/restic /usr/bin/restic
 COPY --from=ghcr.io/astral-sh/uv:{_DEFAULT_DOCKER_UV_VERSION} /uv /bin/uv
 {addon_copy_step}{config_copy_step}
 COPY requirements/all-requirements.in.txt /tmp/all-requirements.in.txt
@@ -6490,7 +6538,7 @@ def _sync_project_impl(
                 single_branch=True,
                 fetch_all=False,
             )
-            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=False, depth=1)
+            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=False, depth=1, already_fetched=True)
         else:
             # Full clone/fetch.
             ensure_repo(
@@ -6559,7 +6607,7 @@ def _sync_project_impl(
                     single_branch=True,
                     fetch_all=False,
                 )
-                checkout_branch(dest, spec.branch, fetch_all=False, depth=1)
+                checkout_branch(dest, spec.branch, fetch_all=False, depth=1, already_fetched=True)
             else:
                 # Full clone/fetch.
                 ensure_repo(

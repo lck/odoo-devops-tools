@@ -5,6 +5,11 @@
 ### Added
 
 * Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
+* Add support for configurable Restic and Mailpit versions in Docker configuration.
+
+### Changed
+
+* Rename `mailpit` to `mailpit_enabled` in Docker configuration.
 
 ### Removed
 

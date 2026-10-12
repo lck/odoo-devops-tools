@@ -197,14 +197,14 @@ The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Pyth
 Enable Mailpit in the local Docker workflow when you need to inspect or test email without sending it to a real SMTP server:
 
 ```bash
-odoo-compose --set docker:mailpit=true
+odoo-compose --set docker:mailpit_enabled=true
 docker compose up -d --build
 ```
 
 Mailpit is available at http://localhost:8025 by default. When running multiple workspaces, override the host web UI port, for example:
 
 ```bash
-odoo-compose --set docker:mailpit=true --set docker:mailpit_webui_port=8026
+odoo-compose --set docker:mailpit_enabled=true --set docker:mailpit_webui_port=8026
 docker compose up -d --build
 ```
 
@@ -1202,7 +1202,7 @@ Maintenance:
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
+- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
 - `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
 - `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
@@ -1368,10 +1368,23 @@ commit = abcdef1
 This section is optional.
 
 - `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
-- `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
-- `mailpit` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
+- `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`.
+- `restic_version` — version of `restic/restic` in generated local and deploy Dockerfiles. Default: `0.19.1`. An explicitly set value must be a concrete version; empty values and `latest` are invalid.
+- `mailpit_enabled` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
+- `mailpit_version` — version of `ghcr.io/axllent/mailpit` in local Compose. Default: `v1.31.3`. An explicitly set value must be a concrete version; empty values and `latest` are invalid.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
+
+Example:
+
+```ini
+[docker]
+postgres_version = 18
+restic_version = 0.19.1
+mailpit_enabled = true
+mailpit_version = v1.31.3
+mailpit_webui_port = 18025
+```
 
 ### `[docker.share.<name>]`
 

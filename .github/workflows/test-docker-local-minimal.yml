@@ -30,7 +30,7 @@ jobs:
           uv run odoo-compose --init --sync-addons \
             --set odoo:version=18.0 \
             --set docker:postgres_version=18 \
-            --set docker:mailpit=true \
+            --set docker:mailpit_enabled=true \
             --set docker:mailpit_webui_port=18025 \
             --set docker.share.exchange:source=shared/exchange \
             --set docker.share.exchange:target=/mnt/exchange

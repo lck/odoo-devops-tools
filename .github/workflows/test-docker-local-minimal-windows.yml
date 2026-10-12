@@ -149,7 +149,7 @@ jobs:
           try {
             uv run odoo-compose --init `
               --set odoo:version=18.0 `
-              --set docker:mailpit=true `
+              --set docker:mailpit_enabled=true `
               --set docker:mailpit_webui_port=18025 `
               --set config:smtp_server=smtp.example.test `
               --set config:smtp_port=587 `

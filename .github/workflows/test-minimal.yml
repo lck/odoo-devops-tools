@@ -8,6 +8,11 @@ jobs:
   odoo-minimal:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Git 2.54+ can background-maintain .git/shallow during branch switches.
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: maintenance.auto
+      GIT_CONFIG_VALUE_0: 'false'
 
     services:
       postgres:
