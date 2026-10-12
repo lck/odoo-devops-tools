@@ -1801,7 +1801,10 @@ def _fetch_branch(repo_dir: Path, branch: Optional[str], depth: Optional[int] = 
         fetch_cmd += ["--depth", str(depth)]
     fetch_cmd += ["origin"]
     if branch:
-        fetch_cmd += [branch]
+        # A --single-branch clone restricts remote.origin.fetch to the cloned
+        # branch. Fetching a different branch by name would update FETCH_HEAD
+        # but NOT origin/<branch>, which checkout_branch() needs.
+        fetch_cmd += [f"+refs/heads/{branch}:refs/remotes/origin/{branch}"]
     _run(fetch_cmd, cwd=repo_dir)
 
 
@@ -1894,12 +1897,9 @@ def checkout_branch(dest: Path, branch: str, fetch_all: bool = True, depth: Opti
         _run(["git", "checkout", branch], cwd=dest)
         return
 
-    # Narrow fetch: only the needed branch, optionally shallow.
-    fetch_cmd: list[str] = ["git", "fetch", "--prune"]
-    if depth is not None:
-        fetch_cmd += ["--depth", str(depth)]
-    fetch_cmd += ["origin", branch]
-    _run(fetch_cmd, cwd=dest)
+    # Narrow fetch: ensure origin/<branch> exists even if origin was cloned
+    # with --single-branch and has a restricted remote.origin.fetch refspec.
+    _fetch_branch(dest, branch=branch, depth=depth)
 
     _run(["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=dest)
     _run(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=dest)

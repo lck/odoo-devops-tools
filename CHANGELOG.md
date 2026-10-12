@@ -10,6 +10,10 @@
 
 * Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.
 
+### Fixed
+
+- Fix Git branch switching in shallow clones with `single_branch=True`. 
+
 ## 1.23.12 (2026-10-08)
 
 ### Changed

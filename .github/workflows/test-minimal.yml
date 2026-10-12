@@ -182,6 +182,43 @@ jobs:
           fi
           RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh --force
 
+      - name: Test shallow Odoo branch switching against upstream Git repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="odoo-workspace/odoo"
+
+          # The workspace was cloned from https://github.com/odoo/odoo.git
+          # with --depth 1 --single-branch (19.0) by the provisioning step.
+          test "$(git -C "$repo" remote get-url origin)" = 'https://github.com/odoo/odoo.git'
+          test "$(git -C "$repo" rev-parse --is-shallow-repository)" = true
+          test "$(git -C "$repo" config --get remote.origin.fetch)" = \
+            '+refs/heads/19.0:refs/remotes/origin/19.0'
+          git -C "$repo" show-ref --verify refs/remotes/origin/19.0
+          test "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/19.0)"
+
+          # Switching to a branch not covered by remote.origin.fetch must
+          # populate origin/18.0, not just FETCH_HEAD. This failed before the fix.
+          uv run odoo-compose --root ./odoo-workspace --sync-odoo --no-local-docker \
+            --set odoo:version=18.0 --set odoo:branch=18.0 --set odoo:shallow=true
+          test "$(git -C "$repo" symbolic-ref --short HEAD)" = 18.0
+          git -C "$repo" show-ref --verify refs/remotes/origin/18.0
+          test "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/18.0)"
+          test "$(git -C "$repo" rev-parse --is-shallow-repository)" = true
+          test -f "$repo/odoo-bin"
+          test -z "$(git -C "$repo" status --porcelain)"
+
+          # Switching back must still work without broadening the fetch to
+          # every branch or downloading the entire history.
+          uv run odoo-compose --root ./odoo-workspace --sync-odoo --no-local-docker \
+            --set odoo:version=19.0 --set odoo:branch=19.0 --set odoo:shallow=true
+          test "$(git -C "$repo" symbolic-ref --short HEAD)" = 19.0
+          test "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/19.0)"
+          test "$(git -C "$repo" rev-parse --is-shallow-repository)" = true
+          test "$(git -C "$repo" config --get remote.origin.fetch)" = \
+            '+refs/heads/19.0:refs/remotes/origin/19.0'
+          test -z "$(git -C "$repo" status --porcelain)"
+
       - name: Show generated workspace
         if: always()
         run: |
