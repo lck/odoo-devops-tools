@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.2 (2026-10-13)
+
+### Changed
+
+- Restrict `--no-data-dir` option to venv workflow.
+
 ## 1.24.1 (2026-10-13)
 
 ### Documentation
