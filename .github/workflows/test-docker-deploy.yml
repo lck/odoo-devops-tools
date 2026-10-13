@@ -35,16 +35,15 @@ jobs:
         run: |
           uv run odoo-compose "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons-in-docker.ini?ref=${ODT_REF}" \
             --sync-addons \
-            --create-docker-deploy \
-            --no-local-docker
+            --create-docker-deploy
 
       - name: Check generated deploy Docker artifacts
         run: |
           test -d odoo-workspace/odoo-addons/oca-web/.git
           test -d odoo-workspace/odoo-addons/oca-helpdesk/.git
 
-          test ! -e odoo-workspace/compose.yaml
-          test ! -e odoo-workspace/docker/local
+          test -f odoo-workspace/compose.yaml
+          test -f odoo-workspace/docker/local/Dockerfile
 
           test -f odoo-workspace/docker/deploy/Dockerfile
           test -f odoo-workspace/docker/deploy/.dockerignore

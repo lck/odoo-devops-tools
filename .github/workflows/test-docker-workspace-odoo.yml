@@ -108,7 +108,7 @@ jobs:
 
       - name: Generate self-contained deploy context
         working-directory: ./odoo-workspace
-        run: uv run odoo-compose --create-docker-deploy --no-local-docker
+        run: uv run odoo-compose --create-docker-deploy
 
       - name: Check generated deploy artifacts
         run: |

@@ -62,7 +62,8 @@ jobs:
       - name: Verify legacy odt-env CLI alias
         shell: bash
         run: |
-          uv run odt-env --help | grep -q "odoo-compose"
+          uv run odoo-compose --help | grep -q "odoo-compose"
+          uv run odoo-compose-venv --help | grep -q "odoo-compose-venv"
 
       - name: Reject duplicate workspace root options
         shell: bash
@@ -83,7 +84,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odoo-compose --init ./odoo-workspace --sync-all --create-venv \
+          uv run odoo-compose-venv --init ./odoo-workspace --sync-all --create-venv \
             --set odoo:version=19.0 \
             --set config:db_host=127.0.0.1 \
             --set config:db_port=5432 \
@@ -147,7 +148,7 @@ jobs:
           PGPASSWORD: odoo
         run: |
           export POSTGRES_BIN=/usr/lib/postgresql/16/bin
-          uv run odoo-compose --no-local-docker --set config:db_name=odoo_native_restore
+          uv run odoo-compose-venv --set config:db_name=odoo_native_restore
           ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump
           ./odoo-scripts/restore-filestore.sh ./odoo-backups/native-filestore.tar.gz
           copied_uuid="$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")"
@@ -179,7 +180,7 @@ jobs:
           export RESTIC_BIN="$(command -v restic)"
           ./odoo-scripts/restic.sh init
           ./odoo-scripts/backup-filestore-restic.sh
-          uv run odoo-compose --no-local-docker --set config:db_name=odoo_native_restic
+          uv run odoo-compose-venv --set config:db_name=odoo_native_restic
           RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh
           test "$(cat odoo-data/filestore/odoo_native_restic/attachment)" = native-filestore-test
           if RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh; then
@@ -204,7 +205,7 @@ jobs:
 
           # Switching to a branch not covered by remote.origin.fetch must
           # populate origin/18.0, not just FETCH_HEAD. This failed before the fix.
-          uv run odoo-compose --root ./odoo-workspace --sync-odoo --no-local-docker \
+          uv run odoo-compose-venv --root ./odoo-workspace --sync-odoo \
             --set odoo:version=18.0 --set odoo:branch=18.0 --set odoo:shallow=true
           test "$(git -C "$repo" symbolic-ref --short HEAD)" = 18.0
           git -C "$repo" show-ref --verify refs/remotes/origin/18.0
@@ -215,7 +216,7 @@ jobs:
 
           # Switching back must still work without broadening the fetch to
           # every branch or downloading the entire history.
-          uv run odoo-compose --root ./odoo-workspace --sync-odoo --no-local-docker \
+          uv run odoo-compose-venv --root ./odoo-workspace --sync-odoo \
             --set odoo:version=19.0 --set odoo:branch=19.0 --set odoo:shallow=true
           test "$(git -C "$repo" symbolic-ref --short HEAD)" = 19.0
           test "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse origin/19.0)"

@@ -80,12 +80,30 @@ odoo-compose --help
 
 ## Usage
 
-`odoo-compose` supports two development workflows:
+`odoo-devops-tools` supports two development workflows, each with its own CLI command:
 
-- **Docker workflow** — run Odoo and PostgreSQL with the generated Docker Compose environment.
-- **Native development with venv** — run Odoo directly on the host using a generated Python virtual environment.
+- **Docker workflow (`odoo-compose`)** — run Odoo and PostgreSQL with the generated Docker Compose environment.
+- **Native development with venv (`odoo-compose-venv`)** — run Odoo directly on the host using a generated Python virtual environment.
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
+
+Quick start:
+
+```bash
+# Docker workflow
+odoo-compose --init ./odoo19
+cd ./odoo19
+docker compose up -d --build
+./docker/local/scripts/run.sh -i base --without-demo=all --stop-after-init
+
+cd ..
+
+# Native development with venv
+odoo-compose-venv --init ./odoo19venv --sync-all --create-venv
+cd ./odoo19venv
+./odoo-scripts/run.sh -i base --without-demo=all --stop-after-init
+./odoo-scripts/instance.sh start
+```
 
 ## 1. Docker workflow
 
@@ -528,7 +546,7 @@ In this workflow, Odoo runs directly on the host using a generated Python virtua
 Create the workspace with the Odoo source and virtual environment:
 
 ```bash
-odoo-compose --init ./odoo19 --sync-all --create-venv \
+odoo-compose-venv --init ./odoo19 --sync-all --create-venv \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
   --set config:db_user=odoo \
@@ -587,7 +605,7 @@ The rest of the generated project file can stay unchanged.
 Sync the sources and recreate the Python environment so dependencies from the new addon repositories are included:
 
 ```bash
-odoo-compose --sync-all --create-venv
+odoo-compose-venv --sync-all --create-venv
 ```
 
 The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`, and their directories are added to the generated `addons_path`.
@@ -631,7 +649,7 @@ python_version = 3.11
 After changing the project file, run `odoo-compose` again from the workspace root:
 
 ```bash
-odoo-compose --sync-all --create-venv
+odoo-compose-venv --sync-all --create-venv
 ```
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
@@ -1020,7 +1038,7 @@ Those machine-specific outputs are recreated on the target machine.
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
 ```bash
-odoo-compose --sync-all --create-venv --create-bundle
+odoo-compose-venv --sync-all --create-venv --create-bundle
 ```
 
 When no output path is supplied, the bundle is written to:
@@ -1032,7 +1050,7 @@ ROOT/dist/ROOT-NAME.odt.zip
 You can also select an explicit output file:
 
 ```bash
-odoo-compose --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+odoo-compose-venv --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
 #### 4.1.1. Including uncommitted changes
@@ -1042,7 +1060,7 @@ By default, bundle creation stops when a bundled Git repository has uncommitted 
 To intentionally include those changes in the bundle, use:
 
 ```bash
-odoo-compose --sync-all --create-venv --create-bundle --allow-dirty-bundle
+odoo-compose-venv --sync-all --create-venv --create-bundle --allow-dirty-bundle
 ```
 
 ### 4.2. Create the workspace on the target machine
@@ -1050,7 +1068,7 @@ odoo-compose --sync-all --create-venv --create-bundle --allow-dirty-bundle
 Copy the ZIP to the target machine and import it into an empty directory:
 
 ```bash
-odoo-compose --create-from-bundle ./odoo18-production.odt.zip \
+odoo-compose-venv --create-from-bundle ./odoo18-production.odt.zip \
   --root ./odoo18-prod \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
@@ -1077,7 +1095,7 @@ The import operation:
 The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
 ```bash
-odoo-compose --create-venv-from-wheelhouse --no-local-docker
+odoo-compose-venv --create-venv-from-wheelhouse
 ```
 
 This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building, and installs strictly from the existing `ROOT/wheelhouse/` and `all-requirements.lock.txt`.
@@ -1090,9 +1108,15 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 
 ```text
 odoo-compose [INI] [OPTIONS]
+odoo-compose-venv [INI] [OPTIONS]
 ```
 
-If no arguments are specified, `odoo-compose` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
+Use **`odoo-compose`** for Docker operations and **`odoo-compose-venv`**
+for native Odoo. Both commands share project configuration, repository syncing,
+and workspace root, but generate only their own artifacts. `odoo-compose-venv`
+generates native configuration and helper scripts.
+
+If no arguments are specified, `odoo-compose` and `odoo-compose-venv` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
 regenerates the workspace artifacts without syncing repositories or recreating the virtual environment.
 
 ### Project definition (`INI`)
@@ -1134,13 +1158,13 @@ This is similar to how Docker Compose uses `compose.yaml` by convention.
 For example, this command:
 
 ```bash
-odoo-compose --root ./existing-workspace --sync-all --create-venv
+odoo-compose --root ./existing-workspace
 ```
 
 is equivalent to passing the default project file explicitly:
 
 ```bash
-odoo-compose ./existing-workspace/odoo-project.ini --sync-all --create-venv
+odoo-compose ./existing-workspace/odoo-project.ini
 ```
 
 #### INI includes
@@ -1148,7 +1172,7 @@ odoo-compose ./existing-workspace/odoo-project.ini --sync-all --create-venv
 Use `-i INI` / `--include INI` to include additional project layers. The option can be repeated.
 
 ```bash
-odoo-compose base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini --sync-all --create-venv
+odoo-compose base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini
 ```
 
 Project layers are processed from left to right. Later layers override earlier layers.
@@ -1164,8 +1188,8 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 - `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated.
 - `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, `[docker]`, and `[docker.share.<name>]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
-- `--no-configs` — do not generate config files.
-- `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/`.
+- `--no-configs` — do not generate config files (venv target).
+- `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/` (venv target).
 - `--no-data-dir` — do not create the Odoo data directory.
 - `--no-provisioning-log` — do not write provisioning metadata under `ROOT/.odt-env/`.
 - `--show-last-run` — print metadata from `ROOT/.odt-env/last-provisioning.json` and exit without provisioning.
@@ -1184,7 +1208,7 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 
 Online virtual environment provisioning:
 
-- `--create-venv` — recreate `ROOT/venv` and refresh the wheelhouse; if `ROOT/venv` already exists, it is deleted and created again.
+- `--create-venv` — `odoo-compose-venv` only: explicitly create or recreate `ROOT/venv` and refresh the wheelhouse. Without a venv-provisioning option, no virtual environment is created or modified.
 
 Offline deployment from a prebuilt wheelhouse:
 
@@ -1196,15 +1220,14 @@ Maintenance:
 
 ### Portable workspace bundles
 
-- `--create-bundle [BUNDLE]` — create a verified portable ZIP containing Odoo sources, configured addon sources, a sanitized `odoo-project.ini`, and `ROOT/wheelhouse/`. If `BUNDLE` is omitted, the output is `ROOT/dist/ROOT-NAME.odt.zip`. Relative explicit output paths are resolved from the current working directory.
+- `--create-bundle [BUNDLE]` — `odoo-compose-venv` only: create a verified portable ZIP containing Odoo sources, configured addon sources, a sanitized `odoo-project.ini`, and `ROOT/wheelhouse/`. If `BUNDLE` is omitted, the output is `ROOT/dist/ROOT-NAME.odt.zip`. Relative explicit output paths are resolved from the current working directory.
 - `--allow-dirty-bundle` — allow `--create-bundle` to snapshot Git repositories with uncommitted changes. Without this option, dirty repositories abort bundle creation.
-- `--create-from-bundle BUNDLE` — verify and extract a portable bundle into an empty `ROOT`, then recreate `ROOT/venv` using the bundled wheelhouse. This offline deployment path intentionally skips Docker workflow generation; `--create-docker-deploy` cannot be combined with it.
+- `--create-from-bundle BUNDLE` — `odoo-compose-venv` only: verify and extract a portable bundle into an empty `ROOT`, then recreate `ROOT/venv` using the bundled wheelhouse. This offline deployment path intentionally skips Docker workflow generation; `--create-docker-deploy` cannot be combined with it.
 
 ### Docker generation
 
-- Docker workflow generation is enabled by default. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
-- `--no-local-docker` — skip regeneration of `ROOT/docker/local/` and `ROOT/compose.yaml`. Existing files are not deleted.
-- `--create-docker-deploy` — generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
+- `odoo-compose` runs the Docker workflow. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
+- `--create-docker-deploy` — `odoo-compose` only: generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
 ### Other options
 
@@ -1268,7 +1291,7 @@ db_password = odoo
 CLI override example:
 
 ```bash
-odoo-compose odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
+odoo-compose-venv odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
 ```
 
 ### `[virtualenv]`
@@ -1417,7 +1440,7 @@ This section is optional.
 
 When present, it contains Odoo server configuration values written into `ROOT/odoo-configs/odoo-server.conf`.
 
-When omitted, `odoo-compose` still generates a valid config file with generated values such as `addons_path` and `data_dir`.
+For `odoo-compose-venv`, omitting `[config]` still generates a valid config file with generated values such as `addons_path` and `data_dir`. The Docker workflow does not generate `odoo-server.conf`.
 
 You can define standard Odoo configuration options here.
 

@@ -6387,7 +6387,7 @@ def _sync_project_impl(
         no_configs: bool = False,
         no_scripts: bool = False,
         no_data_dir: bool = False,
-        no_local_docker: bool = False,
+        target: str = "docker",
         create_docker_deploy_requested: bool = False,
         bundle_output: Optional[Path] = None,
         allow_dirty_bundle: bool = False,
@@ -6396,6 +6396,13 @@ def _sync_project_impl(
         source_ini_layers: Optional[list[str]] = None,
         project_ini_status: Optional[str] = None,
 ) -> None:
+    if target not in ("docker", "venv"):
+        raise ValueError(f"Unsupported target: {target!r}")
+    if target == "docker" and (create_venv or reuse_wheelhouse or bundle_output is not None):
+        raise ValueError("venv provisioning and workspace bundles require odoo-compose-venv")
+    if target == "venv" and create_docker_deploy_requested:
+        raise ValueError("--create-docker-deploy requires odoo-compose")
+
     root = (root_override or ini_path.parent).resolve()
     if root.exists() and not root.is_dir():
         raise Exception(f"ROOT exists but is not a directory: {root}")
@@ -6433,9 +6440,12 @@ def _sync_project_impl(
         _logger.info("Using local Odoo source directory from [odoo].path: %s", local_odoo_dir)
         layout = replace(layout, odoo_dir=local_odoo_dir)
 
-    docker_requested = (not no_local_docker) or create_docker_deploy_requested
+    docker_requested = target == "docker"
 
-    # We optionally create/ensure the venv early so we can use its Python for `uv pip compile` / installs.
+    # Only explicit venv provisioning flags may create or recreate ROOT/venv.
+    # Selecting the venv target alone only generates its configs and scripts.
+    venv_dir = layout.root / "venv"
+    venv_python = venv_dir / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
     venv_py: Optional[Path] = None
 
     if create_venv:
@@ -6488,12 +6498,13 @@ def _sync_project_impl(
                     "No sync target selected; regenerating config and helper scripts only (skipping venv/repo operations)."
                 )
 
-    layout.configs_dir.mkdir(parents=True, exist_ok=True)
+    if target == "venv":
+        layout.configs_dir.mkdir(parents=True, exist_ok=True)
+        layout.scripts_dir.mkdir(parents=True, exist_ok=True)
+        layout.backups_dir.mkdir(parents=True, exist_ok=True)
+        if not no_data_dir:
+            layout.data_dir.mkdir(parents=True, exist_ok=True)
     layout.addons_root.mkdir(parents=True, exist_ok=True)
-    layout.scripts_dir.mkdir(parents=True, exist_ok=True)
-    layout.backups_dir.mkdir(parents=True, exist_ok=True)
-    if not no_data_dir:
-        layout.data_dir.mkdir(parents=True, exist_ok=True)
 
     # Sync repositories first, collect all requirements, then compile + install once.
     req_files: list[Path] = []
@@ -6752,7 +6763,7 @@ def _sync_project_impl(
     local_docker_artifacts: Optional[dict[str, Any]] = None
     deploy_docker_artifacts: Optional[dict[str, Any]] = None
 
-    if not no_local_docker:
+    if target == "docker":
         _logger.info("Generating local-development Docker artifacts.")
         local_docker_artifacts = create_local_docker_artifacts(
             layout=layout,
@@ -6760,7 +6771,7 @@ def _sync_project_impl(
             addon_requirement_files=addon_req_files,
         )
     else:
-        _logger.info("Skipping local Docker generation (--no-local-docker).")
+        _logger.info("Skipping Docker artifacts (target=venv).")
 
     if create_docker_deploy_requested:
         _logger.info("Generating Docker deploy build context.")
@@ -6777,7 +6788,7 @@ def _sync_project_impl(
         )
 
     # Generate config (unless disabled).
-    if not no_configs:
+    if target == "venv" and not no_configs:
         addon_paths: list[Path] = [
             _validate_local_addon_path(layout, addon_name, spec)
             for addon_name, spec in cfg.addons.items()
@@ -6785,12 +6796,12 @@ def _sync_project_impl(
         conf_text = render_odoo_conf(cfg.config, layout, addon_paths)
         layout.conf_path.write_text(conf_text, encoding="utf-8")
     else:
-        _logger.info("Skipping config generation (--no-configs).")
+        _logger.info("Skipping native config generation (target=%s, --no-configs=%s).", target, no_configs)
 
     is_windows = sys.platform.startswith("win")
 
     # Generate helper scripts (unless disabled).
-    if not no_scripts:
+    if target == "venv" and not no_scripts:
         if is_windows:
             write_run_bat(layout)
             write_test_bat(layout)
@@ -6805,7 +6816,7 @@ def _sync_project_impl(
 
         write_native_backup_scripts(layout, cfg, windows=is_windows)
     else:
-        _logger.info("Skipping script generation (--no-scripts).")
+        _logger.info("Skipping native script generation (target=%s, --no-scripts=%s).", target, no_scripts)
 
     bundle_created: Optional[Path] = None
     if bundle_output is not None:
@@ -6833,11 +6844,11 @@ def _sync_project_impl(
         synced_label = "none"
 
     generated: list[str] = []
-    if not no_configs:
+    if target == "venv" and not no_configs:
         generated.append("configs")
-    if not no_scripts:
+    if target == "venv" and not no_scripts:
         generated.append("scripts")
-    if not no_local_docker:
+    if target == "docker":
         generated.append("docker/local + compose")
     if create_docker_deploy_requested:
         generated.append("docker/deploy")
@@ -6850,16 +6861,21 @@ def _sync_project_impl(
     _logger.info(f"  ROOT:               {layout.root}")
     _logger.info(f"  Odoo:               {layout.odoo_dir}")
     _logger.info(f"  Addons:             {layout.addons_root}")
-    _logger.info(f"  Backups:            {layout.backups_dir}")
-    if no_data_dir:
-        _logger.info(f"  Data:               SKIPPED (--no-data-dir)")
+    if target == "venv":
+        _logger.info(f"  Backups:            {layout.backups_dir}")
+        if no_data_dir:
+            _logger.info("  Data:               SKIPPED (--no-data-dir)")
+        else:
+            _logger.info(f"  Data:               {layout.data_dir}")
     else:
-        _logger.info(f"  Data:               {layout.data_dir}")
-    if no_configs:
+        _logger.info("  Native Data/Backups: SKIPPED (target=docker)")
+    if target == "docker":
+        _logger.info("  Native Config:      SKIPPED (target=docker)")
+    elif no_configs:
         _logger.info(f"  Config:             SKIPPED (--no-configs) [{layout.conf_path}]")
     else:
         _logger.info(f"  Config:             {layout.conf_path}")
-    if venv_py is not None:
+    if target == "venv" and (venv_py is not None or venv_python.is_file()):
         _logger.info(f"  Venv:               {layout.root / 'venv'}")
         lock_path = layout.wheelhouse_dir / "all-requirements.lock.txt"
         if lock_path.exists():
@@ -6889,8 +6905,8 @@ def _sync_project_impl(
         docker_requirements_input = _docker_requirements_input_path(layout.docker_local_dir)
         if docker_requirements_input.exists():
             _logger.info(f"  Docker Requirements: {docker_requirements_input}")
-    elif no_local_docker:
-        _logger.info(f"  Docker Local:       SKIPPED (--no-local-docker) [{layout.docker_local_dir}]")
+    elif target == "venv":
+        _logger.info(f"  Docker Local:       SKIPPED (target=venv) [{layout.docker_local_dir}]")
 
     if deploy_docker_artifacts is not None:
         _logger.info(f"  Docker Deploy:      {layout.docker_deploy_dir}")
@@ -6907,7 +6923,9 @@ def _sync_project_impl(
         build_cmd.append(_compose_host_path(layout, layout.docker_deploy_dir))
         _logger.info(f"  Deploy Build:       {_format_cmd(build_cmd)}")
 
-    if no_scripts:
+    if target == "docker":
+        _logger.info("  Native Scripts:     SKIPPED (target=docker)")
+    elif no_scripts:
         _logger.info("  Scripts:            SKIPPED (--no-scripts)")
     else:
         ext = "bat" if is_windows else "sh"
@@ -6937,7 +6955,7 @@ def sync_project(
         no_configs: bool = False,
         no_scripts: bool = False,
         no_data_dir: bool = False,
-        no_local_docker: bool = False,
+        target: str = "docker",
         create_docker_deploy_requested: bool = False,
         bundle_output: Optional[Path] = None,
         allow_dirty_bundle: bool = False,
@@ -6960,7 +6978,7 @@ def sync_project(
             no_configs=no_configs,
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
-            no_local_docker=no_local_docker,
+            target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
             bundle_output=bundle_output,
             allow_dirty_bundle=allow_dirty_bundle,
@@ -7006,7 +7024,7 @@ def sync_project(
             "no_configs": no_configs,
             "no_scripts": no_scripts,
             "no_data_dir": no_data_dir,
-            "no_local_docker": no_local_docker,
+            "target": target,
             "create_docker_deploy": create_docker_deploy_requested,
             "create_bundle": str(bundle_output) if bundle_output is not None else None,
             "allow_dirty_bundle": allow_dirty_bundle,
@@ -7060,7 +7078,7 @@ def sync_project(
             no_configs=no_configs,
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
-            no_local_docker=no_local_docker,
+            target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
             bundle_output=bundle_output,
             allow_dirty_bundle=allow_dirty_bundle,
@@ -7670,17 +7688,19 @@ def _prepare_included_project_ini(
         return output_path
 
 
-def build_parser() -> argparse.ArgumentParser:
-    epilog = """If no arguments are specified, odoo-compose uses ./odoo-project.ini from the current workspace.
+def build_parser(prog: str = "odoo-compose") -> argparse.ArgumentParser:
+    epilog = """The odoo-compose command generates Docker artifacts, while odoo-compose-venv
+creates native Odoo configuration and scripts. A virtual environment is created
+only when explicitly requested.
 
 Examples:
 
-  Creating a workspace:
-    odoo-compose --init ./odoo18-workspace --sync-all --create-venv \\
+  Creating a venv workspace:
+    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0
 
   Creating a workspace with explicit database settings:
-    odoo-compose --init ./odoo18-workspace --sync-all --create-venv \\
+    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv \\
       --set odoo:version=18.0 \\
       --set config:db_host=127.0.0.1 \\
       --set config:db_name=odoo \\
@@ -7688,13 +7708,13 @@ Examples:
       --set config:db_password=odoo
 
   Creating a workspace from an existing project file:
-    odoo-compose /path/to/odoo-project.ini --sync-all --create-venv
+    odoo-compose-venv /path/to/odoo-project.ini --sync-all --create-venv
 
   Using multiple project files:
-    odoo-compose -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
+    odoo-compose-venv -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
 
   Using a remote project file:
-    odoo-compose git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
+    odoo-compose-venv git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
 
   Preparing local Docker development:
     odoo-compose --init ./odoo19 --sync-addons
@@ -7703,21 +7723,21 @@ Examples:
     odoo-compose /path/to/odoo-project.ini --sync-addons --create-docker-deploy
 
   Offline deployment from a prebuilt wheelhouse:
-    odoo-compose /path/to/odoo-project.ini --create-venv-from-wheelhouse
+    odoo-compose-venv /path/to/odoo-project.ini --create-venv-from-wheelhouse
 
   Creating a portable workspace bundle:
-    odoo-compose --root ./odoo18-workspace --create-bundle
+    odoo-compose-venv --root ./odoo18-workspace --create-bundle
 
   Creating a workspace from a portable bundle:
-    odoo-compose --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
+    odoo-compose-venv --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
 
   Inspecting provisioning history:
     odoo-compose /path/to/odoo-project.ini --show-last-run
 """
 
     parser = argparse.ArgumentParser(
-        prog="odoo-compose",
-        description=f"odoo-compose {__version__} — build reproducible Odoo workspaces",
+        prog=prog,
+        description=f"{prog} {__version__} — build reproducible Odoo workspaces",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
     )
@@ -7725,7 +7745,7 @@ Examples:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"odoo-compose {__version__}",
+        version=f"{prog} {__version__}",
         help="Show the program version and exit.",
     )
 
@@ -7736,7 +7756,7 @@ Examples:
         help=(
             "Optional local path to odoo-project.ini, Git-backed remote INI "
             "git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-            "If omitted and no -i/--include is provided, odoo-compose uses existing ROOT/odoo-project.ini."
+            "If omitted and no -i/--include is provided, ROOT/odoo-project.ini is used."
         ),
     )
 
@@ -7815,7 +7835,7 @@ Examples:
         "--create-venv",
         action="store_true",
         help=(
-            "Enable virtualenv provisioning by recreating ROOT/venv and refreshing wheelhouse. "
+            "odoo-compose-venv only: force recreation of ROOT/venv and refresh wheelhouse. "
             "If ROOT/venv already exists, it is deleted and created again. "
         ),
     )
@@ -7873,23 +7893,14 @@ Examples:
         ),
     )
     parser.add_argument(
-        "--no-local-docker",
-        action="store_true",
-        help=(
-            "Do not generate the default local-development Docker context under ROOT/docker/local/ "
-            "or ROOT/compose.yaml."
-        ),
-    )
-
-    parser.add_argument(
         "--no-configs",
         action="store_true",
-        help="Do not (re)generate config files (e.g. ROOT/odoo-configs/odoo-server.conf).",
+        help="Do not (re)generate native config files (odoo-compose-venv only).",
     )
     parser.add_argument(
         "--no-scripts",
         action="store_true",
-        help="Do not (re)generate helper scripts under ROOT/odoo-scripts/.",
+        help="Do not (re)generate native helper scripts (odoo-compose-venv only).",
     )
     parser.add_argument(
         "--no-data-dir",
@@ -8005,7 +8016,7 @@ def _root_for_show_last_run(parser: argparse.ArgumentParser, args: argparse.Name
     return root
 
 
-def main() -> None:
+def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     # Standard logging to stdout only.
     logging.basicConfig(
         level=logging.INFO,
@@ -8014,8 +8025,20 @@ def main() -> None:
     )
     _logger.info("odoo-compose %s", __version__)
 
-    parser = build_parser()
+    parser = build_parser(prog=prog)
     args = parser.parse_args()
+
+    # Validate workflow-specific operations before writing anything to disk.
+    if target == "docker":
+        if args.create_venv or args.create_venv_from_wheelhouse:
+            parser.error("--create-venv* is only available with odoo-compose-venv.")
+        if args.create_bundle is not None or args.create_from_bundle:
+            parser.error("Workspace bundles are only available with odoo-compose-venv.")
+        if args.clear_pip_wheel_cache:
+            parser.error("--clear-pip-wheel-cache is only available with odoo-compose-venv.")
+    else:
+        if args.create_docker_deploy:
+            parser.error("--create-docker-deploy is only available with odoo-compose.")
 
     init_project_raw = getattr(args, 'init_project', None)
     init_project = init_project_raw is not None
@@ -8050,7 +8073,6 @@ def main() -> None:
     no_configs = bool(getattr(args, 'no_configs', False))
     no_scripts = bool(getattr(args, 'no_scripts', False))
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
-    no_local_docker = bool(getattr(args, 'no_local_docker', False))
     create_docker_deploy_requested = bool(getattr(args, 'create_docker_deploy', False))
     no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
     create_bundle_raw = getattr(args, 'create_bundle', None)
@@ -8140,7 +8162,7 @@ def main() -> None:
                 # Bundle import is the offline deployment path. Local-development
                 # Docker artifacts intentionally require online dependency resolution
                 # and can be generated later by a normal odoo-compose run.
-                no_local_docker=True,
+                target="venv",
                 create_docker_deploy_requested=False,
                 bundle_output=None,
                 allow_dirty_bundle=False,
@@ -8391,7 +8413,7 @@ def main() -> None:
             no_configs=no_configs,
             no_scripts=no_scripts,
             no_data_dir=no_data_dir,
-            no_local_docker=no_local_docker,
+            target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
             bundle_output=bundle_output,
             allow_dirty_bundle=allow_dirty_bundle,
@@ -8405,6 +8427,11 @@ def main() -> None:
     except Exception as e:
         _logger.error(f'{e}')
         raise SystemExit(1)
+
+
+def main_venv() -> None:
+    """Entry point for native Odoo config and scripts (venv is opt-in)."""
+    main(target="venv", prog="odoo-compose-venv")
 
 
 if __name__ == "__main__":

@@ -4,15 +4,18 @@
 
 ### Added
 
+* Add a dedicated `odoo-compose-venv` CLI for native Odoo configuration and scripts.
 * Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
 * Add support for configurable Restic and Mailpit versions in Docker configuration.
 
 ### Changed
 
+* Make `odoo-compose` Docker-only and generate native configuration/scripts only with `odoo-compose-venv`.
 * Rename `mailpit` to `mailpit_enabled` in Docker configuration.
 
 ### Removed
 
+* Remove the `--no-local-docker` option in favor of `odoo-compose-venv`.
 * Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.
 
 ### Fixed
