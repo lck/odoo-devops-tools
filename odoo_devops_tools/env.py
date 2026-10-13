@@ -6083,19 +6083,19 @@ def create_workspace_bundle(
     if not lock_path.is_file():
         raise Exception(
             f"Cannot create workspace bundle because the dependency lock is missing: {lock_path}\n"
-            "Run odoo-compose with --create-venv first to build a complete wheelhouse."
+            "Run odoo-compose-venv with --create-venv first to build a complete wheelhouse."
         )
     constraints_path = wheelhouse / "constraints.txt"
     if cfg.virtualenv.constraints and not constraints_path.is_file():
         raise Exception(
             f"Cannot create workspace bundle because constraints are missing: {constraints_path}\n"
-            "Run odoo-compose with --create-venv first to build a complete wheelhouse."
+            "Run odoo-compose-venv with --create-venv first to build a complete wheelhouse."
         )
     build_constraints_path = wheelhouse / "build-constraints.txt"
     if cfg.virtualenv.build_constraints and not build_constraints_path.is_file():
         raise Exception(
             f"Cannot create workspace bundle because build constraints are missing: {build_constraints_path}\n"
-            "Run odoo-compose with --create-venv first to build a complete wheelhouse."
+            "Run odoo-compose-venv with --create-venv first to build a complete wheelhouse."
         )
 
     included_roots = [odoo_source, wheelhouse, *addon_sources.values()]
@@ -7787,51 +7787,41 @@ def _prepare_included_project_ini(
         return output_path
 
 
-def build_parser(prog: str = "odoo-compose") -> argparse.ArgumentParser:
-    epilog = """The odoo-compose command generates Docker artifacts, while odoo-compose-venv
-creates native Odoo configuration and scripts. A virtual environment is created
-only when explicitly requested.
+def build_parser(prog: str = "odoo-compose", target: str = "docker") -> argparse.ArgumentParser:
+    if target == "docker":
+        epilog = """Generate Docker Compose artifacts for Odoo and PostgreSQL.
 
 Examples:
 
-  Creating a venv workspace:
-    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv \\
-      --set odoo:version=18.0
-
-  Creating a workspace with explicit database settings:
-    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv \\
-      --set odoo:version=18.0 \\
-      --set config:db_host=127.0.0.1 \\
-      --set config:db_name=odoo \\
-      --set config:db_user=odoo \\
-      --set config:db_password=odoo
-
-  Creating a workspace from an existing project file:
-    odoo-compose-venv /path/to/odoo-project.ini --sync-all --create-venv
-
-  Using multiple project files:
-    odoo-compose-venv -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
-
-  Using a remote project file:
-    odoo-compose-venv git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-minimal.ini?ref=main --sync-all --create-venv
-
-  Preparing local Docker development:
+  Creating a Docker workspace:
     odoo-compose --init ./odoo19 --sync-addons
 
   Generating a deploy Docker build context:
     odoo-compose /path/to/odoo-project.ini --sync-addons --create-docker-deploy
 
-  Offline deployment from a prebuilt wheelhouse:
+  Inspecting provisioning history:
+    odoo-compose /path/to/odoo-project.ini --show-last-run
+"""
+    else:
+        epilog = """Generate native Odoo configuration and helper scripts.
+A virtual environment is created only when explicitly requested.
+
+Examples:
+
+  Creating a venv workspace:
+    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv --set odoo:version=18.0
+
+  Using multiple project files:
+    odoo-compose-venv -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
+
+  Restoring a venv from an offline wheelhouse:
     odoo-compose-venv /path/to/odoo-project.ini --create-venv-from-wheelhouse
 
   Creating a portable workspace bundle:
     odoo-compose-venv --root ./odoo18-workspace --create-bundle
 
-  Creating a workspace from a portable bundle:
+  Restoring a workspace from a bundle:
     odoo-compose-venv --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
-
-  Inspecting provisioning history:
-    odoo-compose /path/to/odoo-project.ini --show-last-run
 """
 
     parser = argparse.ArgumentParser(
@@ -7921,86 +7911,103 @@ Examples:
         metavar="SECTION:KEY=VALUE",
         help=(
             "Set or override a supported INI option. Missing supported sections/options are created. "
-            "Can be passed multiple times. Example: --set docker:odoo_source=workspace"
+            f"Can be passed multiple times. Example: --set {'docker:odoo_source=workspace' if target == 'docker' else 'odoo:version=19.0'}"
         ),
     )
 
-    target = parser.add_mutually_exclusive_group()
-    target.add_argument("--sync-odoo", dest="odoo", action="store_true", help="Sync only Odoo repository")
-    target.add_argument("--sync-addons", dest="addons", action="store_true", help="Sync only addon repositories")
-    target.add_argument("--sync-all", dest="all", action="store_true", help="Sync Odoo + addons")
+    sync_group = parser.add_mutually_exclusive_group()
+    sync_group.add_argument("--sync-odoo", dest="odoo", action="store_true", help="Sync only Odoo repository")
+    sync_group.add_argument("--sync-addons", dest="addons", action="store_true", help="Sync only addon repositories")
+    sync_group.add_argument("--sync-all", dest="all", action="store_true", help="Sync Odoo + addons")
 
-    parser.add_argument(
-        "--create-venv",
-        action="store_true",
-        help=(
-            "odoo-compose-venv only: force recreation of ROOT/venv and refresh wheelhouse. "
-            "If ROOT/venv already exists, it is deleted and created again. "
-        ),
-    )
-    parser.add_argument(
-        "--create-venv-from-wheelhouse",
-        action="store_true",
-        help=(
-            "Offline deployment helper: recreate ROOT/venv from existing ROOT/wheelhouse, then install strictly offline. "
-            "Useful after copying a prepared workspace to a target machine without internet access."
-        ),
-    )
-    parser.add_argument(
-        "--clear-pip-wheel-cache",
-        action="store_true",
-        help="Remove all items from the pip's wheel cache.",
+    # Keep the Namespace shape compatible with the shared provisioning code,
+    # even though the two commands expose different CLI options.
+    parser.set_defaults(
+        create_venv=False,
+        create_venv_from_wheelhouse=False,
+        clear_pip_wheel_cache=False,
+        create_bundle=None,
+        allow_dirty_bundle=False,
+        create_from_bundle=None,
+        create_docker_deploy=False,
+        no_configs=False,
+        no_scripts=False,
     )
 
-    parser.add_argument(
-        "--create-bundle",
-        nargs="?",
-        const="",
-        default=None,
-        metavar="BUNDLE",
-        help=(
-            "Create a portable ZIP containing Odoo sources, configured addon sources, "
-            "a sanitized project INI, and the offline wheelhouse. When BUNDLE is omitted, "
-            "write ROOT/dist/ROOT-NAME.odt.zip."
-        ),
-    )
-    parser.add_argument(
-        "--allow-dirty-bundle",
-        action="store_true",
-        help=(
-            "Allow --create-bundle to snapshot Git repositories with uncommitted changes. "
-            "The dirty state is recorded in the bundle manifest."
-        ),
-    )
-    parser.add_argument(
-        "--create-from-bundle",
-        metavar="BUNDLE",
-        default=None,
-        help=(
-            "Create an empty workspace from a portable bundle, verify its manifest and checksums, "
-            "then recreate ROOT/venv strictly from the bundled wheelhouse. "
-            "Local-development Docker artifacts are intentionally not generated in this offline workflow."
-        ),
-    )
+    if target == "venv":
+        parser.add_argument(
+            "--create-venv",
+            action="store_true",
+            help=(
+                "odoo-compose-venv only: force recreation of ROOT/venv and refresh wheelhouse. "
+                "If ROOT/venv already exists, it is deleted and created again. "
+            ),
+        )
+        parser.add_argument(
+            "--create-venv-from-wheelhouse",
+            action="store_true",
+            help=(
+                "Offline deployment helper: recreate ROOT/venv from existing ROOT/wheelhouse, then install strictly offline. "
+                "Useful after copying a prepared workspace to a target machine without internet access."
+            ),
+        )
+        parser.add_argument(
+            "--clear-pip-wheel-cache",
+            action="store_true",
+            help="Remove all items from the pip's wheel cache.",
+        )
 
-    parser.add_argument(
-        "--create-docker-deploy",
-        action="store_true",
-        help=(
-            "Generate a self-contained Docker deployment build context under ROOT/docker/deploy/. "
-            "The image itself is built separately with docker build or by CI/CD."
-        ),
-    )
-    parser.add_argument(
-        "--no-configs",
-        action="store_true",
-        help="Do not (re)generate native config files (odoo-compose-venv only).",
-    )
-    parser.add_argument(
-        "--no-scripts",
-        action="store_true",
-        help="Do not (re)generate native helper scripts (odoo-compose-venv only).",
-    )
+        parser.add_argument(
+            "--create-bundle",
+            nargs="?",
+            const="",
+            default=None,
+            metavar="BUNDLE",
+            help=(
+                "Create a portable ZIP containing Odoo sources, configured addon sources, "
+                "a sanitized project INI, and the offline wheelhouse. When BUNDLE is omitted, "
+                "write ROOT/dist/ROOT-NAME.odt.zip."
+            ),
+        )
+        parser.add_argument(
+            "--allow-dirty-bundle",
+            action="store_true",
+            help=(
+                "Allow --create-bundle to snapshot Git repositories with uncommitted changes. "
+                "The dirty state is recorded in the bundle manifest."
+            ),
+        )
+        parser.add_argument(
+            "--create-from-bundle",
+            metavar="BUNDLE",
+            default=None,
+            help=(
+                "Create an empty workspace from a portable bundle, verify its manifest and checksums, "
+                "then recreate ROOT/venv strictly from the bundled wheelhouse. "
+                "Local-development Docker artifacts are intentionally not generated in this offline workflow."
+            ),
+        )
+
+        parser.add_argument(
+            "--no-configs",
+            action="store_true",
+            help="Do not (re)generate native config files (odoo-compose-venv only).",
+        )
+        parser.add_argument(
+            "--no-scripts",
+            action="store_true",
+            help="Do not (re)generate native helper scripts (odoo-compose-venv only).",
+        )
+    else:
+        parser.add_argument(
+            "--create-docker-deploy",
+            action="store_true",
+            help=(
+                "Generate a self-contained Docker deployment build context under ROOT/docker/deploy/. "
+                "The image itself is built separately with docker build or by CI/CD."
+            ),
+        )
+
     parser.add_argument(
         "--no-data-dir",
         action="store_true",
@@ -8122,22 +8129,10 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    _logger.info("odoo-compose %s", __version__)
+    _logger.info("%s %s", prog, __version__)
 
-    parser = build_parser(prog=prog)
+    parser = build_parser(prog=prog, target=target)
     args = parser.parse_args()
-
-    # Validate workflow-specific operations before writing anything to disk.
-    if target == "docker":
-        if args.create_venv or args.create_venv_from_wheelhouse:
-            parser.error("--create-venv* is only available with odoo-compose-venv.")
-        if args.create_bundle is not None or args.create_from_bundle:
-            parser.error("Workspace bundles are only available with odoo-compose-venv.")
-        if args.clear_pip_wheel_cache:
-            parser.error("--clear-pip-wheel-cache is only available with odoo-compose-venv.")
-    else:
-        if args.create_docker_deploy:
-            parser.error("--create-docker-deploy is only available with odoo-compose.")
 
     init_project_raw = getattr(args, 'init_project', None)
     init_project = init_project_raw is not None
@@ -8334,7 +8329,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                     project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                     _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
             elif not ini_path.is_file():
-                suggested_cmd = ["odoo-compose", "--init"]
+                suggested_cmd = [parser.prog, "--init"]
                 if args.root:
                     suggested_cmd.append(str(root_override))
                 parser.error(
