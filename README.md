@@ -271,7 +271,7 @@ On Unix-like hosts where Docker requires `sudo`, run generated Docker helpers wi
 ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
 ```
 
-All generated helpers use `[config].db_name` from `odoo-project.ini`, or `odoo` when it is not configured.
+Docker helpers use `[config].db_name` when configured, or `odoo` by default.
 
 #### 1.5.1. run
 
@@ -675,16 +675,21 @@ odoo-scripts/
 └── test.sh
 ```
 
-Database and filestore helpers use `[config].db_name` from `odoo-project.ini`, or `odoo` when it is not configured.
+Database and filestore helpers use `[config].db_name` from `odoo-project.ini`. If the
+name is missing, `odoo-compose-venv` generates a workspace-specific database name
+and saves it to `ROOT/odoo-project.ini`.
 
-Install PostgreSQL client tools (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`) on the host.
+PostgreSQL connection settings are taken from `[config]` or, when omitted, from
+standard environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.).
+Password authentication can also use `.pgpass`.
 
-Select a specific installed tool version with environment variables:
+By default, PostgreSQL client tools and Restic are resolved from `PATH`.
+The following environment variables allow selecting specific installed versions:
 
 | Variable | Value |
 | --- | --- |
-| `POSTGRES_BIN` | Directory containing the PostgreSQL client executables (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`; `.exe` on Windows). |
-| `RESTIC_BIN` | Path to the restic executable (`restic.exe` on Windows). |
+| `POSTGRES_BIN` | Directory containing the PostgreSQL client executables (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`). |
+| `RESTIC_BIN` | Path to the restic executable. |
 
 These variables are read when a helper runs, so script regeneration is not required.
 

@@ -43,6 +43,35 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Check generated db_name on Windows
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "ci-native-db-name"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $ini = Join-Path $root "odoo-project.ini"
+          "[odoo]`nversion = 19.0`n`n[config]`n# preserve this comment`n" |
+            Set-Content -LiteralPath $ini -Encoding UTF8
+
+          uv run odoo-compose-venv --root $root --no-provisioning-log
+          if ($LASTEXITCODE -ne 0) { throw "Initial venv generation failed." }
+          $before = Get-Content -LiteralPath $ini -Raw
+          $match = [regex]::Match($before, '(?m)^db_name\s*=\s*([^\s]+)\s*$')
+          if (-not $match.Success -or $match.Groups[1].Value -notmatch '^ci_native_db_name_[0-9a-f]{10}$') {
+            throw "Generated db_name is missing or invalid."
+          }
+          $dbName = $match.Groups[1].Value
+          if (-not $before.Contains('# preserve this comment')) { throw "INI comment was lost." }
+          if (Test-Path -LiteralPath (Join-Path $root 'venv')) { throw "venv was created without an explicit flag." }
+          $config = Get-Content -LiteralPath (Join-Path $root 'odoo-configs\odoo-server.conf') -Raw
+          if (-not $config.Contains("db_name = $dbName")) { throw "Odoo config has wrong db_name." }
+          $script = Get-Content -LiteralPath (Join-Path $root 'odoo-scripts\backup-db.bat') -Raw
+          if (-not $script.Contains("set `"DB_NAME=$dbName`"")) { throw "Backup helper has wrong db_name." }
+
+          uv run odoo-compose-venv --root $root --no-provisioning-log
+          if ($LASTEXITCODE -ne 0) { throw "Second venv generation failed." }
+          if ((Get-Content -LiteralPath $ini -Raw) -cne $before) {
+            throw "db_name or INI formatting changed on the second run."
+          }
+
       - name: Generate INI file
         run: |
           @'

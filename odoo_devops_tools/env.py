@@ -801,6 +801,73 @@ def _save_effective_ini_copy(
     )
 
 
+def _existing_workspace_db_name(root: Path) -> Optional[str]:
+    """Keep a database name already persisted in the workspace across INI refreshes."""
+    ini_path = root / _DEFAULT_PROJECT_INI_NAME
+    if not ini_path.is_file():
+        return None
+    cp = _read_ini(ini_path, log_overrides=False)
+    value = cp.get("config", "db_name", fallback="").strip()
+    return value or None
+
+
+def _generated_workspace_db_name(root: Path) -> str:
+    """Stable fallback, unique across same-named workspaces at different paths."""
+    slug = re.sub(r"[^a-z0-9]+", "_", root.name.lower()).strip("_") or "odoo"
+    digest = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()[:10]
+    # PostgreSQL identifiers are at most 63 bytes; the slug is ASCII-only.
+    return f"{slug[:52]}_{digest}"
+
+
+def _persist_native_db_name(
+        root: Path,
+        ini_path: Path,
+        db_name: str,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+) -> None:
+    """Save the fallback to ROOT/odoo-project.ini without modifying external sources."""
+    project_ini = root / _DEFAULT_PROJECT_INI_NAME
+    if _same_path(ini_path, project_ini):
+        # Preserve comments, ordering and interpolation for locally maintained INI.
+        original = project_ini.read_text(encoding="utf-8")
+        section = re.search(r"(?im)^[ \t]*\[config\][ \t]*(?:[;#][^\r\n]*)?$", original)
+        if section is None:
+            updated = original.rstrip("\r\n") + f"\n\n[config]\ndb_name = {db_name}\n"
+        else:
+            following = re.search(r"(?m)^[ \t]*\[[^\]\r\n]+\]", original[section.end():])
+            end = section.end() + following.start() if following else len(original)
+            part = original[section.end():end]
+            value_line = re.search(r"(?m)^[ \t]*db_name[ \t]*=[^\r\n]*", part)
+            if value_line:
+                start = section.end() + value_line.start()
+                stop = section.end() + value_line.end()
+                updated = original[:start] + f"db_name = {db_name}" + original[stop:]
+            else:
+                updated = original[:section.end()] + f"\ndb_name = {db_name}" + original[section.end():]
+        _write_text_file(project_ini, updated, private=True, atomic=True)
+    else:
+        # For a local external INI, materialize the effective project definition
+        # in the workspace; never edit the user's source file.
+        cp = _read_ini(
+            ini_path,
+            vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
+            log_overrides=False,
+        )
+        if not cp.has_section("config"):
+            cp.add_section("config")
+        cp.set("config", "db_name", db_name)
+        _write_text_file(project_ini, _ini_for_effective_file(cp), private=True, atomic=True)
+
+    _logger.warning(
+        "[config].db_name was not set; generated '%s' and saved it to %s. "
+        "Set db_name explicitly for a native deployment.",
+        db_name,
+        project_ini,
+    )
+
+
 def _collect_provisioning_details(
         cfg: ProjectConfig,
         source_ini_path: Optional[Path],
@@ -2428,7 +2495,9 @@ _NATIVE_BACKUP_SCRIPT_NAMES = (
 
 
 def _native_default_db_name(cfg: ProjectConfig) -> str:
-    db_name = _docker_default_db_name(cfg)
+    db_name = str(cfg.config.get("db_name") or "").strip()
+    if not db_name:
+        raise Exception("Native database helpers require [config].db_name.")
     if db_name in (".", "..") or any(c in db_name for c in ("/", "\\", "\x00", "\r", "\n")):
         raise Exception("Database helpers require a single database name, not a path.")
     return db_name
@@ -6395,6 +6464,7 @@ def _sync_project_impl(
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         source_ini_layers: Optional[list[str]] = None,
         project_ini_status: Optional[str] = None,
+        preserved_db_name: Optional[str] = None,
 ) -> None:
     if target not in ("docker", "venv"):
         raise ValueError(f"Unsupported target: {target!r}")
@@ -6413,6 +6483,26 @@ def _sync_project_impl(
         vars_overrides=vars_overrides,
         ini_overrides=ini_overrides,
     )
+
+    if target == "venv":
+        db_name = str(cfg.config.get("db_name") or "").strip()
+        if not db_name:
+            db_name = preserved_db_name or _generated_workspace_db_name(layout.root)
+            _persist_native_db_name(
+                layout.root, ini_path, db_name, vars_overrides, ini_overrides,
+            )
+            cfg.config["db_name"] = db_name
+        elif not _same_path(ini_path, layout.root / _DEFAULT_PROJECT_INI_NAME):
+            # When an external local file is the source, persist the effective
+            # config in ROOT as well. A newly explicit name replaces the old one.
+            cp = _read_ini(
+                ini_path, vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides, log_overrides=False,
+            )
+            _write_text_file(
+                layout.root / _DEFAULT_PROJECT_INI_NAME,
+                _ini_for_effective_file(cp), private=True, atomic=True,
+            )
 
     # If user overrides "data_dir" via [config] section, propagate changes to layout->data_dir.
     # An empty value means "use the default layout data directory". This keeps template INI
@@ -6965,6 +7055,7 @@ def sync_project(
         cli_argv: Optional[list[str]] = None,
         source_ini_layers: Optional[list[str]] = None,
         project_ini_status: Optional[str] = None,
+        preserved_db_name: Optional[str] = None,
 ) -> None:
     if no_provisioning_log:
         _sync_project_impl(
@@ -6986,6 +7077,7 @@ def sync_project(
             ini_overrides=ini_overrides,
             source_ini_layers=source_ini_layers,
             project_ini_status=project_ini_status,
+            preserved_db_name=preserved_db_name,
         )
         return
 
@@ -7086,6 +7178,7 @@ def sync_project(
             ini_overrides=ini_overrides,
             source_ini_layers=effective_source_ini_layers,
             project_ini_status=project_ini_status,
+            preserved_db_name=preserved_db_name,
         )
     except Exception as e:
         record["status"] = "failed"
@@ -7110,10 +7203,16 @@ def sync_project(
         _write_provisioning_record(layout, run_id, record)
         raise
 
+    effective_ini = (root / _DEFAULT_PROJECT_INI_NAME) if target == "venv" else ini_path
+    if target == "venv" and effective_ini.is_file():
+        effective_resolved = _resolved_ini_for_manifest(effective_ini, None, None)
+        if effective_resolved is not None:
+            _write_text_file(resolved_ini_path, effective_resolved, private=True, atomic=True)
+
     cfg = load_project_config(
-        ini_path,
-        vars_overrides=vars_overrides,
-        ini_overrides=ini_overrides,
+        effective_ini if effective_ini.is_file() else ini_path,
+        vars_overrides=vars_overrides if target != "venv" else None,
+        ini_overrides=ini_overrides if target != "venv" else None,
         log_resolved=False,
         log_overrides=False,
     )
@@ -8188,6 +8287,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     implicit_ini = not raw_explicit_sources
     source_ini_layers: list[str] = []
     project_ini_status: Optional[str] = None
+    preserved_db_name: Optional[str] = None
 
     if init_project and not implicit_ini:
         parser.error("--init can only be used when INI is omitted and no -i/--include is provided.")
@@ -8268,6 +8368,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             parser.error("Internal error: failed to determine workspace ROOT for included INI layers.")
 
         default_ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+        if target == "venv":
+            preserved_db_name = _existing_workspace_db_name(root_override)
         default_ini_existed = default_ini_path.is_file()
         default_ini_layer_index = _explicit_source_uses_default_project_ini(
             parser,
@@ -8337,6 +8439,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 )
 
             default_ini_path = root_override / _DEFAULT_PROJECT_INI_NAME
+            if target == "venv":
+                preserved_db_name = _existing_workspace_db_name(root_override)
             default_ini_existed = default_ini_path.is_file()
             source_ini_layers = [_describe_cli_ini_source_for_report(parser, args.ini)]
             if default_ini_existed:
@@ -8371,6 +8475,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 _logger.info('Workspace ROOT default (INI directory): %s', ini_path.parent.resolve())
 
             effective_root = root_override or ini_path.parent.resolve()
+            if target == "venv":
+                preserved_db_name = _existing_workspace_db_name(effective_root)
             default_ini_path = effective_root / _DEFAULT_PROJECT_INI_NAME
             if _same_path(ini_path, default_ini_path):
                 project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
@@ -8423,6 +8529,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             cli_argv=sys.argv,
             source_ini_layers=source_ini_layers,
             project_ini_status=project_ini_status,
+            preserved_db_name=preserved_db_name,
         )
     except Exception as e:
         _logger.error(f'{e}')

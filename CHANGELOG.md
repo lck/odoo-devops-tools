@@ -4,6 +4,7 @@
 
 ### Added
 
+* Generate a stable workspace-specific `db_name` when omitted in the venv workflow.
 * Add a dedicated `odoo-compose-venv` CLI for native Odoo configuration and scripts.
 * Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
 * Add support for configurable Restic and Mailpit versions in Docker configuration.

@@ -59,11 +59,76 @@ jobs:
       - name: Verify uv
         run: uv --version
 
-      - name: Verify legacy odt-env CLI alias
+      - name: Check generated db_name and runtime PostgreSQL environment
         shell: bash
         run: |
-          uv run odoo-compose --help | grep -q "odoo-compose"
-          uv run odoo-compose-venv --help | grep -q "odoo-compose-venv"
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          first="$tmp/first/shared"
+          second="$tmp/second/shared"
+          mkdir -p "$first" "$second" "$tmp/docker-only" "$tmp/explicit"
+
+          # Two same-named workspaces must receive different stable names.
+          for root in "$first" "$second"; do
+            printf '[odoo]\nversion = 19.0\n\n[config]\n# keep this comment\n' > "$root/odoo-project.ini"
+            uv run odoo-compose-venv --root "$root" --no-provisioning-log
+            test ! -d "$root/venv"
+            grep -Fqx '# keep this comment' "$root/odoo-project.ini"
+          done
+          name="$(sed -n 's/^db_name = //p' "$first/odoo-project.ini")"
+          other="$(sed -n 's/^db_name = //p' "$second/odoo-project.ini")"
+          [[ "$name" =~ ^shared_[0-9a-f]{10}$ ]]
+          [[ "$other" =~ ^shared_[0-9a-f]{10}$ ]]
+          test "$name" != "$other"
+          grep -Fqx "db_name = $name" "$first/odoo-configs/odoo-server.conf"
+          grep -Fqx "DB_NAME=$name" "$first/odoo-scripts/backup-db.sh"
+
+          # Missing connection keys must not override PG* at script execution.
+          ! grep -Eq '^export PG(HOST|PORT|USER|PASSWORD)=' "$first/odoo-scripts/backup-db.sh"
+          mkdir -p "$tmp/bin"
+          cat > "$tmp/bin/pg_dump" <<'SH'
+          #!/usr/bin/env bash
+          printf '%s\n' "${PGHOST:-}" "${PGPORT:-}" "${PGUSER:-}" \
+            "${PGPASSWORD:-}" "${@: -1}" > "$PG_CAPTURE"
+          printf 'mock dump\n'
+          SH
+          chmod +x "$tmp/bin/pg_dump"
+          PG_CAPTURE="$tmp/pg-env" POSTGRES_BIN="$tmp/bin" \
+            PGHOST=127.0.0.9 PGPORT=6543 PGUSER=ci_user PGPASSWORD=ci_password \
+            "$first/odoo-scripts/backup-db.sh" "$tmp/db.dump"
+          printf '127.0.0.9\n6543\nci_user\nci_password\n%s\n' "$name" > "$tmp/expected-pg-env"
+          cmp "$tmp/expected-pg-env" "$tmp/pg-env"
+          grep -Fqx 'mock dump' "$tmp/db.dump"
+
+          # Re-running and moving a workspace must preserve the stored db_name.
+          cp "$first/odoo-project.ini" "$tmp/original.ini"
+          uv run odoo-compose-venv --root "$first" --no-provisioning-log
+          cmp "$tmp/original.ini" "$first/odoo-project.ini"
+          mv "$first" "$tmp/first/moved"
+          uv run odoo-compose-venv --root "$tmp/first/moved" --no-provisioning-log
+          grep -Fqx "db_name = $name" "$tmp/first/moved/odoo-project.ini"
+
+          # Explicit names win; Docker-only workspaces retain the 'odoo' default.
+          printf '[odoo]\nversion = 19.0\n[config]\ndb_name = manual_db\n' > "$tmp/explicit/odoo-project.ini"
+          uv run odoo-compose-venv --root "$tmp/explicit" --no-provisioning-log
+          grep -Fqx 'db_name = manual_db' "$tmp/explicit/odoo-project.ini"
+          printf '[odoo]\nversion = 19.0\n' > "$tmp/docker-only/odoo-project.ini"
+          uv run odoo-compose --root "$tmp/docker-only" --no-provisioning-log
+          ! grep -q '^db_name' "$tmp/docker-only/odoo-project.ini"
+          grep -Fqx 'DB_NAME=odoo' "$tmp/docker-only/docker/local/scripts/backup-db.sh"
+          uv run odoo-compose --root "$tmp/first/moved" --no-provisioning-log
+          grep -Fqx "DB_NAME=$name" "$tmp/first/moved/docker/local/scripts/backup-db.sh"
+
+          # External INI sources must remain unchanged across generation.
+          printf '[odoo]\nversion = 19.0\n' > "$tmp/external.ini"
+          mkdir -p "$tmp/external-root"
+          uv run odoo-compose-venv "$tmp/external.ini" --root "$tmp/external-root" --no-provisioning-log
+          ! grep -q '^db_name' "$tmp/external.ini"
+          external_name="$(sed -n 's/^db_name = //p' "$tmp/external-root/odoo-project.ini")"
+          test -n "$external_name"
+          uv run odoo-compose-venv "$tmp/external.ini" --root "$tmp/external-root" --no-provisioning-log
+          grep -Fqx "db_name = $external_name" "$tmp/external-root/odoo-project.ini"
 
       - name: Reject duplicate workspace root options
         shell: bash
