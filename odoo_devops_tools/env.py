@@ -7998,6 +7998,11 @@ Examples:
             action="store_true",
             help="Do not (re)generate native helper scripts (odoo-compose-venv only).",
         )
+        parser.add_argument(
+            "--no-data-dir",
+            action="store_true",
+            help="Do not generate odoo data folder.",
+        )
     else:
         parser.add_argument(
             "--create-docker-deploy",
@@ -8008,11 +8013,6 @@ Examples:
             ),
         )
 
-    parser.add_argument(
-        "--no-data-dir",
-        action="store_true",
-        help="Do not generate odoo data folder.",
-    )
     parser.add_argument(
         "--no-provisioning-log",
         action="store_true",
