@@ -87,24 +87,6 @@ odoo-compose --help
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
-Quick start:
-
-```bash
-# Docker workflow
-odoo-compose --init ./odoo19
-cd ./odoo19
-docker compose up -d --build
-./docker/local/scripts/run.sh -i base --without-demo=all --stop-after-init
-
-cd ..
-
-# Native development with venv
-odoo-compose-venv --init ./odoo19venv --sync-all --create-venv
-cd ./odoo19venv
-./odoo-scripts/run.sh -i base --without-demo=all --stop-after-init
-./odoo-scripts/instance.sh start
-```
-
 ## 1. Docker workflow
 
 Create a new workspace:
