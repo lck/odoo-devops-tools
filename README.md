@@ -321,7 +321,7 @@ Restore a database dump with `pg_restore`:
 ./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-Database restores use copy semantics by default, matching `click-odoo-restoredb --copy`.
+Database restores use copy semantics by default.
 After `pg_restore`, Odoo database identity parameters are regenerated so the restored
 database can coexist with the source database:
 
@@ -759,7 +759,7 @@ Restore a database dump with `pg_restore`:
 ./odoo-scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-Database restores use copy semantics by default, matching `click-odoo-restoredb --copy`.
+Database restores use copy semantics by default.
 After `pg_restore`, Odoo database identity parameters are regenerated so the restored
 database can coexist with the source database:
 
