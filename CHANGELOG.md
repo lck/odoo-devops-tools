@@ -5,6 +5,7 @@
 ### Fixed
 
 - Prevent unsafe database names from causing data loss.
+- Respect custom `data_dir` in filestore backup and restore scripts.
 
 ## 1.24.2 (2026-10-13)
 

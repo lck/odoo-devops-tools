@@ -2509,6 +2509,33 @@ def _native_default_db_name(cfg: ProjectConfig) -> str:
     return db_name
 
 
+def _native_filestore_data_dir_sh(layout: Layout) -> str:
+    # Preserve workspace-relative paths when the workspace is moved.
+    try:
+        relative = layout.data_dir.relative_to(layout.root)
+    except ValueError:
+        return shlex.quote(str(layout.data_dir))
+    return f'"${{ROOT_DIR}}"/{shlex.quote(relative.as_posix())}'
+
+
+def _native_filestore_data_dir_bat(layout: Layout) -> str:
+    # Paths cannot contain double quotes on Windows; reject control characters
+    # rather than generating unsafe batch assignments.
+    if any(char in str(layout.data_dir) for char in ('"', '\r', '\n', '\x00')):
+        raise Exception("Native filestore data_dir contains invalid Windows path characters.")
+    try:
+        relative = layout.data_dir.relative_to(layout.root)
+    except ValueError:
+        value = str(layout.data_dir)
+    else:
+        suffix = '' if str(relative) == '.' else '\\' + str(relative)
+        value = '%ROOT_DIR%' + suffix
+    # Keep %ROOT_DIR% expandable while escaping literal percent signs in paths.
+    if value.startswith('%ROOT_DIR%'):
+        return '%ROOT_DIR%' + value[len('%ROOT_DIR%'):].replace('%', '%%').replace('^', '^^')
+    return value.replace('%', '%%').replace('^', '^^')
+
+
 def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
     # libpq reads these environment variables, keeping passwords out of command
     # arguments. Missing/False options leave libpq defaults and .pgpass intact.
@@ -2863,6 +2890,7 @@ echo "INFO: Database neutralization completed: ${{DB_NAME}}"
 
 def write_native_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    configured_data_dir = _native_filestore_data_dir_sh(layout)
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2871,7 +2899,8 @@ ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
 
 BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
 DB_NAME={configured_db_name}
-FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+DATA_DIR={configured_data_dir}
+FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
 TMP_OUTPUT="${{OUTPUT}}.tmp"
@@ -2893,6 +2922,7 @@ echo "INFO: Filestore backup created: ${{OUTPUT}}"
 
 def write_native_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    configured_data_dir = _native_filestore_data_dir_sh(layout)
     content = fr"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2900,7 +2930,8 @@ SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
 
 DB_NAME={configured_db_name}
-FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+DATA_DIR={configured_data_dir}
+FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
 FORCE=false
 SOURCE=""
 
@@ -2965,6 +2996,7 @@ echo "INFO: Filestore restore completed: ${{DB_NAME}}"
 
 def write_native_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    configured_data_dir = _native_filestore_data_dir_sh(layout)
     content = fr'''#!/usr/bin/env bash
 set -euo pipefail
 
@@ -2973,7 +3005,8 @@ ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
 RESTIC="${{SCRIPT_DIR}}/restic.sh"
 DB_NAME={configured_db_name}
 RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+DATA_DIR={configured_data_dir}
+FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
 
 if [[ ! -x "${{RESTIC}}" ]]; then
   echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
@@ -3000,6 +3033,7 @@ echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
 
 def write_native_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = shlex.quote(_native_default_db_name(cfg))
+    configured_data_dir = _native_filestore_data_dir_sh(layout)
     restic_command = _native_restic_command_sh()
     content = fr'''#!/usr/bin/env bash
 set -euo pipefail
@@ -3014,8 +3048,9 @@ RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
 FORCE=false
 SNAPSHOT="latest"
 SNAPSHOT_SET=false
-SOURCE_FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{SOURCE_DB_NAME}}"
-TARGET_FILESTORE_PATH="${{ROOT_DIR}}/odoo-data/filestore/${{DB_NAME}}"
+DATA_DIR={configured_data_dir}
+SOURCE_FILESTORE_PATH="${{DATA_DIR}}/filestore/${{SOURCE_DB_NAME}}"
+TARGET_FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
 
 usage() {{
   echo "Usage: $(basename "$0") [--force] [SNAPSHOT]" >&2
@@ -3377,6 +3412,7 @@ exit /b 0
 
 def write_native_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    configured_data_dir = _native_filestore_data_dir_bat(layout)
     content = rf"""@echo off
 setlocal DisableDelayedExpansion
 
@@ -3385,7 +3421,8 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
 set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
 set "DB_NAME={configured_db_name}"
-set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+set "DATA_DIR={configured_data_dir}"
+set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
 
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
 if "%~1"=="" (
@@ -3418,6 +3455,7 @@ endlocal
 
 def write_native_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    configured_data_dir = _native_filestore_data_dir_bat(layout)
     content = rf"""@echo off
 setlocal DisableDelayedExpansion
 
@@ -3425,7 +3463,8 @@ set "SCRIPT_DIR=%~dp0"
 if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
 set "DB_NAME={configured_db_name}"
-set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+set "DATA_DIR={configured_data_dir}"
+set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
 set "FORCE=false"
 set "SOURCE="
 
@@ -3490,6 +3529,7 @@ exit /b 2
 
 def write_native_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    configured_data_dir = _native_filestore_data_dir_bat(layout)
     content = rf"""@echo off
 setlocal DisableDelayedExpansion
 
@@ -3503,7 +3543,8 @@ if defined RESTIC_HOST (
 ) else (
   for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
 )
-set "FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+set "DATA_DIR={configured_data_dir}"
+set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
 
 if not exist "%RESTIC%" (
   echo ERROR: restic helper not found: %RESTIC%
@@ -3525,6 +3566,7 @@ exit /b %ERRORLEVEL%
 
 def write_native_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
     configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
+    configured_data_dir = _native_filestore_data_dir_bat(layout)
     restic_command = _native_restic_command_bat()
     content = rf"""@echo off
 setlocal DisableDelayedExpansion
@@ -3547,8 +3589,9 @@ if defined RESTIC_HOST (
 set "FORCE=false"
 set "SNAPSHOT=latest"
 set "SNAPSHOT_SET=false"
-set "SOURCE_FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%SOURCE_DB_NAME%"
-set "TARGET_FILESTORE_PATH=%ROOT_DIR%\odoo-data\filestore\%DB_NAME%"
+set "DATA_DIR={configured_data_dir}"
+set "SOURCE_FILESTORE_PATH=%DATA_DIR%\filestore\%SOURCE_DB_NAME%"
+set "TARGET_FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
 
 goto parse_args
 

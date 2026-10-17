@@ -130,6 +130,55 @@ jobs:
           uv run odoo-compose-venv "$tmp/external.ini" --root "$tmp/external-root" --no-provisioning-log
           grep -Fqx "db_name = $external_name" "$tmp/external-root/odoo-project.ini"
 
+      - name: Verify native filestore helpers use custom data_dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          root="$tmp/custom-workspace"
+          data="$tmp/custom data & files"
+          mkdir -p "$root" "$data/filestore/ci_custom"
+          cat > "$root/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          [config]
+          db_name = ci_custom
+          data_dir = $data
+          EOF
+          uv run odoo-compose-venv --root "$root" --no-provisioning-log
+          grep -Fqx "data_dir = $data" "$root/odoo-configs/odoo-server.conf"
+          printf 'original' > "$data/filestore/ci_custom/attachment"
+          "$root/odoo-scripts/backup-filestore.sh" "$tmp/filestore.tar.gz"
+          printf 'changed' > "$data/filestore/ci_custom/attachment"
+          "$root/odoo-scripts/restore-filestore.sh" --force "$tmp/filestore.tar.gz"
+          test "$(cat "$data/filestore/ci_custom/attachment")" = original
+          test ! -e "$root/odoo-data/filestore/ci_custom"
+
+          export RESTIC_REPOSITORY="$tmp/restic-repo"
+          export RESTIC_PASSWORD=ci-filestore-password
+          export RESTIC_HOST=ci-custom
+          export RESTIC_BIN="$(command -v restic)"
+          "$root/odoo-scripts/restic.sh" init
+          "$root/odoo-scripts/backup-filestore-restic.sh"
+          uv run odoo-compose-venv --root "$root" --no-provisioning-log \
+            --set config:db_name=ci_restored
+          RESTIC_SOURCE_DB_NAME=ci_custom "$root/odoo-scripts/restore-filestore-restic.sh"
+          test "$(cat "$data/filestore/ci_restored/attachment")" = original
+          test ! -e "$root/odoo-data/filestore/ci_restored"
+
+          # A data_dir inside the workspace must continue to work after moving it.
+          portable="$tmp/portable workspace"
+          mkdir -p "$portable"
+          printf '[odoo]\nversion = 19.0\n[config]\ndb_name = portable_db\ndata_dir = custom-data\n' \
+            > "$portable/odoo-project.ini"
+          uv run odoo-compose-venv --root "$portable" --no-provisioning-log
+          mkdir -p "$portable/custom-data/filestore/portable_db"
+          printf 'portable' > "$portable/custom-data/filestore/portable_db/attachment"
+          mv "$portable" "$tmp/moved workspace"
+          "$tmp/moved workspace/odoo-scripts/backup-filestore.sh" "$tmp/portable.tar.gz"
+          tar -xOzf "$tmp/portable.tar.gz" ./attachment | grep -Fqx portable
+
       - name: Reject duplicate workspace root options
         shell: bash
         run: |

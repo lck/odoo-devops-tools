@@ -72,6 +72,42 @@ jobs:
             throw "db_name or INI formatting changed on the second run."
           }
 
+      - name: Verify Windows filestore helpers use custom data_dir
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'ci-custom-filestore-workspace'
+          $data = Join-Path $env:RUNNER_TEMP 'ci-custom & filestore'
+          $source = Join-Path $data 'filestore\ci_custom'
+          New-Item -ItemType Directory -Force -Path $root, $source | Out-Null
+          @"
+          [odoo]
+          version = 19.0
+          [config]
+          db_name = ci_custom
+          data_dir = $data
+          "@ | Set-Content -LiteralPath (Join-Path $root 'odoo-project.ini') -Encoding UTF8
+          uv run odoo-compose-venv --root $root --no-provisioning-log
+          if ($LASTEXITCODE -ne 0) { throw 'Native helper generation failed.' }
+          $config = Get-Content -LiteralPath (Join-Path $root 'odoo-configs\odoo-server.conf') -Raw
+          if (-not $config.Contains("data_dir = $data")) { throw 'Generated Odoo data_dir is incorrect.' }
+          foreach ($name in @('backup-filestore', 'restore-filestore', 'backup-filestore-restic', 'restore-filestore-restic')) {
+            $script = Get-Content -LiteralPath (Join-Path $root "odoo-scripts\$name.bat") -Raw
+            if (-not $script.Contains("set `"DATA_DIR=$data`"")) {
+              throw "Generated $name.bat ignores custom data_dir."
+            }
+          }
+          Set-Content -LiteralPath (Join-Path $source 'attachment') -Value original -Encoding ASCII
+          $archive = Join-Path $env:RUNNER_TEMP 'ci-custom-filestore.tar.gz'
+          & (Join-Path $root 'odoo-scripts\backup-filestore.bat') $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Custom data_dir filestore backup failed.' }
+          Set-Content -LiteralPath (Join-Path $source 'attachment') -Value changed -Encoding ASCII
+          & (Join-Path $root 'odoo-scripts\restore-filestore.bat') --force $archive
+          if ($LASTEXITCODE -ne 0) { throw 'Custom data_dir filestore restore failed.' }
+          $restored = (Get-Content -LiteralPath (Join-Path $source 'attachment') -Raw).Trim()
+          if ($restored -ne 'original') { throw 'Custom data_dir filestore content was not restored.' }
+          if (Test-Path -LiteralPath (Join-Path $root 'odoo-data\filestore\ci_custom')) {
+            throw 'Filestore was written to the default data_dir.'
+          }
+
       - name: Generate INI file
         run: |
           @'
