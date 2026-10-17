@@ -166,6 +166,18 @@ jobs:
           if ($compose -like "*odoo-db-data:/var/lib/postgresql/data*") {
             throw "Generated PostgreSQL 18 data volume unexpectedly uses the pre-18 data path."
           }
+          foreach ($expected in @(
+            'pg_isready -q -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}',
+            'http://127.0.0.1:8069/web/login',
+            'condition: service_healthy'
+          )) {
+            if (-not $compose.Contains($expected)) {
+              throw "Generated Docker Compose healthcheck is missing '$expected'."
+            }
+          }
+          if (([regex]::Matches($compose, '(?m)^    healthcheck:\r?$')).Count -ne 2) {
+            throw 'Expected PostgreSQL and Odoo healthchecks without Mailpit.'
+          }
 
       - name: Generate legacy neutralization helper
         run: |
@@ -244,11 +256,17 @@ jobs:
             'MP_POP3_AUTH: "odoo:odoo"',
             '"18025:8025"',
             "mailpit-data:/data",
-            "mailpit-data:"
+            "mailpit-data:",
+            'test: ["CMD", "/mailpit", "readyz"]',
+            'condition: service_healthy'
           )) {
-            if ($compose -notlike "*$expected*") {
+            if (-not $compose.Contains($expected)) {
               throw "Generated Mailpit Compose configuration is missing '$expected'."
             }
+          }
+
+          if (([regex]::Matches($compose, '(?m)^    healthcheck:\r?$')).Count -ne 3) {
+            throw 'Expected PostgreSQL, Mailpit and Odoo healthchecks.'
           }
 
           foreach ($expected in @(

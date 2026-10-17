@@ -106,7 +106,7 @@ Then start the Docker Compose environment:
 
 ```bash
 cd ./odoo19
-docker compose up -d --build
+docker compose up -d --build --wait
 ```
 
 Optionally initialize the Odoo database from the command line instead of through the web interface:
@@ -146,7 +146,7 @@ Sync the configured addon repositories and refresh the generated Docker workflow
 
 ```bash
 odoo-compose --sync-addons
-docker compose up -d --build
+docker compose up -d --build --wait
 ```
 
 The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/` and bind-mounted into the Odoo container.
@@ -187,7 +187,7 @@ Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
 odoo-compose --sync-all
-docker compose up -d --build
+docker compose up -d --build --wait
 ```
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
@@ -198,14 +198,14 @@ Enable Mailpit in the local Docker workflow when you need to inspect or test ema
 
 ```bash
 odoo-compose --set docker:mailpit_enabled=true
-docker compose up -d --build
+docker compose up -d --build --wait
 ```
 
 Mailpit is available at http://localhost:8025 by default. When running multiple workspaces, override the host web UI port, for example:
 
 ```bash
 odoo-compose --set docker:mailpit_enabled=true --set docker:mailpit_webui_port=8026
-docker compose up -d --build
+docker compose up -d --build --wait
 ```
 
 The generated local Odoo configuration sends outgoing email to `mailpit:1025`. When Mailpit is enabled, local Docker SMTP connection settings (`smtp_server`, `smtp_port`, `smtp_ssl`, `smtp_user`, and `smtp_password`) are intentionally overridden; the deploy configuration keeps the values from `[config]` unchanged.

@@ -1,10 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- add Docker Compose `healthchecks` for PostgreSQL, Odoo and Mailpit.
+
 ## 1.24.3 (2026-10-17)
 
 ### Fixed
 
-- Prevent Dockerfile injection via `base_image` validation
+- Prevent Dockerfile injection via `base_image` validation.
 - Prevent unsafe Git addon paths from escaping workspace.
 - Prevent unsafe database names from causing data loss.
 - Respect custom `data_dir` in filestore backup and restore scripts.
@@ -25,20 +31,20 @@
 
 ### Added
 
-* Generate a stable workspace-specific `db_name` when omitted in the venv workflow.
-* Add a dedicated `odoo-compose-venv` CLI for native Odoo configuration and scripts.
-* Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
-* Add support for configurable Restic and Mailpit versions in Docker configuration.
+- Generate a stable workspace-specific `db_name` when omitted in the venv workflow.
+- Add a dedicated `odoo-compose-venv` CLI for native Odoo configuration and scripts.
+- Generate native shell/batch database, filestore, restic and neutralization helpers with the same interface as Docker.
+- Add support for configurable Restic and Mailpit versions in Docker configuration.
 
 ### Changed
 
-* Make `odoo-compose` Docker-only and generate native configuration/scripts only with `odoo-compose-venv`.
-* Rename `mailpit` to `mailpit_enabled` in Docker configuration.
+- Make `odoo-compose` Docker-only and generate native configuration/scripts only with `odoo-compose-venv`.
+- Rename `mailpit` to `mailpit_enabled` in Docker configuration.
 
 ### Removed
 
-* Remove the `--no-local-docker` option in favor of `odoo-compose-venv`.
-* Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.
+- Remove the `--no-local-docker` option in favor of `odoo-compose-venv`.
+- Remove ODOO_DB_NAME support; database name is now configured exclusively via odoo-project.ini.
 
 ### Fixed
 
@@ -48,60 +54,60 @@
 
 ### Changed
 
-* Use direct PostgreSQL commands for legacy Docker database neutralization.
+- Use direct PostgreSQL commands for legacy Docker database neutralization.
 
 ## 1.23.11 (2026-10-08)
 
 ### Added
 
-* Add support for running custom SQL scripts during Docker database neutralization.
+- Add support for running custom SQL scripts during Docker database neutralization.
 
 ## 1.23.10 (2026-10-07)
 
 ### Added
 
-* Add configurable read-write Docker shares.
-* Add configurable PostgreSQL version to the local Docker workflow.
+- Add configurable read-write Docker shares.
+- Add configurable PostgreSQL version to the local Docker workflow.
 
 ### Changed
 
-* Show verbose output during Docker database restores.
+- Show verbose output during Docker database restores.
 
 ## 1.23.9 (2026-10-06)
 
 ### Added
 
-* Allow Unix Docker helpers to run Docker through `sudo` via `ODOO_DOCKER_SUDO=1`.
+- Allow Unix Docker helpers to run Docker through `sudo` via `ODOO_DOCKER_SUDO=1`.
 
 ## 1.23.8 (2026-10-06)
 
 ### Fixed
 
-* Prevent Docker helpers from rebuilding or starting dependencies.
+- Prevent Docker helpers from rebuilding or starting dependencies.
 
 ## 1.23.7 (2026-10-06)
 
 ### Added
 
-* Add optional Mailpit support to the local Docker workflow.
+- Add optional Mailpit support to the local Docker workflow.
 
 ## 1.23.6 (2026-10-05)
 
 ### Fixed
 
-* Ensure Docker run, shell, and update helpers build the Odoo image when needed and start required dependencies.
+- Ensure Docker run, shell, and update helpers build the Odoo image when needed and start required dependencies.
 
 ## 1.23.5 (2026-10-05)
 
 ### Added
 
-* Add Docker run helper.
+- Add Docker run helper.
 
 ## 1.23.4 (2026-10-05)
 
 ### Added
 
-* Add Docker shell and database update helpers.
+- Add Docker shell and database update helpers.
 
 ## 1.23.3 (2026-10-03)
 
@@ -113,81 +119,81 @@
 
 ### Added
 
-* Add `--init` as the preferred project initialization option while keeping `--init-project` as a compatibility alias.
+- Add `--init` as the preferred project initialization option while keeping `--init-project` as a compatibility alias.
 
 ## 1.23.1 (2026-10-03)
 
 ### Added
 
-* Add `--copy` / `--move` semantics to generated Docker database restore helpers.
-* Add Docker database neutralization helpers.
+- Add `--copy` / `--move` semantics to generated Docker database restore helpers.
+- Add Docker database neutralization helpers.
 
 ## 1.23.0 (2026-09-29)
 
 ### Added
 
-* Add `odoo-compose` as the primary CLI command while keeping `odt-env` as a backward-compatible alias.
+- Add `odoo-compose` as the primary CLI command while keeping `odt-env` as a backward-compatible alias.
 
 ## 1.22.0 (2026-09-29)
 
 ### Added
 
-* Add Odoo 20.0 support.
+- Add Odoo 20.0 support.
 
 ## 1.21.4 (2026-09-27)
 
 ### Changed
 
-* Require `--force` when restoring over an existing Docker database or filestore.
+- Require `--force` when restoring over an existing Docker database or filestore.
 
 ## 1.21.3 (2026-09-27)
 
 ### Fixed
 
-* Prevent base-image Odoo code from mixing with workspace Odoo in Docker.
+- Prevent base-image Odoo code from mixing with workspace Odoo in Docker.
 
 ## 1.21.2 (2026-09-26)
 
 ### Added
 
-* Log the version at startup and in the summary report.
+- Log the version at startup and in the summary report.
 
 ## 1.21.1 (2026-09-26)
 
 ### Added
 
-* Add `[virtualenv].constraints`.
+- Add `[virtualenv].constraints`.
 
 ## 1.21.0 (2026-09-25)
 
 ### Added
 
-* Allow `--set` to add supported project options.
-* Add Docker support for running Odoo from workspace sources.
+- Allow `--set` to add supported project options.
+- Add Docker support for running Odoo from workspace sources.
 
 ## 1.20.5 (2026-09-25)
 
 ### Changed
 
-* Install Restic from the official Docker image instead of APT for compatibility with older Odoo base images.
+- Install Restic from the official Docker image instead of APT for compatibility with older Odoo base images.
 
 ## 1.20.4 (2026-09-24)
 
 ### Documentation
 
-* Reorganize README sections
+- Reorganize README sections
 
 ## 1.20.3 (2026-09-24)
 
 ### Documentation
 
-* Reorganize README around Docker and native venv workflows.
+- Reorganize README around Docker and native venv workflows.
 
 ## 1.20.2 (2026-09-23)
 
 ### Changed
 
-* Configure explicit log rotation for Local Docker Odoo and PostgreSQL services.
+- Configure explicit log rotation for Local Docker Odoo and PostgreSQL services.
 
 ## 1.20.1 (2026-09-23)
 
