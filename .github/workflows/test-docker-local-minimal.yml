@@ -166,6 +166,14 @@ jobs:
 
           cd odoo-workspace
           docker compose config --quiet
+          docker compose config --format json | jq -e '
+            (.services.db.healthcheck.test[0] == "CMD-SHELL") and
+            (.services.db.healthcheck.test[1] | contains("pg_isready -q -h 127.0.0.1")) and
+            (.services.mailpit | has("healthcheck") | not) and
+            (.services.odoo.healthcheck.test | index("http://127.0.0.1:8069/web/login") != null) and
+            (.services.odoo.depends_on.db.condition == "service_healthy") and
+            (.services.odoo.depends_on | has("mailpit") | not)
+          '
 
       - name: Check legacy neutralization helper generation
         run: |
@@ -225,6 +233,21 @@ jobs:
             -i fleet \
             --without-demo=all \
             --stop-after-init
+
+      - name: Verify Docker services become healthy
+        working-directory: ./odoo-workspace
+        run: |
+          docker compose up -d --wait --wait-timeout 240 odoo
+          for service in db mailpit odoo; do
+            container_id="$(docker compose ps -q "$service")"
+            test -n "$container_id"
+            test "$(docker inspect --format '{{.State.Health.Status}}' "$container_id")" = healthy
+          done
+          # The official Mailpit image provides its own healthcheck.
+          docker inspect --format '{{json .Config.Healthcheck.Test}}' \
+            "$(docker compose ps -q mailpit)" | jq -e '. == ["CMD", "/mailpit", "readyz"]'
+          # Keep the application stopped during subsequent database/filestore restore checks.
+          docker compose stop odoo
 
       - name: Test Docker shell and update helpers
         working-directory: ./odoo-workspace

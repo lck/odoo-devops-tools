@@ -101,10 +101,18 @@ jobs:
       - name: Update Odoo with click-odoo-update
         working-directory: ./odoo-workspace
         run: |
-          docker compose up -d odoo
-          docker compose exec -T odoo click-odoo-update \
+          if ! docker compose up -d --wait --wait-timeout 240 odoo; then
+            docker compose ps
+            docker compose logs --no-color --tail=100 db mailpit odoo
+            exit 1
+          fi
+          if ! docker compose exec -T odoo click-odoo-update \
             -c /etc/odoo/odoo.conf \
-            -d odoo
+            -d odoo; then
+            docker compose ps
+            docker compose logs --no-color --tail=100 db mailpit odoo
+            exit 1
+          fi
 
       - name: Stop Docker Compose services
         if: always()

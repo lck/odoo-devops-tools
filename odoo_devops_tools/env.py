@@ -4312,7 +4312,7 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     )
 
     mailpit_service = ""
-    depends_on = ["      - db"]
+    depends_on = ["      db:", "        condition: service_healthy"]
     named_volumes = [
         "  odoo-db-data:",
         "  odoo-data:",
@@ -4333,7 +4333,6 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     volumes:
       - mailpit-data:/data
 """
-        depends_on.append("      - mailpit")
         named_volumes.append("  mailpit-data:")
 
     depends_on_block = "\n".join(depends_on)
@@ -4353,6 +4352,12 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: odoo
       POSTGRES_PASSWORD: odoo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U $${{POSTGRES_USER}} -d $${{POSTGRES_DB}}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
     volumes:
       - odoo-db-data:{postgres_data_path}
 {mailpit_service}
@@ -4367,6 +4372,12 @@ services:
         max-file: "10"
     depends_on:
 {depends_on_block}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "--max-time", "5", "--output", "/dev/null", "http://127.0.0.1:8069/web/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
     ports:
 {ports}
     environment:
