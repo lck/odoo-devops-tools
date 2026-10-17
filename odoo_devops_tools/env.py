@@ -1271,6 +1271,13 @@ def load_project_config(
     for sec in cp.sections():
         if sec.startswith("addons."):
             name = sec.split(".", 1)[1]
+            # Git addon destinations are ROOT/odoo-addons/<name>. Keep the
+            # section name a single, portable path component (also on Windows).
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) or name.endswith("."):
+                raise Exception(
+                    f"Invalid addon section name [{sec}]: use letters, digits, '.', '_' or '-' "
+                    "without path separators or traversal components."
+                )
 
             has_path = cp.has_option(sec, "path")
             has_repo = cp.has_option(sec, "repo")
@@ -2151,7 +2158,22 @@ def _validate_local_odoo_path(layout: Layout, spec: OdooSpec) -> Path:
 
 
 def _resolve_addon_path(layout: Layout, addon_name: str, spec: AddonSpec) -> Path:
-    return _resolve_workspace_path(layout, spec.path or "", layout.addons_root / addon_name)
+    if spec.is_local:
+        return _resolve_workspace_path(layout, spec.path or "", layout.addons_root / addon_name)
+    dest = layout.addons_root / addon_name
+    # Implicit Git destinations must not follow symlinks into another repo,
+    # outside the workspace, or back onto the addons root itself.
+    if (
+        not _is_path_within(layout.addons_root, layout.root)
+        or dest.is_symlink()
+        or not _is_path_within(dest, layout.addons_root)
+        or dest.resolve() == layout.addons_root.resolve()
+    ):
+        raise Exception(
+            f"Unsafe addon destination for [addons.{addon_name}]: {dest} "
+            f"must resolve inside {layout.addons_root}. Use an explicit 'path' for local addons."
+        )
+    return dest
 
 
 def _validate_local_addon_path(layout: Layout, addon_name: str, spec: AddonSpec) -> Path:

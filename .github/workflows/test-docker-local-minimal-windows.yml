@@ -25,6 +25,30 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Reject unsafe addon section names on Windows
+        run: |
+          $invalidNames = @('..', '../outside', 'nested\repo', 'C:drive', 'repo&other')
+          for ($index = 0; $index -lt $invalidNames.Count; $index++) {
+            $name = $invalidNames[$index]
+            $workspace = Join-Path $env:RUNNER_TEMP "ci-unsafe-addon-$index"
+            New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+            $ini = Join-Path $workspace 'odoo-project.ini'
+            @"
+          [odoo]
+          version = 19.0
+          [addons.$name]
+          repo = https://example.invalid/addon.git
+          branch = 19.0
+          "@ | Set-Content -LiteralPath $ini -Encoding UTF8
+            $output = (& uv run odoo-compose --root $workspace --no-provisioning-log 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw "Unsafe addon name was accepted: $name" }
+            if (-not $output.Contains('Invalid addon section name')) {
+              throw "Unexpected rejection for addon '$name': $output"
+            }
+          }
+          # Negative CLI checks exit with a nonzero code; reset for Actions.
+          $global:LASTEXITCODE = 0
+
       - name: Create workspace root folder
         run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
 

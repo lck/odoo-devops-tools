@@ -59,6 +59,47 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Reject unsafe Git addon destinations
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          # Reject traversal and platform-specific path/command metacharacters.
+          for name in '..' '../outside' 'nested/repo' 'nested\repo' 'C:drive' 'repo&other'; do
+            printf '[odoo]\nversion = 19.0\n[addons.%s]\nrepo = https://example.invalid/addon.git\nbranch = 19.0\n' \
+              "$name" > "$tmp/unsafe.ini"
+            if uv run odoo-compose-venv "$tmp/unsafe.ini" --root "$tmp/workspace" \
+              --no-provisioning-log > "$tmp/rejected.log" 2>&1; then
+              echo "Unsafe addon name was accepted: $name"
+              exit 1
+            fi
+            grep -Fq 'Invalid addon section name' "$tmp/rejected.log" || {
+              cat "$tmp/rejected.log"
+              exit 1
+            }
+          done
+
+          # A safe section name must not follow an implicit symlink outside addons_root.
+          mkdir -p "$tmp/workspace/odoo-addons" "$tmp/external-repo"
+          ln -s "$tmp/external-repo" "$tmp/workspace/odoo-addons/safe-name"
+          printf '[odoo]\nversion = 19.0\n[addons.safe-name]\nrepo = https://example.invalid/addon.git\nbranch = 19.0\n' \
+            > "$tmp/symlink.ini"
+          if uv run odoo-compose-venv "$tmp/symlink.ini" --root "$tmp/workspace" \
+            --no-provisioning-log > "$tmp/rejected.log" 2>&1; then
+            echo 'Implicit addon symlink outside workspace was accepted.'
+            exit 1
+          fi
+          grep -Fq 'Unsafe addon destination' "$tmp/rejected.log"
+          test ! -e "$tmp/external-repo/.git"
+
+          # An explicit local path outside the workspace remains supported.
+          printf '[odoo]\nversion = 19.0\n[addons.safe-name]\npath = %s\n' \
+            "$tmp/external-repo" > "$tmp/local.ini"
+          uv run odoo-compose-venv "$tmp/local.ini" --root "$tmp/workspace" --no-provisioning-log
+          grep -Fq "$tmp/external-repo" "$tmp/workspace/odoo-configs/odoo-server.conf"
+
       - name: Check generated db_name and runtime PostgreSQL environment
         shell: bash
         run: |
