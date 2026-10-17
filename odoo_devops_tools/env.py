@@ -2498,8 +2498,14 @@ def _native_default_db_name(cfg: ProjectConfig) -> str:
     db_name = str(cfg.config.get("db_name") or "").strip()
     if not db_name:
         raise Exception("Native database helpers require [config].db_name.")
-    if db_name in (".", "..") or any(c in db_name for c in ("/", "\\", "\x00", "\r", "\n")):
-        raise Exception("Database helpers require a single database name, not a path.")
+    # These names become PostgreSQL identifiers, filesystem path components and
+    # Windows batch variables. Reject traversal, CMD metacharacters and names
+    # that PostgreSQL could silently truncate to another database name.
+    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
+        raise Exception(
+            "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
+            "underscores, dots or hyphens, starting with a letter, digit or underscore."
+        )
     return db_name
 
 
@@ -4308,9 +4314,16 @@ def write_docker_compose(layout: Layout, cfg: ProjectConfig) -> Path:
 
 def _docker_default_db_name(cfg: ProjectConfig) -> str:
     db_name = cfg.config.get("db_name")
-    if isinstance(db_name, str) and db_name.strip():
-        return db_name.strip()
-    return "odoo"
+    if not isinstance(db_name, str) or not db_name.strip():
+        return "odoo"
+    db_name = db_name.strip()
+    # The same name is used by database and destructive filestore helpers.
+    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
+        raise Exception(
+            "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
+            "underscores, dots or hyphens, starting with a letter, digit or underscore."
+        )
+    return db_name
 
 
 def _write_docker_local_script(

@@ -35,6 +35,20 @@ jobs:
             --set docker.share.exchange:source=shared/exchange \
             --set docker.share.exchange:target=/mnt/exchange
 
+      - name: Reject unsafe database names before generating restore scripts
+        run: |
+          index=0
+          for invalid_db in '../filestore' 'bad/name' 'unsafe&name' '................................................................'; do
+            index=$((index + 1))
+            workspace="odoo-workspace-unsafe-db-${index}"
+            mkdir -p "${workspace}"
+            if (cd "${workspace}" && uv run odoo-compose --init --set "config:db_name=${invalid_db}") > "invalid-db-${index}.log" 2>&1; then
+              echo "ERROR: unsafe db_name was accepted: ${invalid_db}" >&2
+              exit 1
+            fi
+            grep -Fq 'Invalid [config].db_name' "invalid-db-${index}.log"
+          done
+
       - name: Check generated local Docker artifacts
         run: |
           test -f odoo-workspace/compose.yaml

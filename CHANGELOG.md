@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Prevent unsafe database names from causing data loss.
+
 ## 1.24.2 (2026-10-13)
 
 ### Changed

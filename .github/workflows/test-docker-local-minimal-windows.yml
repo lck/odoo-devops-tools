@@ -38,6 +38,30 @@ jobs:
             --set docker.share.exchange:source=shared/exchange `
             --set docker.share.exchange:target=/mnt/exchange
 
+      - name: Reject unsafe database names before generating Windows restore scripts
+        run: |
+          $invalidNames = @('../filestore', '..\filestore', 'unsafe&name')
+          for ($index = 0; $index -lt $invalidNames.Count; $index++) {
+            $invalidName = $invalidNames[$index]
+            $workspace = "odoo-workspace-unsafe-db-$index"
+            New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+            Push-Location $workspace
+            try {
+              $output = (& uv run odoo-compose --init --set "config:db_name=$invalidName" 2>&1 | Out-String)
+              if ($LASTEXITCODE -eq 0) {
+                throw "Unsafe db_name was accepted: $invalidName"
+              }
+              if (-not $output.Contains('Invalid [config].db_name')) {
+                throw "Unexpected rejection for db_name '$invalidName': $output"
+              }
+            } finally {
+              Pop-Location
+            }
+          }
+          # Negative CLI checks intentionally exit with a nonzero code. GitHub
+          # Actions propagates pwsh's LASTEXITCODE at the end of the step.
+          $global:LASTEXITCODE = 0
+
       - name: Check generated Windows local Docker helpers
         run: |
           $required = @(
