@@ -1049,10 +1049,27 @@ def _parse_odoo_version(odoo_version: str) -> int:
 
 def _validate_docker_image(value: str, option: str) -> str:
     image = (value or "").strip()
-    if not image:
+    # This value is embedded directly into Dockerfile FROM instructions.
+    # Require a single Docker image reference (registry, tag and digest allowed).
+    component = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+    label = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+    registry = rf"(?:{label}(?:\.{label})*(?::[0-9]+)?|\[[0-9A-Fa-f:.]+\](?::[0-9]+)?)"
+    tag = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"
+    digest = r"[A-Za-z][A-Za-z0-9_+.-]*:[A-Za-z0-9=_-]{32,}"
+    if (
+        not image
+        or len(image) > 512
+        or "\n" in (value or "")
+        or "\r" in (value or "")
+        or re.fullmatch(
+            rf"(?:{registry}/)?{component}(?:/{component})*(?::{tag})?(?:@{digest})?",
+            image,
+            flags=re.ASCII,
+        ) is None
+    ):
         raise Exception(
             f"Invalid option '{option}' in section [docker] "
-            "(expected non-empty Docker image name/tag)."
+            "(expected a single Docker image reference, optionally with registry, tag or digest)."
         )
 
     return image

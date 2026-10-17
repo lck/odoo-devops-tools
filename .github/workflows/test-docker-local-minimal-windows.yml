@@ -49,6 +49,26 @@ jobs:
           # Negative CLI checks exit with a nonzero code; reset for Actions.
           $global:LASTEXITCODE = 0
 
+      - name: Reject unsafe Docker base_image values on Windows
+        run: |
+          $invalidImages = @("odoo:19`nRUN echo INJECTED", 'odoo:19 RUN echo INJECTED', 'odoo:19\RUN')
+          for ($index = 0; $index -lt $invalidImages.Count; $index++) {
+            $image = $invalidImages[$index]
+            $workspace = Join-Path $env:RUNNER_TEMP "ci-unsafe-image-$index"
+            New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+            $output = (& uv run odoo-compose --init --root $workspace --no-provisioning-log `
+              --set "docker:base_image=$image" 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw "Unsafe Docker base_image was accepted: $image" }
+            if (-not $output.Contains("Invalid option 'base_image' in section [docker]")) {
+              throw "Unexpected rejection for image '$image': $output"
+            }
+            if (Test-Path (Join-Path $workspace 'docker/local/Dockerfile')) {
+              throw "Dockerfile generated from invalid image '$image'"
+            }
+          }
+          # Negative CLI checks intentionally exit nonzero; reset for Actions.
+          $global:LASTEXITCODE = 0
+
       - name: Create workspace root folder
         run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
 

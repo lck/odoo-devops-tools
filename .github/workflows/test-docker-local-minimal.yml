@@ -21,6 +21,62 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Validate Docker base_image references
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          digest="$(printf 'a%.0s' {1..64})"
+          index=0
+          for image in \
+            'odoo:19.0' \
+            'ghcr.io/mycompany/custom-odoo:19.0' \
+            'registry.example.com:5000/odoo/custom:19.0' \
+            "ghcr.io/mycompany/odoo@sha256:${digest}"; do
+            index=$((index + 1))
+            workspace="$tmp/valid-$index"
+            mkdir -p "$workspace"
+            uv run odoo-compose --init --root "$workspace" --no-provisioning-log \
+              --set "docker:base_image=$image"
+            grep -Fxq "FROM $image" "$workspace/docker/local/Dockerfile"
+          done
+
+          index=0
+          for image in \
+            $'odoo:19\nRUN echo INJECTED' \
+            'odoo:19 RUN echo INJECTED' \
+            'odoo:19\RUN' \
+            'odoo:19#comment'; do
+            index=$((index + 1))
+            workspace="$tmp/invalid-$index"
+            mkdir -p "$workspace"
+            if uv run odoo-compose --init --root "$workspace" --no-provisioning-log \
+              --set "docker:base_image=$image" > "$tmp/rejected.log" 2>&1; then
+              echo "Unsafe Docker base_image was accepted: $image" >&2
+              exit 1
+            fi
+            grep -Fq "Invalid option 'base_image' in section [docker]" "$tmp/rejected.log"
+            test ! -f "$workspace/docker/local/Dockerfile"
+          done
+
+          # Multi-line INI values must not inject a second Dockerfile instruction.
+          cat > "$tmp/injected.ini" <<'EOF'
+          [odoo]
+          version = 19.0
+          [docker]
+          base_image = odoo:19
+              RUN echo INJECTED
+          EOF
+          if uv run odoo-compose "$tmp/injected.ini" --root "$tmp/invalid-ini" \
+            --no-provisioning-log > "$tmp/rejected.log" 2>&1; then
+            echo 'Multi-line Docker base_image was accepted.' >&2
+            exit 1
+          fi
+          grep -Fq "Invalid option 'base_image' in section [docker]" "$tmp/rejected.log"
+          test ! -f "$tmp/invalid-ini/docker/local/Dockerfile"
+
       - name: Create workspace root folder
         run: mkdir -p odoo-workspace
 
