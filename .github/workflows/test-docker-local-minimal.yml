@@ -61,6 +61,12 @@ jobs:
             test ! -f "$workspace/docker/local/Dockerfile"
           done
 
+          # Resource settings are opt-in and must be absent by default.
+          if grep -Eq '^    (cpus|mem_limit):' "$tmp/valid-1/compose.yaml"; then
+            echo 'Default Compose unexpectedly contains resource limits.' >&2
+            exit 1
+          fi
+
           # Multi-line INI values must not inject a second Dockerfile instruction.
           cat > "$tmp/injected.ini" <<'EOF'
           [odoo]
@@ -77,6 +83,30 @@ jobs:
           grep -Fq "Invalid option 'base_image' in section [docker]" "$tmp/rejected.log"
           test ! -f "$tmp/invalid-ini/docker/local/Dockerfile"
 
+      - name: Reject invalid Docker resource limits
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          index=0
+          for override in \
+            'docker:odoo_cpus=0' \
+            'docker:db_cpus=-1' \
+            'docker:mailpit_cpus=nan' \
+            'docker:odoo_mem_limit=-1g' \
+            'docker:db_mem_limit=0' \
+            'docker:mailpit_mem_limit=invalid'; do
+            index=$((index + 1))
+            key="${override#docker:}"
+            key="${key%%=*}"
+            if uv run odoo-compose --init --root "$tmp/invalid-$index" \
+              --no-provisioning-log --set "$override" > "$tmp/rejected.log" 2>&1; then
+              echo "Invalid Docker resource setting was accepted: $override" >&2
+              exit 1
+            fi
+            grep -Fq "Invalid option '$key' in section [docker]" "$tmp/rejected.log"
+          done
+
       - name: Create workspace root folder
         run: mkdir -p odoo-workspace
 
@@ -88,6 +118,12 @@ jobs:
             --set docker:postgres_version=18 \
             --set docker:mailpit_enabled=true \
             --set docker:mailpit_webui_port=18025 \
+            --set docker:odoo_cpus=2.0 \
+            --set docker:odoo_mem_limit=4g \
+            --set docker:db_cpus=1.0 \
+            --set docker:db_mem_limit=2g \
+            --set docker:mailpit_cpus=0.5 \
+            --set docker:mailpit_mem_limit=256m \
             --set docker.share.exchange:source=shared/exchange \
             --set docker.share.exchange:target=/mnt/exchange
 
@@ -172,7 +208,13 @@ jobs:
             (.services.mailpit | has("healthcheck") | not) and
             (.services.odoo.healthcheck.test | index("http://127.0.0.1:8069/web/login") != null) and
             (.services.odoo.depends_on.db.condition == "service_healthy") and
-            (.services.odoo.depends_on | has("mailpit") | not)
+            (.services.odoo.depends_on | has("mailpit") | not) and
+            ((.services.db.cpus | tonumber) == 1) and
+            ((.services.db.mem_limit | tostring) == "2147483648") and
+            ((.services.odoo.cpus | tonumber) == 2) and
+            ((.services.odoo.mem_limit | tostring) == "4294967296") and
+            ((.services.mailpit.cpus | tonumber) == 0.5) and
+            ((.services.mailpit.mem_limit | tostring) == "268435456")
           '
 
       - name: Check legacy neutralization helper generation

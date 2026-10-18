@@ -25,6 +25,7 @@ import sys
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field, replace
+from decimal import Decimal
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
@@ -153,6 +154,12 @@ _INI_SET_SUPPORTED_OPTIONS = {
         "mailpit_enabled",
         "mailpit_version",
         "mailpit_webui_port",
+        "odoo_cpus",
+        "odoo_mem_limit",
+        "db_cpus",
+        "db_mem_limit",
+        "mailpit_cpus",
+        "mailpit_mem_limit",
     },
 }
 _INI_SET_ADDON_SUPPORTED_OPTIONS = {
@@ -239,6 +246,12 @@ class DockerConfig:
     mailpit_enabled: bool = False
     mailpit_version: str = _DEFAULT_DOCKER_MAILPIT_VERSION
     mailpit_webui_port: int = _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+    odoo_cpus: Optional[str] = None
+    odoo_mem_limit: Optional[str] = None
+    db_cpus: Optional[str] = None
+    db_mem_limit: Optional[str] = None
+    mailpit_cpus: Optional[str] = None
+    mailpit_mem_limit: Optional[str] = None
     shares: Dict[str, DockerShareSpec] = field(default_factory=dict)
 
 
@@ -1130,6 +1143,37 @@ def _validate_tcp_port(value: str, option: str) -> int:
     return port
 
 
+def _validate_docker_cpus(value: str, option: str) -> Optional[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    if (
+        len(raw) > 32
+        or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw, flags=re.ASCII) is None
+        or Decimal(raw) <= 0
+    ):
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected a positive CPU count, for example 0.5 or 2.0)."
+        )
+    return str(Decimal(raw))
+
+
+def _validate_docker_mem_limit(value: str, option: str) -> Optional[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    # Docker Compose memory values are positive byte counts with optional units.
+    if len(raw) > 32 or re.fullmatch(
+        r"[1-9][0-9]*(?:b|[kmgpt](?:b|ib)?)?", raw, flags=re.ASCII | re.IGNORECASE
+    ) is None:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected a positive memory amount, for example 256m or 4g)."
+        )
+    return raw.lower()
+
+
 def _get_default_virtualenv_settings(odoo_version: str) -> tuple[str, list[str], list[str]]:
     odoo_major_version = _parse_odoo_version(odoo_version)
 
@@ -1392,13 +1436,21 @@ def load_project_config(
             "mailpit_enabled",
             "mailpit_version",
             "mailpit_webui_port",
+            "odoo_cpus",
+            "odoo_mem_limit",
+            "db_cpus",
+            "db_mem_limit",
+            "mailpit_cpus",
+            "mailpit_mem_limit",
         }
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
                     "Supported options: base_image, mailpit_enabled, mailpit_version, "
-                    "mailpit_webui_port, odoo_source, postgres_version, restic_version."
+                    "mailpit_webui_port, odoo_source, postgres_version, restic_version, "
+                    "odoo_cpus, odoo_mem_limit, db_cpus, db_mem_limit, "
+                    "mailpit_cpus, mailpit_mem_limit."
                 )
 
         base_image = (
@@ -1437,6 +1489,30 @@ def load_project_config(
                 _validate_tcp_port(cp.get("docker", "mailpit_webui_port"), "mailpit_webui_port")
                 if cp.has_option("docker", "mailpit_webui_port")
                 else _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+            ),
+            odoo_cpus=(
+                _validate_docker_cpus(cp.get("docker", "odoo_cpus"), "odoo_cpus")
+                if cp.has_option("docker", "odoo_cpus") else None
+            ),
+            odoo_mem_limit=(
+                _validate_docker_mem_limit(cp.get("docker", "odoo_mem_limit"), "odoo_mem_limit")
+                if cp.has_option("docker", "odoo_mem_limit") else None
+            ),
+            db_cpus=(
+                _validate_docker_cpus(cp.get("docker", "db_cpus"), "db_cpus")
+                if cp.has_option("docker", "db_cpus") else None
+            ),
+            db_mem_limit=(
+                _validate_docker_mem_limit(cp.get("docker", "db_mem_limit"), "db_mem_limit")
+                if cp.has_option("docker", "db_mem_limit") else None
+            ),
+            mailpit_cpus=(
+                _validate_docker_cpus(cp.get("docker", "mailpit_cpus"), "mailpit_cpus")
+                if cp.has_option("docker", "mailpit_cpus") else None
+            ),
+            mailpit_mem_limit=(
+                _validate_docker_mem_limit(cp.get("docker", "mailpit_mem_limit"), "mailpit_mem_limit")
+                if cp.has_option("docker", "mailpit_mem_limit") else None
             ),
             shares=docker_shares,
         )
@@ -4319,11 +4395,16 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     ]
 
     if cfg.docker.mailpit_enabled:
+        mailpit_resources = ""
+        if cfg.docker.mailpit_cpus is not None:
+            mailpit_resources += f"    cpus: {cfg.docker.mailpit_cpus}\n"
+        if cfg.docker.mailpit_mem_limit is not None:
+            mailpit_resources += f"    mem_limit: {cfg.docker.mailpit_mem_limit}\n"
         mailpit_service = f"""
   mailpit:
     image: ghcr.io/axllent/mailpit:{cfg.docker.mailpit_version}
     restart: unless-stopped
-    environment:
+{mailpit_resources}    environment:
       MP_DATABASE: /data/mailpit.db
       MP_DISABLE_VERSION_CHECK: "true"
       MP_POP3_BIND_ADDR: "0.0.0.0:{_DEFAULT_DOCKER_MAILPIT_POP3_PORT}"
@@ -4337,13 +4418,23 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
 
     depends_on_block = "\n".join(depends_on)
     named_volumes_block = "\n".join(named_volumes)
+    db_resources = ""
+    if cfg.docker.db_cpus is not None:
+        db_resources += f"    cpus: {cfg.docker.db_cpus}\n"
+    if cfg.docker.db_mem_limit is not None:
+        db_resources += f"    mem_limit: {cfg.docker.db_mem_limit}\n"
+    odoo_resources = ""
+    if cfg.docker.odoo_cpus is not None:
+        odoo_resources += f"    cpus: {cfg.docker.odoo_cpus}\n"
+    if cfg.docker.odoo_mem_limit is not None:
+        odoo_resources += f"    mem_limit: {cfg.docker.odoo_mem_limit}\n"
 
     return f"""# Generated by odoo-compose for local development.
 services:
   db:
     image: postgres:{cfg.docker.postgres_version}
     restart: unless-stopped
-    logging:
+{db_resources}    logging:
       driver: local
       options:
         max-size: "50m"
@@ -4365,7 +4456,7 @@ services:
     build:
       context: {build_context}
     restart: unless-stopped
-    logging:
+{odoo_resources}    logging:
       driver: local
       options:
         max-size: "50m"

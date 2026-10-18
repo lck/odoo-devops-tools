@@ -4,7 +4,8 @@
 
 ### Added
 
-- add Docker Compose `healthchecks` for PostgreSQL and Odoo.
+- Add Docker Compose `healthchecks` for PostgreSQL and Odoo.
+- Add configurable CPU and memory limits for Docker Compose services.
 
 ## 1.24.3 (2026-10-17)
 

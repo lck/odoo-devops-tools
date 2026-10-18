@@ -69,6 +69,30 @@ jobs:
           # Negative CLI checks intentionally exit nonzero; reset for Actions.
           $global:LASTEXITCODE = 0
 
+      - name: Reject invalid Docker resource limits on Windows
+        run: |
+          $invalidOptions = @(
+            'docker:odoo_cpus=0',
+            'docker:db_cpus=-1',
+            'docker:mailpit_cpus=nan',
+            'docker:odoo_mem_limit=-1g',
+            'docker:db_mem_limit=0',
+            'docker:mailpit_mem_limit=invalid'
+          )
+          for ($index = 0; $index -lt $invalidOptions.Count; $index++) {
+            $option = $invalidOptions[$index]
+            $key = ($option -split '[:=]')[1]
+            $workspace = Join-Path $env:RUNNER_TEMP "invalid-resources-$index"
+            $output = (& uv run odoo-compose --init --root $workspace --no-provisioning-log `
+              --set $option 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw "Invalid resource limit accepted: $option" }
+            if (-not $output.Contains("Invalid option '$key' in section [docker]")) {
+              throw "Unexpected rejection for $($option): $output"
+            }
+          }
+          # Expected nonzero exit codes must not fail the GitHub Actions step.
+          $global:LASTEXITCODE = 0
+
       - name: Create workspace root folder
         run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
 
@@ -178,6 +202,9 @@ jobs:
           if (([regex]::Matches($compose, '(?m)^    healthcheck:\r?$')).Count -ne 2) {
             throw 'Expected PostgreSQL and Odoo healthchecks without Mailpit.'
           }
+          if ($compose -match '(?m)^    (cpus|mem_limit):') {
+            throw 'Default Docker Compose must not impose resource limits.'
+          }
 
       - name: Generate legacy neutralization helper
         run: |
@@ -231,6 +258,12 @@ jobs:
               --set odoo:version=18.0 `
               --set docker:mailpit_enabled=true `
               --set docker:mailpit_webui_port=18025 `
+              --set docker:odoo_cpus=2.0 `
+              --set docker:odoo_mem_limit=4g `
+              --set docker:db_cpus=1.0 `
+              --set docker:db_mem_limit=2g `
+              --set docker:mailpit_cpus=0.5 `
+              --set docker:mailpit_mem_limit=256m `
               --set config:smtp_server=smtp.example.test `
               --set config:smtp_port=587 `
               --set config:smtp_ssl=true `
@@ -272,6 +305,21 @@ jobs:
           }
           if (-not $compose.Contains('condition: service_healthy')) {
             throw 'Odoo must wait for healthy PostgreSQL.'
+          }
+          foreach ($resources in @(
+            @{ Service = 'db'; Cpus = '1.0'; Memory = '2g' },
+            @{ Service = 'odoo'; Cpus = '2.0'; Memory = '4g' },
+            @{ Service = 'mailpit'; Cpus = '0.5'; Memory = '256m' }
+          )) {
+            $pattern = '(?ms)^  ' + $resources.Service + ':\r?\n(.*?)(?=^  (?:db|odoo|mailpit):\r?\n|^volumes:\r?\n|\z)'
+            $section = [regex]::Match($compose, $pattern)
+            $cpusPattern = '(?m)^    cpus: ' + [regex]::Escape($resources.Cpus) + '\r?$'
+            $memoryPattern = '(?m)^    mem_limit: ' + [regex]::Escape($resources.Memory) + '\r?$'
+            if (-not $section.Success -or
+                $section.Groups[1].Value -notmatch $cpusPattern -or
+                $section.Groups[1].Value -notmatch $memoryPattern) {
+              throw "Missing resource limits for $($resources.Service)."
+            }
           }
 
           foreach ($expected in @(
