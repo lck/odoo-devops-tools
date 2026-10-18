@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add a configurable Docker Compose restart policy.
+
 ## 1.24.4 (2026-10-18)
 
 ### Added

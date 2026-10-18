@@ -1410,6 +1410,7 @@ This section is optional.
 - `mailpit_enabled` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_version` — version of `ghcr.io/axllent/mailpit` in local Compose. Default: `v1.31.3`. An explicitly set value must be a concrete version; empty values and `latest` are invalid.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
+- `restart` — restart policy for Odoo, PostgreSQL and optional Mailpit (`no`, `always`, `unless-stopped`, or `on-failure`). Default: `unless-stopped`.
 - `odoo_cpus`, `db_cpus`, `mailpit_cpus` — optional CPU limits for the respective Compose services; positive decimal CPU counts such as `0.5` or `2.0`.
 - `odoo_mem_limit`, `db_mem_limit`, `mailpit_mem_limit` — optional memory limits for the respective Compose services; positive amounts such as `256m` or `4g`.
 
@@ -1419,6 +1420,7 @@ Example:
 
 ```ini
 [docker]
+restart = no
 postgres_version = 18
 restic_version = 0.19.1
 mailpit_enabled = true

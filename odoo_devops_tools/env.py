@@ -160,6 +160,7 @@ _INI_SET_SUPPORTED_OPTIONS = {
         "db_mem_limit",
         "mailpit_cpus",
         "mailpit_mem_limit",
+        "restart",
     },
 }
 _INI_SET_ADDON_SUPPORTED_OPTIONS = {
@@ -246,6 +247,7 @@ class DockerConfig:
     mailpit_enabled: bool = False
     mailpit_version: str = _DEFAULT_DOCKER_MAILPIT_VERSION
     mailpit_webui_port: int = _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+    restart: str = "unless-stopped"
     odoo_cpus: Optional[str] = None
     odoo_mem_limit: Optional[str] = None
     db_cpus: Optional[str] = None
@@ -1143,6 +1145,16 @@ def _validate_tcp_port(value: str, option: str) -> int:
     return port
 
 
+def _validate_docker_restart_policy(value: str, option: str) -> str:
+    policy = (value or "").strip().lower()
+    if policy not in {"no", "always", "unless-stopped", "on-failure"}:
+        raise Exception(
+            f"Invalid option '{option}' in section [docker] "
+            "(expected one of: no, always, unless-stopped, on-failure)."
+        )
+    return policy
+
+
 def _validate_docker_cpus(value: str, option: str) -> Optional[str]:
     raw = (value or "").strip()
     if not raw:
@@ -1442,6 +1454,7 @@ def load_project_config(
             "db_mem_limit",
             "mailpit_cpus",
             "mailpit_mem_limit",
+            "restart",
         }
         for key in cp._sections.get("docker", {}).keys():
             if key not in supported_docker_options:
@@ -1450,7 +1463,7 @@ def load_project_config(
                     "Supported options: base_image, mailpit_enabled, mailpit_version, "
                     "mailpit_webui_port, odoo_source, postgres_version, restic_version, "
                     "odoo_cpus, odoo_mem_limit, db_cpus, db_mem_limit, "
-                    "mailpit_cpus, mailpit_mem_limit."
+                    "mailpit_cpus, mailpit_mem_limit, restart."
                 )
 
         base_image = (
@@ -1489,6 +1502,11 @@ def load_project_config(
                 _validate_tcp_port(cp.get("docker", "mailpit_webui_port"), "mailpit_webui_port")
                 if cp.has_option("docker", "mailpit_webui_port")
                 else _DEFAULT_DOCKER_MAILPIT_WEBUI_PORT
+            ),
+            restart=(
+                _validate_docker_restart_policy(cp.get("docker", "restart"), "restart")
+                if cp.has_option("docker", "restart")
+                else "unless-stopped"
             ),
             odoo_cpus=(
                 _validate_docker_cpus(cp.get("docker", "odoo_cpus"), "odoo_cpus")
@@ -4381,6 +4399,7 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     ports = _render_docker_compose_ports(cfg.config)
     volumes = _render_docker_compose_volumes(layout, cfg)
     build_context = _yaml_quote_scalar(_compose_host_path(layout, layout.docker_local_dir))
+    restart_value = '"no"' if cfg.docker.restart == "no" else cfg.docker.restart
     postgres_data_path = (
         "/var/lib/postgresql"
         if cfg.docker.postgres_version >= 18
@@ -4403,7 +4422,7 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
         mailpit_service = f"""
   mailpit:
     image: ghcr.io/axllent/mailpit:{cfg.docker.mailpit_version}
-    restart: unless-stopped
+    restart: {restart_value}
 {mailpit_resources}    environment:
       MP_DATABASE: /data/mailpit.db
       MP_DISABLE_VERSION_CHECK: "true"
@@ -4432,7 +4451,7 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
     return f"""services:
   db:
     image: postgres:{cfg.docker.postgres_version}
-    restart: unless-stopped
+    restart: {restart_value}
 {db_resources}    logging:
       driver: local
       options:
@@ -4454,7 +4473,7 @@ def render_docker_compose(layout: Layout, cfg: ProjectConfig) -> str:
   odoo:
     build:
       context: {build_context}
-    restart: unless-stopped
+    restart: {restart_value}
 {odoo_resources}    logging:
       driver: local
       options:

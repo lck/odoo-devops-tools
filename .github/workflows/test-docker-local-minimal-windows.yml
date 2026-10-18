@@ -93,6 +93,20 @@ jobs:
           # Expected nonzero exit codes must not fail the GitHub Actions step.
           $global:LASTEXITCODE = 0
 
+      - name: Reject invalid Docker restart policies on Windows
+        run: |
+          $invalidPolicies = @('', 'yes', 'false', 'on-fail', 'always; echo BAD')
+          for ($index = 0; $index -lt $invalidPolicies.Count; $index++) {
+            $workspace = Join-Path $env:RUNNER_TEMP "invalid-restart-$index"
+            $output = (& uv run odoo-compose --init --root $workspace --no-provisioning-log `
+              --set "docker:restart=$($invalidPolicies[$index])" 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { throw "Invalid restart policy was accepted." }
+            if (-not $output.Contains("Invalid option 'restart' in section [docker]")) {
+              throw "Unexpected restart policy validation failure: $output"
+            }
+          }
+          $global:LASTEXITCODE = 0
+
       - name: Create workspace root folder
         run: New-Item -ItemType Directory -Force -Path odoo-workspace | Out-Null
 
@@ -225,6 +239,9 @@ jobs:
           if ($compose -match '(?m)^    (cpus|mem_limit):') {
             throw 'Default Docker Compose must not impose resource limits.'
           }
+          if (([regex]::Matches($compose, '(?m)^    restart: unless-stopped\r?$')).Count -ne 2) {
+            throw 'Default Docker Compose restart policy must remain unless-stopped.'
+          }
 
       - name: Generate legacy neutralization helper
         run: |
@@ -284,6 +301,7 @@ jobs:
               --set docker:db_mem_limit=2g `
               --set docker:mailpit_cpus=0.5 `
               --set docker:mailpit_mem_limit=256m `
+              --set docker:restart=no `
               --set config:smtp_server=smtp.example.test `
               --set config:smtp_port=587 `
               --set config:smtp_ssl=true `
@@ -316,6 +334,9 @@ jobs:
             }
           }
 
+          if (([regex]::Matches($compose, '(?m)^    restart: "no"\r?$')).Count -ne 3) {
+            throw 'Docker restart=no must apply to db, odoo and mailpit.'
+          }
           if (([regex]::Matches($compose, '(?m)^    healthcheck:\r?$')).Count -ne 2) {
             throw 'Expected PostgreSQL and Odoo healthchecks; Mailpit uses the image healthcheck.'
           }

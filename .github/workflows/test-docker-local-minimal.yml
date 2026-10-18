@@ -67,6 +67,9 @@ jobs:
             exit 1
           fi
 
+          # Existing projects keep the previous restart policy by default.
+          test "$(grep -c '^    restart: unless-stopped$' "$tmp/valid-1/compose.yaml")" -eq 2
+
           # Multi-line INI values must not inject a second Dockerfile instruction.
           cat > "$tmp/injected.ini" <<'EOF'
           [odoo]
@@ -105,6 +108,39 @@ jobs:
               exit 1
             fi
             grep -Fq "Invalid option '$key' in section [docker]" "$tmp/rejected.log"
+          done
+
+      - name: Verify Docker Compose restart policies
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          for policy in no always unless-stopped on-failure; do
+            uv run odoo-compose --init --root "$tmp/$policy" --no-provisioning-log \
+              --set docker:mailpit_enabled=true \
+              --set "docker:restart=$policy"
+            (cd "$tmp/$policy" && docker compose config --format json) | \
+              jq -e --arg policy "$policy" '
+                (.services.db.restart == $policy) and
+                (.services.odoo.restart == $policy) and
+                (.services.mailpit.restart == $policy)
+              '
+            if [ "$policy" = no ]; then
+              test "$(grep -Fc '    restart: "no"' "$tmp/$policy/compose.yaml")" -eq 3
+            fi
+          done
+
+          index=0
+          for invalid in '' yes false on-fail 'always; echo BAD'; do
+            index=$((index + 1))
+            if uv run odoo-compose --init --root "$tmp/invalid-$index" \
+              --no-provisioning-log --set "docker:restart=$invalid" \
+              > "$tmp/rejected.log" 2>&1; then
+              echo "Invalid Docker restart was accepted: $invalid" >&2
+              exit 1
+            fi
+            grep -Fq "Invalid option 'restart' in section [docker]" "$tmp/rejected.log"
           done
 
       - name: Verify Compose provenance and stable generation timestamp
