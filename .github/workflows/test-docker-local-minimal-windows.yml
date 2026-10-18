@@ -171,6 +171,26 @@ jobs:
           }
 
           $compose = Get-Content -LiteralPath "odoo-workspace\compose.yaml" -Raw
+          $sourceSha256 = (Get-FileHash -LiteralPath "odoo-workspace\odoo-project.ini" -Algorithm SHA256).Hash.ToLowerInvariant()
+          foreach ($expected in @(
+            '# AUTO-GENERATED FILE - DO NOT EDIT MANUALLY',
+            '# Generator: odoo-devops-tools (odoo-compose)',
+            '# Source: odoo-project.ini',
+            "# Source SHA256: $sourceSha256"
+          )) {
+            if (-not $compose.Contains($expected)) {
+              throw "Generated Compose metadata is missing '$expected'."
+            }
+          }
+          if ($compose -notmatch '(?m)^# Version: [0-9]+\.[0-9]+\.[0-9]+') {
+            throw 'Generated Compose version header is missing.'
+          }
+          if ($compose -notmatch '(?m)^# Effective SHA256: [0-9a-f]{64}\r?$') {
+            throw 'Generated Compose effective fingerprint is missing.'
+          }
+          if ($compose -notmatch '(?m)^# Generated: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\r?$') {
+            throw 'Generated Compose UTC timestamp is missing.'
+          }
           foreach ($expected in @(
             'source: "./shared/exchange"',
             'target: "/mnt/exchange"',

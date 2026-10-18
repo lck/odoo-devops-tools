@@ -228,7 +228,33 @@ target = /mnt/exchange
 
 `odoo-compose` does not create the source directory or change its ownership or permissions; host provisioning or the deployment process must prepare the directory before Docker starts.
 
-### 1.5. Script reference
+### 1.5. Limiting Docker Compose resources
+
+You can optionally set CPU and memory limits for each service in the generated `compose.yaml` using `[docker]` in `odoo-project.ini`:
+
+```ini
+[docker]
+odoo_cpus = 2.0
+odoo_mem_limit = 4g
+
+db_cpus = 1.0
+db_mem_limit = 2g
+
+mailpit_enabled = true
+mailpit_cpus = 0.5
+mailpit_mem_limit = 256m
+```
+
+Each option is independent and optional. If an option is missing or empty, `odoo-compose` omits that limit from the Compose service; no CPU or memory limit is imposed by the generator. CPU values must be positive decimal numbers (such as `0.5` or `2.0`). Memory limits must be positive amounts (such as `256m`, `2g`, or `4g`); zero and negative values are rejected. A memory limit is a hard container limit: exceeding it may cause an out-of-memory termination, so size it for your workload.
+
+Regenerate the Docker configuration after editing the INI, then start the services:
+
+```bash
+odoo-compose
+docker compose up -d --build --wait
+```
+
+### 1.6. Script reference
 
 The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
 
@@ -255,7 +281,7 @@ ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
 
 Docker helpers use `[config].db_name` when configured, or `odoo` by default.
 
-#### 1.5.1. run
+#### 1.6.1. run
 
 Runs Odoo in a one-off Docker container for the configured database:
 
@@ -269,7 +295,7 @@ Any extra arguments are passed through to Odoo:
 ./docker/local/scripts/run.sh -i base --stop-after-init
 ```
 
-#### 1.5.2. shell
+#### 1.6.2. shell
 
 Opens an Odoo shell for the configured database:
 
@@ -279,7 +305,7 @@ Opens an Odoo shell for the configured database:
 
 Any extra arguments are passed through to the underlying Odoo shell command.
 
-#### 1.5.3. update
+#### 1.6.3. update
 
 Updates installed addons using `click-odoo-update`:
 
@@ -293,7 +319,7 @@ Any extra arguments are passed through to `click-odoo-update`:
 ./docker/local/scripts/update.sh --update-all
 ```
 
-#### 1.5.4. Database backup
+#### 1.6.4. Database backup
 
 Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
 
@@ -313,7 +339,7 @@ Pass an output path explicitly when needed:
 ./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
 ```
 
-#### 1.5.5. Database restore
+#### 1.6.5. Database restore
 
 Restore a database dump with `pg_restore`:
 
@@ -344,7 +370,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.5.6. Database neutralization
+#### 1.6.6. Database neutralization
 
 For development or test databases restored from production, run the generated neutralization helper explicitly:
 
@@ -379,7 +405,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.5.7. Filestore backup
+#### 1.6.7. Filestore backup
 
 Create a compressed tar archive of the selected database filestore:
 
@@ -410,7 +436,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.5.8. Filestore restore
+#### 1.6.8. Filestore restore
 
 Restore a filestore archive:
 
@@ -426,7 +452,7 @@ docker compose stop odoo
 docker compose up -d odoo
 ```
 
-#### 1.5.9. Restic filestore backup
+#### 1.6.9. Restic filestore backup
 
 The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
 
@@ -464,7 +490,7 @@ List or inspect snapshots through the generic wrapper:
 ./docker/local/scripts/restic.sh check
 ```
 
-#### 1.5.10. Restic filestore restore
+#### 1.6.10. Restic filestore restore
 
 Restore the latest matching filestore snapshot:
 
@@ -486,7 +512,7 @@ docker compose up -d odoo
 
 With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
 
-### 1.6. Creating a Docker deploy build context
+### 1.7. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -1384,6 +1410,10 @@ This section is optional.
 - `mailpit_enabled` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_version` — version of `ghcr.io/axllent/mailpit` in local Compose. Default: `v1.31.3`. An explicitly set value must be a concrete version; empty values and `latest` are invalid.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
+- `odoo_cpus`, `db_cpus`, `mailpit_cpus` — optional CPU limits for the respective Compose services; positive decimal CPU counts such as `0.5` or `2.0`.
+- `odoo_mem_limit`, `db_mem_limit`, `mailpit_mem_limit` — optional memory limits for the respective Compose services; positive amounts such as `256m` or `4g`.
+
+All six resource options default to unset and are omitted from generated Compose when empty. See [Limiting Docker Compose resources](#17-limiting-docker-compose-resources) for a complete example.
 
 Example:
 
