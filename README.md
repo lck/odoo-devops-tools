@@ -117,15 +117,19 @@ Optionally initialize the Odoo database from the command line instead of through
 
 Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
 
+> **Note**
+> By default, generated Compose services use `restart: unless-stopped`; to prevent a development stack from automatically starting after a host or Docker restart, run:
+> 
+> ```bash
+> odoo-compose --set docker:restart=no
+> docker compose up -d --build --wait
+> ```
+
 ### 1.1. Adding extra addons
 
 To extend Odoo with additional functionality, add extra addons through `[addons.<name>]` sections in `odoo-project.ini`.
 
-In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`.
-
-#### 1.1.1. Update the project file
-
-Edit `odoo-project.ini` in the workspace root and add these addon sections:
+In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`:
 
 ```ini
 [addons.oca-web]
@@ -137,29 +141,22 @@ repo = https://github.com/OCA/helpdesk.git
 branch = ${odoo:version}
 ```
 
-The rest of the generated project file can stay unchanged.
-
-#### 1.1.2. Sync and install addons
-
-
-Sync the configured addon repositories and refresh the generated Docker workflow artifacts:
+Sync the addon repositories and regenerate the Docker environment:
 
 ```bash
 odoo-compose --sync-addons
 docker compose up -d --build --wait
 ```
 
-The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/` and bind-mounted into the Odoo container.
+The repositories are cloned into `ROOT/odoo-addons/` and bind-mounted into the Odoo container. Python dependencies from their `requirements.txt` files are included when rebuilding the Docker image.
 
-If an addon source contains a `requirements.txt` file, its Python dependencies are included when the Docker image is rebuilt.
-
-Install the modules from the newly added addon repositories:
+Install the new modules:
 
 ```bash
 ./docker/local/scripts/run.sh -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
 ```
 
-For subsequent addon updates, use the generated Docker update helper:
+For subsequent addon updates, use:
 
 ```bash
 ./docker/local/scripts/update.sh
@@ -590,11 +587,7 @@ Odoo starts with the generated configuration from `./odoo-configs/odoo-server.co
 
 To extend Odoo with additional functionality, add extra addons through `[addons.<name>]` sections in `odoo-project.ini`.
 
-In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`.
-
-#### 2.1.1. Update the project file
-
-Edit `odoo-project.ini` in the workspace root and add these addon sections:
+In this example, we add two Git-based addon repositories, `OCA/web` and `OCA/helpdesk`:
 
 ```ini
 [addons.oca-web]
@@ -606,31 +599,27 @@ repo = https://github.com/OCA/helpdesk.git
 branch = ${odoo:version}
 ```
 
-The rest of the generated project file can stay unchanged.
-
-#### 2.1.2. Sync and install addons
-
-Sync the sources and recreate the Python environment so dependencies from the new addon repositories are included:
+Sync the addon repositories and recreate the Python environment to include their dependencies:
 
 ```bash
 odoo-compose-venv --sync-all --create-venv
 ```
 
-The addon repositories are cloned into `ROOT/odoo-addons/oca-web/` and `ROOT/odoo-addons/oca-helpdesk/`, and their directories are added to the generated `addons_path`.
+The repositories are cloned into `ROOT/odoo-addons/` and automatically added to the generated `addons_path`. Python dependencies from their `requirements.txt` files are included in the virtual environment.
 
-Start Odoo and install the modules from the newly added addon repositories:
+Install the new modules:
 
 ```bash
 ./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt
 ```
 
-For subsequent addon updates, use the generated update script:
+For subsequent addon updates, use:
 
 ```bash
 ./odoo-scripts/update.sh
 ```
 
-The generated script uses `click-odoo-update` with the workspace Odoo configuration.
+The update script uses `click-odoo-update` with the workspace Odoo configuration.
 
 ### 2.2. Using system Python instead of managed Python
 
@@ -1403,6 +1392,7 @@ commit = abcdef1
 
 This section is optional.
 
+- `restart` — restart policy for Odoo, PostgreSQL and optional Mailpit (`no`, `always`, `unless-stopped`, or `on-failure`). Default: `unless-stopped`.
 - `base_image` — Docker image used as the base image in generated Dockerfiles. Default: `odoo:${odoo:version}`.
 - `odoo_source` — selects the Odoo source for Docker. `image` uses Odoo from `base_image`; `workspace` uses the workspace Odoo source. Default: `image`.
 - `postgres_version` — PostgreSQL major version used by the local Docker Compose database service. Default: `16`.
@@ -1410,7 +1400,6 @@ This section is optional.
 - `mailpit_enabled` — enables a persistent Mailpit service in the local Docker workflow for SMTP and POP3 mail testing. Default: `false`. It does not affect the deploy build context.
 - `mailpit_version` — version of `ghcr.io/axllent/mailpit` in local Compose. Default: `v1.31.3`. An explicitly set value must be a concrete version; empty values and `latest` are invalid.
 - `mailpit_webui_port` — host port used for the Mailpit web UI. Default: `8025`. The internal Mailpit web UI port remains `8025`.
-- `restart` — restart policy for Odoo, PostgreSQL and optional Mailpit (`no`, `always`, `unless-stopped`, or `on-failure`). Default: `unless-stopped`.
 - `odoo_cpus`, `db_cpus`, `mailpit_cpus` — optional CPU limits for the respective Compose services; positive decimal CPU counts such as `0.5` or `2.0`.
 - `odoo_mem_limit`, `db_mem_limit`, `mailpit_mem_limit` — optional memory limits for the respective Compose services; positive amounts such as `256m` or `4g`.
 
