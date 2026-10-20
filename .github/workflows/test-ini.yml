@@ -137,6 +137,42 @@ jobs:
           contains "$tmp/implicit/.odt-env/last-resolved-project.ini" 'dbfilter = ^odoo13test98$' 'resolved copy uses effective interpolation'
           contains "$tmp/implicit/odoo-configs/odoo-server.conf" 'dbfilter = ^odoo13test98$' 'native Odoo config resolves interpolation'
 
+          echo '--- New INI options preserve blank lines between sections ---'
+          mkdir -p "$tmp/section-layout"
+          cat > "$tmp/section-layout/odoo-project.ini" <<'INI'
+          [vars]
+          a = 7
+
+          [odoo]
+          version = 1${vars:a}.0
+
+          [docker]
+          odoo_mem_limit = 2g
+
+          [config]
+          db_name = ${odoo:version}
+          dbfilter = ^${odoo:version}$
+          INI
+          ini_docker --root "$tmp/section-layout" --set docker:restart=no
+          cat > "$tmp/section-layout.expected" <<'INI'
+          [vars]
+          a = 7
+
+          [odoo]
+          version = 1${vars:a}.0
+
+          [docker]
+          odoo_mem_limit = 2g
+          restart = no
+
+          [config]
+          db_name = ${odoo:version}
+          dbfilter = ^${odoo:version}$
+          INI
+          same "$tmp/section-layout.expected" "$tmp/section-layout/odoo-project.ini" 'new option inserted before section separator'
+          ini_docker --root "$tmp/section-layout" --set docker:restart=no
+          same "$tmp/section-layout.expected" "$tmp/section-layout/odoo-project.ini" 'layout preserved after repeated --set'
+
           echo '--- Literal dollars, escaped references and backslash parity ---'
           mkdir -p "$tmp/literal-dollar"
           cat > "$tmp/literal-dollar/odoo-project.ini" <<'INI'

@@ -963,10 +963,14 @@ def _update_ini_values_preserving_layout(
             lines[index] = f"{match.group(1)}{match.group(2)}{ini_value(value)}{ending}"
         if pending:
             new_lines = [f"{key} = {ini_value(value)}{newline}" for key, value in pending.values()]
+            # Keep trailing blank lines between sections after the new options.
+            insert_at = end
+            while insert_at > start and not lines[insert_at - 1].strip():
+                insert_at -= 1
             # Ensure a missing final line ending doesn't join the new option.
-            if end > 0 and lines[end - 1] and not lines[end - 1].endswith(("\r", "\n")):
-                lines[end - 1] += newline
-            lines[end:end] = new_lines
+            if insert_at > 0 and lines[insert_at - 1] and not lines[insert_at - 1].endswith(("\r", "\n")):
+                lines[insert_at - 1] += newline
+            lines[insert_at:insert_at] = new_lines
 
     for section, options in values.items():
         if lines and not lines[-1].endswith(("\r", "\n")):
