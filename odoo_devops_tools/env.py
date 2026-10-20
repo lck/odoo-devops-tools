@@ -37,6 +37,77 @@ from . import __version__
 
 _logger = logging.getLogger("odoo-compose")
 
+
+class _IniInterpolation(configparser.ExtendedInterpolation):
+    """Interpolate ${section:option}; literal dollars need no escaping.
+    """
+
+    def before_set(self, parser, section, option, value):
+        # Literal '$' and '$$' are permitted in every INI value.
+        return value
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        rawval = parser.get(section, option, raw=True, fallback=rest)
+        if depth > configparser.MAX_INTERPOLATION_DEPTH:
+            raise configparser.InterpolationDepthError(option, section, rawval)
+
+        while rest:
+            pos = rest.find("${")
+            if pos < 0:
+                accum.append(rest)
+                return
+
+            prefix = rest[:pos]
+            slash_count = len(prefix) - len(prefix.rstrip("\\"))
+            accum.append(prefix[:len(prefix) - slash_count] + "\\" * (slash_count // 2))
+            match = self._KEYCRE.match(rest, pos)
+
+            if slash_count % 2:
+                # An odd number of backslashes makes the reference literal.
+                if match:
+                    accum.append(match.group(0))
+                    rest = rest[match.end():]
+                else:
+                    accum.append("${")
+                    rest = rest[pos + 2:]
+                continue
+
+            if match is None:
+                raise configparser.InterpolationSyntaxError(
+                    option, section, "bad interpolation variable reference %r" % rest[pos:]
+                )
+
+            path = match.group(1).split(":")
+            rest = rest[match.end():]
+            sect = section
+            opt = option
+            try:
+                if len(path) == 1:
+                    opt = parser.optionxform(path[0])
+                    value = map[opt]
+                elif len(path) == 2:
+                    sect = path[0]
+                    opt = parser.optionxform(path[1])
+                    value = parser.get(sect, opt, raw=True)
+                else:
+                    raise configparser.InterpolationSyntaxError(
+                        option, section, "More than one ':' found: %r" % match.group(0)
+                    )
+            except (KeyError, configparser.NoSectionError, configparser.NoOptionError):
+                raise configparser.InterpolationMissingOptionError(
+                    option, section, rawval, ":".join(path)
+                ) from None
+
+            if value is not None:
+                if "${" in value:
+                    self._interpolate_some(
+                        parser, opt, accum, value, sect,
+                        dict(parser.items(sect, raw=True)), depth + 1,
+                    )
+                else:
+                    accum.append(value)
+
+
 _GIT_INI_PREFIX = "git+"
 _URL_INI_TIMEOUT_SECONDS = 30
 _URL_INI_MAX_BYTES = 1024 * 1024
@@ -456,7 +527,7 @@ def _require_list_str(d: Dict[str, Any], key: str) -> list[str]:
 
 
 def _render_resolved_ini(
-        cp: configparser.ConfigParser, *, redact: bool = False, escape_dollars: bool = False,
+        cp: configparser.ConfigParser, *, redact: bool = False, escape_references: bool = False,
 ) -> str:
     """Render an interpolated INI copy. ConfigParser does not preserve comments."""
     rendered = configparser.ConfigParser(interpolation=None)
@@ -467,10 +538,14 @@ def _render_resolved_ini(
             value = cp.get(section, option, raw=False)
             if redact and _is_sensitive_key(option):
                 value = "******"
-            if escape_dollars:
-                # The effective INI is read again with ExtendedInterpolation.
-                # Preserve literal '$' characters across repeated saves/loads.
-                value = value.replace("$", "$$")
+            if escape_references:
+                # This INI may be reloaded: a resolved literal ${...} must not
+                # become a new reference. Backslashes before it must round-trip.
+                value = re.sub(
+                    r"(\\*)\$\{",
+                    lambda m: "\\" * (2 * len(m.group(1)) + 1) + "${",
+                    value,
+                )
             rendered.set(section, option, value)
 
     buf = io.StringIO()
@@ -485,7 +560,7 @@ def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
 
 def _ini_for_effective_file(cp: configparser.ConfigParser) -> str:
     """Return resolved INI content suitable for saving as the effective project file."""
-    return _render_resolved_ini(cp, redact=False, escape_dollars=True)
+    return _render_resolved_ini(cp, redact=False, escape_references=True)
 
 
 def _ini_for_merged_source_file(cp: configparser.ConfigParser) -> str:
@@ -822,6 +897,144 @@ def _save_effective_ini_copy(
     )
 
 
+def _update_ini_values_preserving_layout(
+        content: str,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+) -> str:
+    """Apply CLI overrides without rewriting unrelated INI lines or interpolation."""
+    values: Dict[str, Dict[str, str]] = {}
+    if vars_overrides:
+        values["vars"] = dict(vars_overrides)
+    if ini_overrides:
+        for section, options in ini_overrides.items():
+            values.setdefault(section, {}).update(options)
+    if not values:
+        return content
+
+    newline = "\r\n" if "\r\n" in content else "\n"
+    lines = content.splitlines(keepends=True)
+    def ini_value(value: str) -> str:
+        # Keep multi-line CLI values indented as valid INI continuation lines.
+        return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline + "    ")
+    sections: Dict[str, tuple[int, int]] = {}
+    current_section = None
+    start = 0
+    header_pattern = re.compile(r"^[ \t]*\[([^\]\r\n]+)\][ \t]*(?:[;#].*)?$")
+    for index, line in enumerate(lines):
+        match = header_pattern.fullmatch(line.rstrip("\r\n"))
+        if match:
+            if current_section is not None:
+                sections[current_section] = (start, index)
+            current_section = match.group(1)
+            start = index + 1
+    if current_section is not None:
+        sections[current_section] = (start, len(lines))
+
+    # Process sections in reverse file order so earlier indices remain stable.
+    for section, (start, end) in sorted(
+            ((name, bounds) for name, bounds in sections.items() if name in values),
+            key=lambda item: item[1][0], reverse=True,
+    ):
+        pending = {key.lower(): (key, value) for key, value in values.pop(section).items()}
+        option_pattern = re.compile(r"^([ \t]*[^:=\s][^:=]*?)([ \t]*[=:][ \t]*)(.*)$")
+        for index in range(end - 1, start - 1, -1):
+            line = lines[index]
+            match = option_pattern.fullmatch(line.rstrip("\r\n"))
+            if not match:
+                continue
+            option = match.group(1).strip().lower()
+            if option not in pending:
+                continue
+            _name, value = pending.pop(option)
+            ending = line[len(line.rstrip("\r\n")):]
+            # Remove any continuation lines of the previous multi-line value.
+            next_index = index + 1
+            while next_index < len(lines) and next_index < end:
+                continuation = lines[next_index]
+                stripped = continuation.strip()
+                if stripped and continuation[:1] in " \t" and not stripped.startswith(("#", ";")):
+                    del lines[next_index]
+                    end -= 1
+                elif not stripped or stripped.startswith(("#", ";")):
+                    next_index += 1
+                else:
+                    break
+            lines[index] = f"{match.group(1)}{match.group(2)}{ini_value(value)}{ending}"
+        if pending:
+            new_lines = [f"{key} = {ini_value(value)}{newline}" for key, value in pending.values()]
+            # Ensure a missing final line ending doesn't join the new option.
+            if end > 0 and lines[end - 1] and not lines[end - 1].endswith(("\r", "\n")):
+                lines[end - 1] += newline
+            lines[end:end] = new_lines
+
+    for section, options in values.items():
+        if lines and not lines[-1].endswith(("\r", "\n")):
+            lines[-1] += newline
+        if lines and lines[-1].strip():
+            lines.append(newline)
+        lines.append(f"[{section}]{newline}")
+        lines.extend(f"{key} = {ini_value(value)}{newline}" for key, value in options.items())
+    return "".join(lines)
+
+
+def _save_workspace_ini_overrides(
+        source_ini: Path,
+        workspace_ini: Path,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+) -> None:
+    """Persist --set/-e only to ROOT/odoo-project.ini, preserving source layout."""
+    # Reject invalid effective values before touching the workspace file.
+    load_project_config(
+        source_ini, vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides, log_resolved=False, log_overrides=False,
+    )
+    cp = _read_ini(source_ini, vars_overrides, ini_overrides, log_overrides=False)
+    resolved_ini = _ini_for_effective_file(cp)
+    original = source_ini.read_bytes().decode("utf-8")
+    updated = _update_ini_values_preserving_layout(original, vars_overrides, ini_overrides)
+    workspace_ini.parent.mkdir(parents=True, exist_ok=True)
+    source_copy = workspace_ini.parent / ".odt-env" / "last-source-project.ini"
+    source_copy.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_ini, source_copy)
+    _chmod_private(source_copy)
+    # Preserve existing CRLF/LF line endings byte for byte, including on Windows.
+    temp_path = workspace_ini.with_suffix(workspace_ini.suffix + ".tmp")
+    temp_path.write_bytes(updated.encode("utf-8"))
+    os.replace(temp_path, workspace_ini)
+    _chmod_private(workspace_ini)
+    resolved_copy = _save_resolved_project_ini_copy(workspace_ini, resolved_ini)
+    _logger.info(
+        "Saved CLI overrides to workspace INI: %s (original source: %s, resolved copy: %s)",
+        workspace_ini, source_copy, resolved_copy,
+    )
+
+
+def _refresh_last_ini_snapshots(
+        layout: Layout,
+        ini_path: Path,
+        vars_overrides: Optional[Dict[str, str]],
+        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        source_snapshot_ready: bool = False,
+) -> None:
+    """Keep current source and resolved INI snapshots on every provisioning run."""
+    cp = _read_ini(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+        log_overrides=False,
+    )
+    resolved_ini = _ini_for_effective_file(cp)
+    source_snapshot = layout.root / ".odt-env" / "last-source-project.ini"
+    if not source_snapshot_ready:
+        source_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        if not _same_path(ini_path, source_snapshot):
+            shutil.copy2(ini_path, source_snapshot)
+        _chmod_private(source_snapshot)
+    _save_resolved_project_ini_copy(layout.root / _DEFAULT_PROJECT_INI_NAME, resolved_ini)
+
+
 def _existing_workspace_db_name(root: Path) -> Optional[str]:
     """Keep a database name already persisted in the workspace across INI refreshes."""
     ini_path = root / _DEFAULT_PROJECT_INI_NAME
@@ -1022,7 +1235,7 @@ def _read_ini(
         ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
         log_overrides: bool = True,
 ) -> configparser.ConfigParser:
-    cp = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    cp = configparser.ConfigParser(interpolation=_IniInterpolation())
     read_ok = cp.read(entry_ini, encoding="utf-8")
     if not read_ok:
         raise Exception(f"Failed to read INI config: {entry_ini}")
@@ -7323,7 +7536,15 @@ def sync_project(
         source_ini_layers: Optional[list[str]] = None,
         project_ini_status: Optional[str] = None,
         preserved_db_name: Optional[str] = None,
+        source_snapshot_ready: bool = False,
 ) -> None:
+    root = (root_override or ini_path.parent).resolve()
+    layout = Layout.from_root(root)
+    _refresh_last_ini_snapshots(
+        layout, ini_path, vars_overrides, ini_overrides,
+        source_snapshot_ready=source_snapshot_ready,
+    )
+
     if no_provisioning_log:
         _sync_project_impl(
             ini_path=ini_path,
@@ -7346,10 +7567,15 @@ def sync_project(
             project_ini_status=project_ini_status,
             preserved_db_name=preserved_db_name,
         )
+        if target == "venv":
+            workspace_ini = root / _DEFAULT_PROJECT_INI_NAME
+            if workspace_ini.is_file():
+                _save_resolved_project_ini_copy(
+                    workspace_ini,
+                    _ini_for_effective_file(_read_ini(workspace_ini, log_overrides=False)),
+                )
         return
 
-    root = (root_override or ini_path.parent).resolve()
-    layout = Layout.from_root(root)
     run_id = _safe_run_id()
     started_at = _utc_now_iso()
     argv = _redact_cli_args(cli_argv or sys.argv)
@@ -7403,7 +7629,9 @@ def sync_project(
 
     _write_provisioning_record(layout, run_id, record)
 
-    copied_source_ini_path = _copy_source_ini_for_manifest(layout, run_id, ini_path)
+    copied_source_ini_path = _copy_source_ini_for_manifest(
+        layout, run_id, layout.root / ".odt-env" / "last-source-project.ini",
+    )
     if copied_source_ini_path is not None:
         source_ini_path = copied_source_ini_path
         record["artifacts"]["source_ini"] = str(source_ini_path)
@@ -7475,6 +7703,10 @@ def sync_project(
         effective_resolved = _resolved_ini_for_manifest(effective_ini, None, None)
         if effective_resolved is not None:
             _write_text_file(resolved_ini_path, effective_resolved, private=True, atomic=True)
+            _save_resolved_project_ini_copy(
+                effective_ini,
+                _ini_for_effective_file(_read_ini(effective_ini, log_overrides=False)),
+            )
 
     cfg = load_project_config(
         effective_ini if effective_ini.is_file() else ini_path,
@@ -7773,7 +8005,7 @@ def _copy_url_ini_to_root(
             "Use a raw file URL instead."
         )
 
-    probe = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    probe = configparser.ConfigParser(interpolation=_IniInterpolation())
     try:
         probe.read_string(text)
     except configparser.Error as e:
@@ -7949,7 +8181,7 @@ def _read_merged_ini_layers(layer_paths: list[Path]) -> configparser.ConfigParse
     if not layer_paths:
         raise Exception("At least one INI layer is required.")
 
-    cp = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
+    cp = configparser.ConfigParser(interpolation=_IniInterpolation())
     try:
         read_ok = cp.read(layer_paths, encoding="utf-8")
     except configparser.Error as e:
@@ -8046,11 +8278,16 @@ def _prepare_included_project_ini(
         output_path = root / _DEFAULT_PROJECT_INI_NAME
         _save_ini_layer_source_copies(root, layer_paths)
         _merge_ini_layers_to_workspace_ini(layer_paths, output_path)
-        _save_effective_ini_copy(
-            output_path,
-            vars_overrides=vars_overrides,
-            ini_overrides=ini_overrides,
-        )
+        if vars_overrides or ini_overrides:
+            _save_workspace_ini_overrides(
+                output_path, output_path, vars_overrides, ini_overrides,
+            )
+        else:
+            _save_effective_ini_copy(
+                output_path,
+                vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
+            )
         return output_path
 
 
@@ -8504,10 +8741,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         try:
             ini_path, _bundle_manifest = extract_workspace_bundle(bundle_path, bundle_root)
             if vars_overrides or ini_overrides:
-                _save_effective_ini_copy(
-                    ini_path,
-                    vars_overrides=vars_overrides,
-                    ini_overrides=ini_overrides,
+                _save_workspace_ini_overrides(
+                    ini_path, ini_path, vars_overrides, ini_overrides,
                 )
             sync_project(
                 ini_path,
@@ -8536,6 +8771,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                     f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from workspace bundle "
                     f"{_path_for_report(bundle_path)}"
                 ),
+                source_snapshot_ready=bool(vars_overrides or ini_overrides),
             )
         except Exception as e:
             _logger.error('%s', e)
@@ -8550,6 +8786,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     source_ini_layers: list[str] = []
     project_ini_status: Optional[str] = None
     preserved_db_name: Optional[str] = None
+    source_snapshot_ready = False
 
     if init_project and not implicit_ini:
         parser.error("--init can only be used when INI is omitted and no -i/--include is provided.")
@@ -8608,16 +8845,15 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             if project_ini_status is None:
                 project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
 
-            if _implicit_ini_needs_effective_save(
-                vars_overrides=vars_overrides,
-                ini_overrides=ini_overrides,
-                force=created_default_ini,
-            ):
-                _save_effective_ini_copy(
-                    ini_path,
-                    vars_overrides=vars_overrides,
-                    ini_overrides=ini_overrides,
+            if vars_overrides or ini_overrides:
+                _save_workspace_ini_overrides(
+                    ini_path, ini_path, vars_overrides, ini_overrides,
                 )
+            elif created_default_ini:
+                _save_effective_ini_copy(
+                    ini_path, vars_overrides=vars_overrides, ini_overrides=ini_overrides,
+                )
+            source_snapshot_ready = bool(vars_overrides or ini_overrides or created_default_ini)
 
         except SystemExit:
             raise
@@ -8666,6 +8902,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 vars_overrides=vars_overrides,
                 ini_overrides=ini_overrides,
             )
+            source_snapshot_ready = True
         except Exception as e:
             _logger.error('%s', e)
             raise SystemExit(1)
@@ -8719,11 +8956,15 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 else:
                     ini_path = _copy_url_ini_to_root(url_ini_source, root_override)
 
-                _save_effective_ini_copy(
-                    ini_path,
-                    vars_overrides=vars_overrides,
-                    ini_overrides=ini_overrides,
-                )
+                if vars_overrides or ini_overrides:
+                    _save_workspace_ini_overrides(
+                        ini_path, ini_path, vars_overrides, ini_overrides,
+                    )
+                else:
+                    _save_effective_ini_copy(
+                        ini_path, vars_overrides=vars_overrides, ini_overrides=ini_overrides,
+                    )
+                source_snapshot_ready = True
             except Exception as e:
                 _logger.error('%s', e)
                 raise SystemExit(1)
@@ -8740,6 +8981,16 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             if target == "venv":
                 preserved_db_name = _existing_workspace_db_name(effective_root)
             default_ini_path = effective_root / _DEFAULT_PROJECT_INI_NAME
+            if vars_overrides or ini_overrides:
+                try:
+                    _save_workspace_ini_overrides(
+                        ini_path, default_ini_path, vars_overrides, ini_overrides,
+                    )
+                    ini_path = default_ini_path
+                    source_snapshot_ready = True
+                except Exception as e:
+                    _logger.error('%s', e)
+                    raise SystemExit(1)
             if _same_path(ini_path, default_ini_path):
                 project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
             elif default_ini_path.is_file():
@@ -8792,6 +9043,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             source_ini_layers=source_ini_layers,
             project_ini_status=project_ini_status,
             preserved_db_name=preserved_db_name,
+            source_snapshot_ready=source_snapshot_ready,
         )
     except Exception as e:
         _logger.error(f'{e}')

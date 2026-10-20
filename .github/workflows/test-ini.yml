@@ -1,0 +1,372 @@
+name: Test INI Configuration
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ini:
+    name: INI CLI (Linux / Bash)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python for the CLI
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install local CLI
+        shell: bash
+        run: python -m pip install --no-deps -e .
+
+      - name: Check INI sources, CLI overrides and workspace persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'kill "${http_pid:-}" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+          count=0
+
+          # Exercise the real CLIs and allow their normal generated artifacts.
+          # No --create-venv, --sync-* or Docker commands are executed.
+          ini() {
+            odoo-compose-venv "$@" > "$tmp/cli.log" 2>&1 || {
+              cat "$tmp/cli.log"
+              return 1
+            }
+          }
+          ini_docker() {
+            odoo-compose "$@" > "$tmp/cli.log" 2>&1 || {
+              cat "$tmp/cli.log"
+              return 1
+            }
+          }
+          ok() { count=$((count + 1)); echo "PASS $count: $1"; }
+          contains() {
+            grep -Fq -- "$2" "$1" || {
+              echo "Missing '$2' in $1"; cat "$1"; exit 1;
+            }
+            ok "$3"
+          }
+          absent() {
+            if grep -Fq -- "$2" "$1"; then
+              echo "Unexpected '$2' in $1"; cat "$1"; exit 1
+            fi
+            ok "$3"
+          }
+          same() {
+            cmp -s "$1" "$2" || { echo "Files differ: $1 $2"; diff -u "$1" "$2" || :; exit 1; }
+            ok "$3"
+          }
+          exists() { test -f "$1" || { echo "Missing: $1"; exit 1; }; ok "$2"; }
+          missing() { test ! -e "$1" || { echo "Unexpected file: $1"; exit 1; }; ok "$2"; }
+          reject() {
+            if ini "$@"; then
+              echo "Unexpected success for: $*"; exit 1
+            fi
+            ok "rejected: $*"
+          }
+          base() {
+            cat > "$1" <<'INI'
+          # Keep this header
+          [odoo]
+          version = 19.0
+          branch = ${odoo:version}
+
+          [vars]
+          test_num = 96
+
+          [config]
+          db_name = odoo13test96
+          dbfilter = ^odoo13test${vars:test_num}$
+
+          [docker]
+          # Keep restart comment
+          restart = unless-stopped
+          INI
+          }
+
+          echo '--- Implicit INI and --init ---'
+          mkdir -p "$tmp/empty" "$tmp/shortcut"
+          reject --root "$tmp/empty"
+          missing "$tmp/empty/odoo-project.ini" 'missing implicit INI not created'
+          ini --init --root "$tmp/empty"
+          exists "$tmp/empty/odoo-project.ini" '--init creates workspace INI'
+          exists "$tmp/empty/odoo-configs/odoo-server.conf" 'native config generated without building venv'
+          exists "$tmp/empty/odoo-scripts/run.sh" 'native helper scripts generated'
+          missing "$tmp/empty/venv" 'no virtualenv provisioned'
+          cp "$tmp/empty/odoo-project.ini" "$tmp/init.original"
+          ini --init --root "$tmp/empty"
+          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'repeated --init preserves existing INI'
+          ini --root "$tmp/empty"
+          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'no overrides: workspace INI unchanged'
+          ini --init "$tmp/shortcut"
+          exists "$tmp/shortcut/odoo-project.ini" '--init ROOT shortcut'
+          reject --init "$tmp/shortcut" --root "$tmp/shortcut"
+          ini --init --root "$tmp/empty" --set docker:restart=no -e test_num=96
+          contains "$tmp/empty/odoo-project.ini" 'restart = no' '--init + --set adds Docker section'
+          contains "$tmp/empty/odoo-project.ini" 'test_num = 96' '--init + -e adds vars section'
+
+          echo '--- Implicit --set / -S / -e / --extra-var ---'
+          mkdir -p "$tmp/implicit"
+          base "$tmp/implicit/odoo-project.ini"
+          ini --root "$tmp/implicit" --set docker:restart=no
+          contains "$tmp/implicit/odoo-project.ini" 'restart = no' 'implicit --set saved'
+          contains "$tmp/implicit/odoo-project.ini" '# Keep restart comment' 'comments retained'
+          contains "$tmp/implicit/odoo-project.ini" 'dbfilter = ^odoo13test${vars:test_num}$' 'interpolation and literal $ retained'
+          cp "$tmp/implicit/odoo-project.ini" "$tmp/implicit.snapshot"
+          ini --root "$tmp/implicit" --set docker:restart=no
+          same "$tmp/implicit.snapshot" "$tmp/implicit/odoo-project.ini" 'repeated --set is idempotent'
+          ini --root "$tmp/implicit" -e test_num=97
+          contains "$tmp/implicit/odoo-project.ini" 'test_num = 97' '-e persists [vars]'
+          contains "$tmp/implicit/odoo-project.ini" 'dbfilter = ^odoo13test${vars:test_num}$' '-e keeps referencing expression'
+          ini --root "$tmp/implicit" -S docker:restart=always --set docker:restart=no
+          contains "$tmp/implicit/odoo-project.ini" 'restart = no' 'duplicate --set: last wins'
+          ini --root "$tmp/implicit" --extra-var test_num=98 --set config:http_port=18069
+          contains "$tmp/implicit/odoo-project.ini" 'test_num = 98' '--extra-var saved'
+          contains "$tmp/implicit/odoo-project.ini" 'http_port = 18069' 'new option inserted in existing section'
+          ini --root "$tmp/implicit" --set config:list_db=False
+          contains "$tmp/implicit/odoo-project.ini" 'list_db = False' 'multiple independent overrides retained'
+          exists "$tmp/implicit/.odt-env/last-source-project.ini" 'source snapshot written'
+          exists "$tmp/implicit/.odt-env/last-resolved-project.ini" 'effective snapshot written'
+          contains "$tmp/implicit/.odt-env/last-resolved-project.ini" 'dbfilter = ^odoo13test98$' 'resolved copy uses effective interpolation'
+          contains "$tmp/implicit/odoo-configs/odoo-server.conf" 'dbfilter = ^odoo13test98$' 'native Odoo config resolves interpolation'
+
+          echo '--- Literal dollars, escaped references and backslash parity ---'
+          mkdir -p "$tmp/literal-dollar"
+          cat > "$tmp/literal-dollar/odoo-project.ini" <<'INI'
+          [vars]
+          test_num = 96
+          price = $100
+          home_path = $HOME/odoo
+          two_dollars = $$
+          prefixed_reference = $${vars:test_num}
+          literal_reference = \${vars:test_num}
+          one_slash = \${vars:test_num}
+          two_slashes = \\${vars:test_num}
+          three_slashes = \\\${vars:test_num}
+          four_slashes = \\\\${vars:test_num}
+          nested = \${vars:test_num} and ${vars:test_num}
+          missing_literal = \${vars:not_defined}
+
+          [odoo]
+          version = 19.0
+          branch = ${odoo:version}
+
+          [config]
+          db_name = odoo13test96
+          dbfilter = ^odoo13test${vars:test_num}$
+          INI
+          ini_docker --root "$tmp/literal-dollar"
+          contains "$tmp/literal-dollar/odoo-project.ini" 'dbfilter = ^odoo13test${vars:test_num}$' 'source keeps reference and trailing dollar'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'dbfilter = ^odoo13test96$' 'resolved reference and literal dollar'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'price = $100' 'bare dollar remains literal'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'home_path = $HOME/odoo' 'shell-like text is not expanded'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'two_dollars = $$' 'double dollar remains double'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'prefixed_reference = $96' 'double dollar does not escape interpolation'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'literal_reference = \${vars:test_num}' 'escaped reference round-trips in resolved INI'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'one_slash = \${vars:test_num}' 'one slash escapes interpolation'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'two_slashes = \96' 'two slashes allow interpolation'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'three_slashes = \\\${vars:test_num}' 'three slashes escape and leave one slash'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'four_slashes = \\96' 'four slashes allow interpolation and leave two slashes'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'nested = \${vars:test_num} and 96' 'literal reference and active reference coexist'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'missing_literal = \${vars:not_defined}' 'escaped missing reference is literal'
+          ini "$tmp/literal-dollar/odoo-project.ini"
+          contains "$tmp/literal-dollar/odoo-configs/odoo-server.conf" 'dbfilter = ^odoo13test96$' 'native config gets evaluated value'
+          ini "$tmp/literal-dollar/odoo-project.ini" --set 'config:dbfilter=^odoo13test${vars:test_num}$' -e test_num=97
+          contains "$tmp/literal-dollar/odoo-project.ini" 'dbfilter = ^odoo13test${vars:test_num}$' '--set persists expression and literal dollar'
+          contains "$tmp/literal-dollar/odoo-project.ini" 'price = $100' 'workspace keeps unrelated bare dollar'
+          contains "$tmp/literal-dollar/odoo-configs/odoo-server.conf" 'dbfilter = ^odoo13test97$' '-e updates active reference'
+          ini "$tmp/literal-dollar/odoo-project.ini" --set 'config:dbfilter=^odoo13test97$'
+          contains "$tmp/literal-dollar/odoo-project.ini" 'dbfilter = ^odoo13test97$' '--set accepts literal trailing dollar'
+          contains "$tmp/literal-dollar/odoo-configs/odoo-server.conf" 'dbfilter = ^odoo13test97$' 'literal trailing dollar survives'
+          ini "$tmp/literal-dollar/odoo-project.ini" --set 'config:dbfilter=\${vars:test_num}'
+          contains "$tmp/literal-dollar/odoo-project.ini" 'dbfilter = \${vars:test_num}' '--set saves literal escaped reference'
+          contains "$tmp/literal-dollar/odoo-configs/odoo-server.conf" 'dbfilter = ${vars:test_num}' 'escaped reference remains literal in generated config'
+          ini "$tmp/literal-dollar/odoo-project.ini" -e 'test_num=\${odoo:version}'
+          contains "$tmp/literal-dollar/odoo-project.ini" 'test_num = \${odoo:version}' '-e saves escaped reference in variables'
+          contains "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" 'test_num = \${odoo:version}' '-e literal expression retained in resolved INI'
+          # Reuse resolved INI as a new source; no literal ${...} may turn into interpolation.
+          mkdir -p "$tmp/resolved-reload"
+          cp "$tmp/literal-dollar/.odt-env/last-resolved-project.ini" "$tmp/resolved-reload/odoo-project.ini"
+          ini_docker --root "$tmp/resolved-reload"
+          contains "$tmp/resolved-reload/.odt-env/last-resolved-project.ini" 'literal_reference = \${vars:test_num}' 'resolved snapshot is re-readable without interpolation'
+          contains "$tmp/resolved-reload/.odt-env/last-resolved-project.ini" 'three_slashes = \\\${vars:test_num}' 'resolved escaped slashes round-trip'
+
+          echo '--- Explicit workspace INI ---'
+          mkdir -p "$tmp/explicit"
+          base "$tmp/explicit/odoo-project.ini"
+          cp "$tmp/explicit/odoo-project.ini" "$tmp/explicit.original"
+          ini "$tmp/explicit/odoo-project.ini"
+          same "$tmp/explicit.original" "$tmp/explicit/odoo-project.ini" 'explicit workspace INI unchanged without override'
+          exists "$tmp/explicit/.odt-env/last-source-project.ini" 'source snapshot generated without overrides'
+          exists "$tmp/explicit/.odt-env/last-resolved-project.ini" 'resolved snapshot generated without overrides'
+          same "$tmp/explicit.original" "$tmp/explicit/.odt-env/last-source-project.ini" 'normal run source snapshot is current INI'
+          contains "$tmp/explicit/.odt-env/last-resolved-project.ini" 'dbfilter = ^odoo13test96$' 'normal run resolves interpolation in snapshot'
+          ini "$tmp/explicit/odoo-project.ini" --set docker:restart=always
+          contains "$tmp/explicit/.odt-env/last-source-project.ini" 'restart = unless-stopped' '--set source snapshot precedes override'
+          ini "$tmp/explicit/odoo-project.ini"
+          contains "$tmp/explicit/.odt-env/last-source-project.ini" 'restart = always' 'next normal run refreshes source snapshot'
+          contains "$tmp/explicit/odoo-project.ini" 'restart = always' 'explicit workspace --set persists'
+          contains "$tmp/explicit/odoo-project.ini" '# Keep this header' 'explicit workspace keeps comments'
+          ini "$tmp/explicit/odoo-project.ini" -e test_num=99
+          contains "$tmp/explicit/odoo-project.ini" 'test_num = 99' 'explicit workspace -e persists'
+
+          echo '--- Local template, same directory ---'
+          mkdir -p "$tmp/same-dir"
+          base "$tmp/same-dir/template.ini"
+          cp "$tmp/same-dir/template.ini" "$tmp/same-dir.original"
+          ini "$tmp/same-dir/template.ini"
+          # Native CLI has always materialized an external local template to ROOT;
+          # no-override runs are intentionally kept backward-compatible.
+          exists "$tmp/same-dir/odoo-project.ini" 'native source materialized without overrides'
+          same "$tmp/same-dir.original" "$tmp/same-dir/template.ini" 'same-directory source never modified'
+          rm "$tmp/same-dir/odoo-project.ini"
+          ini "$tmp/same-dir/template.ini" --set docker:restart=no
+          exists "$tmp/same-dir/odoo-project.ini" 'template --set creates workspace INI'
+          contains "$tmp/same-dir/odoo-project.ini" '# Keep this header' 'template comments copied'
+          contains "$tmp/same-dir/odoo-project.ini" 'restart = no' 'template --set saved in workspace'
+          same "$tmp/same-dir.original" "$tmp/same-dir/template.ini" 'template source still unchanged'
+
+          echo '--- External template and --root ---'
+          mkdir -p "$tmp/source" "$tmp/target" "$tmp/target-old" "$tmp/target-plain"
+          base "$tmp/source/template.ini"
+          cp "$tmp/source/template.ini" "$tmp/source.original"
+          ini "$tmp/source/template.ini" --root "$tmp/target-plain"
+          exists "$tmp/target-plain/odoo-project.ini" 'native external source materialized without overrides'
+          ini "$tmp/source/template.ini" --root "$tmp/target" \
+            --set docker:restart=no -e test_num=100
+          contains "$tmp/target/odoo-project.ini" 'restart = no' 'external --root --set saved'
+          contains "$tmp/target/odoo-project.ini" 'test_num = 100' 'external --root -e saved'
+          contains "$tmp/target/odoo-project.ini" '# Keep this header' 'external template comments preserved'
+          same "$tmp/source.original" "$tmp/source/template.ini" 'external source never overwritten'
+          same "$tmp/source.original" "$tmp/target/.odt-env/last-source-project.ini" 'external source copied for audit'
+          contains "$tmp/target/.odt-env/last-resolved-project.ini" 'dbfilter = ^odoo13test100$' 'external override resolved snapshot'
+          base "$tmp/target-old/odoo-project.ini"
+          sed -i 's/restart = unless-stopped/restart = always/' "$tmp/target-old/odoo-project.ini"
+          ini "$tmp/source/template.ini" --root "$tmp/target-old" --set docker:restart=no
+          contains "$tmp/target-old/odoo-project.ini" 'restart = no' 'external template replaces stale workspace configuration'
+          same "$tmp/source.original" "$tmp/source/template.ini" 'external source unchanged after replacing existing target'
+
+          echo '--- Docker INI handling without starting containers ---'
+          mkdir -p "$tmp/docker-implicit" "$tmp/docker-explicit" "$tmp/docker-template"
+          base "$tmp/docker-implicit/odoo-project.ini"
+          ini_docker --root "$tmp/docker-implicit" --set docker:restart=no
+          contains "$tmp/docker-implicit/odoo-project.ini" 'restart = no' 'Docker implicit --set persisted'
+          contains "$tmp/docker-implicit/odoo-project.ini" '# Keep restart comment' 'Docker implicit comments preserved'
+          contains "$tmp/docker-implicit/compose.yaml" 'restart: "no"' 'Docker Compose reflects INI restart override'
+          exists "$tmp/docker-implicit/docker/local/Dockerfile" 'Dockerfile generated without Docker engine'
+          missing "$tmp/docker-implicit/venv" 'Docker CLI does not create virtualenv'
+          base "$tmp/docker-explicit/odoo-project.ini"
+          ini_docker "$tmp/docker-explicit/odoo-project.ini" --set docker:restart=always
+          contains "$tmp/docker-explicit/odoo-project.ini" 'restart = always' 'Docker explicit workspace --set persisted'
+          contains "$tmp/docker-explicit/compose.yaml" 'restart: always' 'Docker explicit Compose reflects override'
+          base "$tmp/docker-template/template.ini"
+          cp "$tmp/docker-template/template.ini" "$tmp/docker-template.original"
+          ini_docker "$tmp/docker-template/template.ini" --set docker:restart=no
+          contains "$tmp/docker-template/odoo-project.ini" 'restart = no' 'Docker template creates workspace INI on --set'
+          same "$tmp/docker-template.original" "$tmp/docker-template/template.ini" 'Docker template source unchanged'
+          mkdir -p "$tmp/docker-no-override"
+          ini_docker "$tmp/docker-template/template.ini" --root "$tmp/docker-no-override" --no-provisioning-log
+          exists "$tmp/docker-no-override/.odt-env/last-source-project.ini" 'Docker external source snapshot even without --set'
+          exists "$tmp/docker-no-override/.odt-env/last-resolved-project.ini" 'Docker external resolved snapshot even with --no-provisioning-log'
+          missing "$tmp/docker-no-override/odoo-project.ini" 'Docker external source without overrides is not materialized'
+
+          echo '--- Include layers (last layer wins) ---'
+          mkdir -p "$tmp/layers" "$tmp/merged" "$tmp/include-only"
+          base "$tmp/layers/base.ini"
+          cat > "$tmp/layers/extra.ini" <<'INI'
+          [config]
+          db_name = layered_db
+          [docker]
+          restart = always
+          INI
+          cp "$tmp/layers/base.ini" "$tmp/layers.base"
+          cp "$tmp/layers/extra.ini" "$tmp/layers.extra"
+          ini "$tmp/layers/base.ini" -i "$tmp/layers/extra.ini" --root "$tmp/merged"
+          contains "$tmp/merged/odoo-project.ini" 'db_name = layered_db' 'include overrides base'
+          contains "$tmp/merged/odoo-project.ini" 'restart = always' 'include wins without CLI override'
+          ini "$tmp/layers/base.ini" -i "$tmp/layers/extra.ini" --root "$tmp/merged" \
+            --set docker:restart=no --set config:db_name=cli_db
+          contains "$tmp/merged/odoo-project.ini" 'restart = no' '--set overrides last INI layer'
+          contains "$tmp/merged/odoo-project.ini" 'db_name = cli_db' 'multiple --set overrides merged layer'
+          exists "$tmp/merged/.odt-env/last-source-project.d/01-base.ini" 'base layer audit copy'
+          exists "$tmp/merged/.odt-env/last-source-project.d/02-extra.ini" 'extra layer audit copy'
+          same "$tmp/layers.base" "$tmp/layers/base.ini" 'base source left intact'
+          same "$tmp/layers.extra" "$tmp/layers/extra.ini" 'include source left intact'
+          ini -i "$tmp/layers/base.ini" --root "$tmp/include-only" --set docker:restart=no -e test_num=101
+          contains "$tmp/include-only/odoo-project.ini" 'restart = no' 'include-only materializes workspace INI'
+          contains "$tmp/include-only/odoo-project.ini" 'test_num = 101' 'include-only supports -e'
+
+
+          echo '--- CRLF, UTF-8, and multiline options ---'
+          mkdir -p "$tmp/format"
+          base "$tmp/format/odoo-project.ini"
+          sed -i '1s/$/ – príklad/' "$tmp/format/odoo-project.ini"
+          awk '{printf "%s\r\n", $0}' "$tmp/format/odoo-project.ini" > "$tmp/crlf.ini"
+          mv "$tmp/crlf.ini" "$tmp/format/odoo-project.ini"
+          ini --root "$tmp/format" --set docker:restart=no
+          contains "$tmp/format/odoo-project.ini" 'príklad' 'UTF-8 comments preserved'
+          if LC_ALL=C tr -d '\r' < "$tmp/format/odoo-project.ini" | cmp -s - "$tmp/format/odoo-project.ini"; then
+            echo 'CRLF was lost'; exit 1
+          fi
+          ok 'CRLF preserved'
+          ini --root "$tmp/format" --set $'virtualenv:requirements=requests==2.32.3\nurllib3<2'
+          contains "$tmp/format/odoo-project.ini" '    urllib3<2' 'multiline CLI override saved as INI continuation'
+          contains "$tmp/format/odoo-project.ini" 'restart = no' 'multiline override retains other sections'
+
+          echo '--- Invalid input must not overwrite existing INI ---'
+          mkdir -p "$tmp/invalid"
+          base "$tmp/invalid/odoo-project.ini"
+          cp "$tmp/invalid/odoo-project.ini" "$tmp/invalid.original"
+          reject --root "$tmp/invalid" --set docker:restart=invalid
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'invalid restart leaves INI untouched'
+          reject --root "$tmp/invalid" --set docker:odoo_cpus=-1
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'invalid resource limit leaves INI untouched'
+          reject --root "$tmp/invalid" --set docker:not_a_supported_key=123
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'unknown Docker option leaves INI untouched'
+          reject --root "$tmp/invalid" --set config:addons_path=unsafe
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'unsupported config option leaves INI untouched'
+          reject --root "$tmp/invalid" --set malformed
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'malformed --set leaves INI untouched'
+          reject --root "$tmp/invalid" -e malformed
+          same "$tmp/invalid.original" "$tmp/invalid/odoo-project.ini" 'malformed -e leaves INI untouched'
+
+          echo '--- Git-backed INI (local git repository, no external network) ---'
+          mkdir -p "$tmp/git-src" "$tmp/git-target"
+          base "$tmp/git-src/project.ini"
+          git -C "$tmp/git-src" init -q
+          git -C "$tmp/git-src" -c user.email=ci@example.invalid -c user.name=CI add project.ini
+          git -C "$tmp/git-src" -c user.email=ci@example.invalid -c user.name=CI commit -qm 'INI fixture'
+          git -C "$tmp/git-src" branch -M main
+          ini "git+file://$tmp/git-src//project.ini?ref=main" --root "$tmp/git-target" --set docker:restart=no
+          contains "$tmp/git-target/odoo-project.ini" 'restart = no' 'Git INI materialized and overridden'
+          contains "$tmp/git-target/odoo-project.ini" '# Keep this header' 'Git INI comments preserved'
+          contains "$tmp/git-src/project.ini" 'restart = unless-stopped' 'Git source untouched'
+          ini "git+file://$tmp/git-src//project.ini?ref=main" --root "$tmp/git-target"
+          contains "$tmp/git-target/odoo-project.ini" 'restart = unless-stopped' 'Git INI without overrides refreshes workspace'
+
+          echo '--- URL-backed INI (localhost fixture) ---'
+          mkdir -p "$tmp/http-root" "$tmp/http-target"
+          base "$tmp/http-root/project.ini"
+          python -m http.server 18765 --bind 127.0.0.1 --directory "$tmp/http-root" \
+            > "$tmp/http.log" 2>&1 &
+          http_pid=$!
+          for attempt in {1..40}; do
+            if curl -fsS http://127.0.0.1:18765/project.ini -o /dev/null; then break; fi
+            sleep 0.2
+          done
+          ini 'http://127.0.0.1:18765/project.ini' --root "$tmp/http-target" \
+            --set docker:restart=no
+          contains "$tmp/http-target/odoo-project.ini" 'restart = no' 'URL INI materialized and overridden'
+          contains "$tmp/http-target/odoo-project.ini" '# Keep this header' 'URL source comments preserved'
+          contains "$tmp/http-root/project.ini" 'restart = unless-stopped' 'URL fixture not modified'
+          ini 'http://127.0.0.1:18765/project.ini' --root "$tmp/http-target"
+          contains "$tmp/http-target/odoo-project.ini" 'restart = unless-stopped' 'URL INI without overrides refreshes workspace'
+
+          echo "All $count INI-only checks passed."

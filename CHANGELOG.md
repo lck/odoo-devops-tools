@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Fix INI configuration persistence, interpolation and escaping.
+
 ## 1.24.5 (2026-10-20)
 
 ### Added

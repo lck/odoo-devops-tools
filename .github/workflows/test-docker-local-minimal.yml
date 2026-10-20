@@ -178,34 +178,6 @@ jobs:
             --set config:db_name=odoo_ci_changed
           test "$(sed -n 's/^# Effective SHA256: //p' "$compose")" != "$effective_before"
 
-      - name: Preserve literal dollars in saved effective INI
-        shell: bash
-        run: |
-          set -euo pipefail
-          workspace="$(mktemp -d)"
-          trap 'rm -rf "$workspace"' EXIT
-          cat > "$workspace/odoo-project.ini" <<'INI'
-          [odoo]
-          version = 19.0
-          [vars]
-          test_num = 96
-          [config]
-          db_name = odoo13test96
-          dbfilter = ^odoo13test${vars:test_num}$$
-          INI
-
-          uv run odoo-compose --root "$workspace" --no-provisioning-log \
-            --set odoo:branch=19.0
-          grep -Fxq 'dbfilter = ^odoo13test96$$' "$workspace/odoo-project.ini"
-          grep -Fxq 'dbfilter = ^odoo13test96$' "$workspace/docker/local/configs/odoo.conf"
-
-          # Saving the already-resolved INI a second time must not break interpolation.
-          uv run odoo-compose --root "$workspace" --no-provisioning-log \
-            --set odoo:branch=19.0
-          grep -Fxq 'dbfilter = ^odoo13test96$$' "$workspace/odoo-project.ini"
-          uv run odoo-compose --root "$workspace" --no-provisioning-log
-          grep -Fxq 'dbfilter = ^odoo13test96$' "$workspace/docker/local/configs/odoo.conf"
-
       - name: Create workspace root folder
         run: mkdir -p odoo-workspace
 

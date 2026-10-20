@@ -1259,6 +1259,7 @@ The following sections are supported:
 
 - The project file can have any filename when passed explicitly. When `INI` is omitted, `odoo-compose` uses the existing `ROOT/odoo-project.ini`; if it is missing, use `--init` to create it explicitly from the bundled default template. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
+- Use `\${section:key}` for a literal `${section:key}`.
 - Multiple INI layers can be composed with `-i/--include`. Later layers override earlier layers; multi-line values are replaced as whole option values, not appended.
 - The optional `[vars]` section is useful for reusable values referenced as `${vars:name}`.
 - Values from `[vars]` can be overridden or injected from the CLI with `-e name=value` / `--extra-var name=value`.
