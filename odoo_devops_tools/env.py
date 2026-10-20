@@ -455,7 +455,9 @@ def _require_list_str(d: Dict[str, Any], key: str) -> list[str]:
     return [x.strip() for x in v]
 
 
-def _render_resolved_ini(cp: configparser.ConfigParser, *, redact: bool = False) -> str:
+def _render_resolved_ini(
+        cp: configparser.ConfigParser, *, redact: bool = False, escape_dollars: bool = False,
+) -> str:
     """Render an interpolated INI copy. ConfigParser does not preserve comments."""
     rendered = configparser.ConfigParser(interpolation=None)
 
@@ -465,6 +467,10 @@ def _render_resolved_ini(cp: configparser.ConfigParser, *, redact: bool = False)
             value = cp.get(section, option, raw=False)
             if redact and _is_sensitive_key(option):
                 value = "******"
+            if escape_dollars:
+                # The effective INI is read again with ExtendedInterpolation.
+                # Preserve literal '$' characters across repeated saves/loads.
+                value = value.replace("$", "$$")
             rendered.set(section, option, value)
 
     buf = io.StringIO()
@@ -479,7 +485,7 @@ def _ini_for_audit_log(cp: configparser.ConfigParser) -> str:
 
 def _ini_for_effective_file(cp: configparser.ConfigParser) -> str:
     """Return resolved INI content suitable for saving as the effective project file."""
-    return _render_resolved_ini(cp, redact=False)
+    return _render_resolved_ini(cp, redact=False, escape_dollars=True)
 
 
 def _ini_for_merged_source_file(cp: configparser.ConfigParser) -> str:

@@ -6,6 +6,10 @@
 
 - Add a configurable Docker Compose restart policy.
 
+### Fixed
+
+- Preserve escaped dollar signs in generated INI files
+
 ## 1.24.4 (2026-10-18)
 
 ### Added

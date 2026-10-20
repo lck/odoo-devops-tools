@@ -25,6 +25,41 @@ jobs:
       - name: Verify uv
         run: uv --version
 
+      - name: Preserve literal dollars in saved effective INI on Windows
+        run: |
+          $workspace = Join-Path $env:RUNNER_TEMP 'ci-ini-dollar-escape'
+          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+          $ini = Join-Path $workspace 'odoo-project.ini'
+          @'
+          [odoo]
+          version = 19.0
+          [vars]
+          test_num = 96
+          [config]
+          db_name = odoo13test96
+          dbfilter = ^odoo13test${vars:test_num}$$
+          '@ | Set-Content -LiteralPath $ini -Encoding utf8
+
+          uv run odoo-compose --root $workspace --no-provisioning-log --set odoo:branch=19.0
+          if ($LASTEXITCODE -ne 0) { throw 'Initial INI generation failed.' }
+          $effective = Get-Content -LiteralPath $ini -Raw
+          if (-not $effective.Contains('dbfilter = ^odoo13test96$$')) {
+            throw 'Effective INI lost the escaped dollar character.'
+          }
+          $conf = Get-Content -LiteralPath (Join-Path $workspace 'docker/local/configs/odoo.conf') -Raw
+          if (-not $conf.Contains('dbfilter = ^odoo13test96$')) {
+            throw 'Generated Odoo config has an incorrect dbfilter.'
+          }
+
+          uv run odoo-compose --root $workspace --no-provisioning-log --set odoo:branch=19.0
+          if ($LASTEXITCODE -ne 0) { throw 'INI regeneration failed.' }
+          uv run odoo-compose --root $workspace --no-provisioning-log
+          if ($LASTEXITCODE -ne 0) { throw 'Saved effective INI is not reusable.' }
+          $effective = Get-Content -LiteralPath $ini -Raw
+          if (-not $effective.Contains('dbfilter = ^odoo13test96$$')) {
+            throw 'Regeneration changed the escaped dollar character.'
+          }
+
       - name: Reject unsafe addon section names on Windows
         run: |
           $invalidNames = @('..', '../outside', 'nested\repo', 'C:drive', 'repo&other')
