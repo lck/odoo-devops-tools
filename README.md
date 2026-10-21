@@ -1404,8 +1404,6 @@ This section is optional.
 - `odoo_cpus`, `db_cpus`, `mailpit_cpus` — optional CPU limits for the respective Compose services; positive decimal CPU counts such as `0.5` or `2.0`.
 - `odoo_mem_limit`, `db_mem_limit`, `mailpit_mem_limit` — optional memory limits for the respective Compose services; positive amounts such as `256m` or `4g`.
 
-All six resource options default to unset and are omitted from generated Compose when empty. See [Limiting Docker Compose resources](#17-limiting-docker-compose-resources) for a complete example.
-
 Example:
 
 ```ini
