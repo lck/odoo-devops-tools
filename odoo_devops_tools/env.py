@@ -185,6 +185,11 @@ _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS = {
 
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
 
+_BACKUP_RESTORE_SCRIPT_NAMES = (
+    "backup-db", "restore-db", "backup-filestore", "restore-filestore",
+    "restic", "backup-filestore-restic", "restore-filestore-restic",
+)
+
 _ODOO_VENV_SETTINGS = {
     # odoo_ver: (min_py_ver, max_py_ver, build_constraints, requirements)
     12: ("3.5", "3.8", ["setuptools<58"], ["setuptools<58"]),
@@ -346,7 +351,6 @@ class Layout:
     configs_dir: Path
     conf_path: Path
     data_dir: Path
-    scripts_dir: Path
     wheelhouse_dir: Path
     docker_dir: Path
     docker_local_dir: Path
@@ -360,7 +364,6 @@ class Layout:
         configs_dir = root / "odoo-configs"
         conf_path = configs_dir / "odoo-server.conf"
         data_dir = root / "odoo-data"
-        scripts_dir = root / "odoo-scripts"
         wheelhouse_dir = root / "wheelhouse"
         docker_dir = root / "docker"
         docker_local_dir = docker_dir / _DOCKER_CONTEXT_LOCAL
@@ -373,15 +376,11 @@ class Layout:
             configs_dir=configs_dir,
             conf_path=conf_path,
             data_dir=data_dir,
-            scripts_dir=scripts_dir,
             wheelhouse_dir=wheelhouse_dir,
             docker_dir=docker_dir,
             docker_local_dir=docker_local_dir,
             docker_deploy_dir=docker_deploy_dir,
         )
-
-    def script(self, name: str, ext: str) -> Path:
-        return self.scripts_dir / f"{name}.{ext}"
 
 
 # -----------------------------
@@ -473,12 +472,6 @@ def _write_text_file(
         _chmod_private(path)
     if executable:
         _make_executable(path)
-
-
-def _write_script(layout: Layout, name: str, ext: str, content: str) -> Path:
-    path = layout.script(name, ext)
-    _write_text_file(path, content, executable=(ext == "sh"), crlf=(ext == "bat"))
-    return path
 
 
 def _rmtree(path: Path) -> None:
@@ -1769,13 +1762,17 @@ def load_project_config(
             )
         config[key] = cp.get("config", key)
 
-    return ProjectConfig(
+    project = ProjectConfig(
         virtualenv=venv,
         odoo=odoo,
         addons=addons,
         config=config,
         docker=docker,
     )
+    # Reject unsafe explicit database names before generating workspace files.
+    if str(config.get("db_name") or "").strip():
+        _docker_default_db_name(project)
+    return project
 
 
 def require_venv(
@@ -2553,1589 +2550,6 @@ def render_odoo_conf(cfg: Dict[str, Any], layout: Layout, addon_paths: list[Path
 
 
 # -----------------------------
-# Script generation
-# -----------------------------
-
-def _script_odoo_bin_sh(layout: Layout) -> str:
-    odoo_bin = layout.odoo_dir / "odoo-bin"
-    try:
-        rel = odoo_bin.resolve().relative_to(layout.root.resolve())
-        return "${ROOT_DIR}/" + rel.as_posix()
-    except Exception:
-        return str(odoo_bin)
-
-
-def _script_odoo_bin_bat(layout: Layout) -> str:
-    odoo_bin = layout.odoo_dir / "odoo-bin"
-    try:
-        rel = odoo_bin.resolve().relative_to(layout.root.resolve())
-        return "%ROOT_DIR%\\" + "\\".join(rel.parts)
-    except Exception:
-        return str(odoo_bin)
-
-
-def _write_odoo_command_sh(layout: Layout, name: str, info_message: str, command: str) -> None:
-    content = """#!/usr/bin/env bash
-set -euo pipefail
-
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-VENV_DIR="${ROOT_DIR}/venv"
-PY="${VENV_DIR}/bin/python"
-ODOO_BIN="__ODOO_BIN__"
-CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
-
-if [[ ! -d "${VENV_DIR}" ]]; then
-  echo "ERROR: required venv directory not found at ${VENV_DIR}" >&2
-  exit 1
-fi
-if [[ ! -x "${PY}" ]]; then
-  echo "ERROR: venv python not found/executable at ${PY}" >&2
-  exit 1
-fi
-if [[ ! -f "${ODOO_BIN}" ]]; then
-  echo "ERROR: odoo-bin not found at ${ODOO_BIN}" >&2
-  exit 1
-fi
-
-echo "INFO: __INFO_MESSAGE__"
-__COMMAND__
-"""
-    content = (
-        content
-        .replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-        .replace("__INFO_MESSAGE__", info_message)
-        .replace("__COMMAND__", command)
-    )
-    _write_script(layout, name, "sh", content)
-
-
-def _write_odoo_command_bat(layout: Layout, name: str, info_message: str, command: str) -> None:
-    content = r"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set PY=%VENV_DIR%\Scripts\python.exe
-set ODOO_BIN=__ODOO_BIN__
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%PY%" (
-  echo ERROR: venv python not found at %PY%
-  exit /b 1
-)
-if not exist "%ODOO_BIN%" (
-  echo ERROR: odoo-bin not found at %ODOO_BIN%
-  exit /b 1
-)
-
-echo INFO: __INFO_MESSAGE__
-__COMMAND__
-
-endlocal
-"""
-    content = (
-        content
-        .replace("__ODOO_BIN__", _script_odoo_bin_bat(layout))
-        .replace("__INFO_MESSAGE__", info_message)
-        .replace("__COMMAND__", command)
-    )
-    _write_script(layout, name, "bat", content)
-
-
-def write_run_sh(layout: Layout) -> None:
-    _write_odoo_command_sh(
-        layout,
-        "run",
-        "Starting Odoo server using config ${CONF}. Passing through any extra arguments.",
-        'exec "${PY}" "${ODOO_BIN}" -c "${CONF}" "$@"',
-    )
-
-
-def write_instance_sh(layout: Layout) -> None:
-    content = """#!/usr/bin/env bash
-set -euo pipefail
-
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-VENV_DIR="${ROOT_DIR}/venv"
-PY="${VENV_DIR}/bin/python"
-ODOO_BIN="__ODOO_BIN__"
-CONF="${ROOT_DIR}/odoo-configs/odoo-server.conf"
-
-LOGS_DIR="${ROOT_DIR}/odoo-logs"
-LOG_FILE="${LOGS_DIR}/odoo-server.log"
-PID_FILE="${LOGS_DIR}/odoo-server.pid"
-
-require_paths() {
-  if [[ ! -d "${VENV_DIR}" ]]; then
-    echo "ERROR: required venv directory not found at ${VENV_DIR}" >&2
-    exit 1
-  fi
-  if [[ ! -x "${PY}" ]]; then
-    echo "ERROR: venv python not found/executable at ${PY}" >&2
-    exit 1
-  fi
-  if [[ ! -f "${ODOO_BIN}" ]]; then
-    echo "ERROR: odoo-bin not found at ${ODOO_BIN}" >&2
-    exit 1
-  fi
-  if [[ ! -f "${CONF}" ]]; then
-    echo "ERROR: Odoo config not found at ${CONF}" >&2
-    exit 1
-  fi
-}
-
-is_running() {
-  if [[ -f "${PID_FILE}" ]]; then
-    local pid
-    pid="$(cat "${PID_FILE}" 2>/dev/null || true)"
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-      echo "${pid}"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-start() {
-  mkdir -p "${LOGS_DIR}"
-  require_paths
-
-  local pid
-  if pid="$(is_running)"; then
-    echo "INFO: Odoo already running (PID=${pid})"
-    return 0
-  fi
-
-  echo "----- $(date -Is) START -----" >> "${LOG_FILE}"
-  nohup "${PY}" "${ODOO_BIN}" -c "${CONF}" "$@" >> "${LOG_FILE}" 2>&1 &
-
-  pid=$!
-  echo "${pid}" > "${PID_FILE}"
-  echo "INFO: Started Odoo (PID=${pid}). Logging to ${LOG_FILE}"
-}
-
-stop() {
-  mkdir -p "${LOGS_DIR}"
-
-  local pid
-  if pid="$(is_running)"; then
-    echo "INFO: Stopping Odoo (PID=${pid})"
-    kill "${pid}" 2>/dev/null || true
-
-    # Wait up to ~30 seconds for a graceful shutdown
-    for _ in {1..30}; do
-      if kill -0 "${pid}" 2>/dev/null; then
-        sleep 1
-      else
-        break
-      fi
-    done
-
-    if kill -0 "${pid}" 2>/dev/null; then
-      echo "WARN: Odoo did not stop gracefully; sending SIGKILL" >&2
-      kill -9 "${pid}" 2>/dev/null || true
-    fi
-
-    rm -f "${PID_FILE}"
-    echo "INFO: Stopped."
-    return 0
-  fi
-
-  # Cleanup stale PID file (if any)
-  rm -f "${PID_FILE}"
-  echo "INFO: Odoo not running."
-}
-
-status() {
-  local pid
-  if pid="$(is_running)"; then
-    # Requirement: print PID if running
-    echo "${pid}"
-    return 0
-  fi
-  echo "NOT RUNNING" >&2
-  return 1
-}
-
-cmd="${1:-}"
-shift || true
-
-case "${cmd}" in
-  start)
-    start "$@"
-    ;;
-  stop)
-    stop
-    ;;
-  restart)
-    stop
-    start "$@"
-    ;;
-  status)
-    status
-    ;;
-  *)
-    echo "Usage: $(basename "$0") {start|stop|restart|status} [odoo args...]" >&2
-    exit 2
-    ;;
-esac
-"""
-    content = content.replace("__ODOO_BIN__", _script_odoo_bin_sh(layout))
-    _write_script(layout, "instance", "sh", content)
-
-
-def write_run_bat(layout: Layout) -> None:
-    _write_odoo_command_bat(
-        layout,
-        "run",
-        "Starting Odoo server using config %CONF%. Passing through any extra arguments.",
-        '"%PY%" "%ODOO_BIN%" -c "%CONF%" %*',
-    )
-
-
-def write_test_sh(layout: Layout) -> None:
-    _write_odoo_command_sh(
-        layout,
-        "test",
-        "Running Odoo tests using config ${CONF}. Passing through any extra arguments.",
-        'exec "${PY}" "${ODOO_BIN}" -c "${CONF}" --test-enable --stop-after-init "$@"',
-    )
-
-
-def write_test_bat(layout: Layout) -> None:
-    _write_odoo_command_bat(
-        layout,
-        "test",
-        "Running Odoo tests using config %CONF%. Passing through any extra arguments.",
-        '"%PY%" "%ODOO_BIN%" -c "%CONF%" --test-enable --stop-after-init %*',
-    )
-
-
-def write_shell_sh(layout: Layout) -> None:
-    _write_odoo_command_sh(
-        layout,
-        "shell",
-        "Starting Odoo shell using config ${CONF}. Passing through any extra arguments.",
-        'exec "${PY}" "${ODOO_BIN}" shell -c "${CONF}" "$@"',
-    )
-
-
-def write_shell_bat(layout: Layout) -> None:
-    _write_odoo_command_bat(
-        layout,
-        "shell",
-        "Starting Odoo shell using config %CONF%. Passing through any extra arguments.",
-        '"%PY%" "%ODOO_BIN%" shell -c "%CONF%" %*',
-    )
-
-
-_NATIVE_BACKUP_SCRIPT_NAMES = (
-    "backup-db", "restore-db", "neutralize-db", "backup-filestore",
-    "restore-filestore", "restic", "backup-filestore-restic",
-    "restore-filestore-restic",
-)
-
-
-def _native_default_db_name(cfg: ProjectConfig) -> str:
-    db_name = str(cfg.config.get("db_name") or "").strip()
-    if not db_name:
-        raise Exception("Native database helpers require [config].db_name.")
-    # These names become PostgreSQL identifiers, filesystem path components and
-    # Windows batch variables. Reject traversal, CMD metacharacters and names
-    # that PostgreSQL could silently truncate to another database name.
-    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
-        raise Exception(
-            "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
-            "underscores, dots or hyphens, starting with a letter, digit or underscore."
-        )
-    return db_name
-
-
-def _native_filestore_data_dir_sh(layout: Layout) -> str:
-    # Preserve workspace-relative paths when the workspace is moved.
-    try:
-        relative = layout.data_dir.relative_to(layout.root)
-    except ValueError:
-        return shlex.quote(str(layout.data_dir))
-    return f'"${{ROOT_DIR}}"/{shlex.quote(relative.as_posix())}'
-
-
-def _native_filestore_data_dir_bat(layout: Layout) -> str:
-    # Paths cannot contain double quotes on Windows; reject control characters
-    # rather than generating unsafe batch assignments.
-    if any(char in str(layout.data_dir) for char in ('"', '\r', '\n', '\x00')):
-        raise Exception("Native filestore data_dir contains invalid Windows path characters.")
-    try:
-        relative = layout.data_dir.relative_to(layout.root)
-    except ValueError:
-        value = str(layout.data_dir)
-    else:
-        suffix = '' if str(relative) == '.' else '\\' + str(relative)
-        value = '%ROOT_DIR%' + suffix
-    # Keep %ROOT_DIR% expandable while escaping literal percent signs in paths.
-    if value.startswith('%ROOT_DIR%'):
-        return '%ROOT_DIR%' + value[len('%ROOT_DIR%'):].replace('%', '%%').replace('^', '^^')
-    return value.replace('%', '%%').replace('^', '^^')
-
-
-def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
-    # libpq reads these environment variables, keeping passwords out of command
-    # arguments. Missing/False options leave libpq defaults and .pgpass intact.
-    values: dict[str, str] = {}
-    for key, variable in (
-        ("db_host", "PGHOST"), ("db_port", "PGPORT"), ("db_user", "PGUSER"),
-        ("db_password", "PGPASSWORD"), ("db_sslmode", "PGSSLMODE"),
-    ):
-        value = _format_conf_value(cfg.config.get(key, "")).strip()
-        if value and value.lower() not in ("false", "none"):
-            values[variable] = value
-    return values
-
-
-def _native_pg_env_sh(cfg: ProjectConfig) -> str:
-    return "\n".join(f"export {key}={shlex.quote(value)}" for key, value in _native_pg_env(cfg).items())
-
-
-def _native_pg_env_bat(cfg: ProjectConfig) -> str:
-    lines: list[str] = []
-    for key, value in _native_pg_env(cfg).items():
-        if "\r" in value or "\n" in value:
-            raise Exception("Native batch PostgreSQL connection settings must be single-line values.")
-        # SET without enclosing quotes lets caret escaping preserve embedded
-        # quotes as well as cmd metacharacters. Delayed expansion stays disabled.
-        value = value.replace("^", "^^").replace("%", "%%")
-        for character in '&|<>()"':
-            value = value.replace(character, "^" + character)
-        lines.append(f"set {key}={value}")
-    return "\n".join(lines)
-
-
-def _native_pg_commands_sh(*commands: str) -> str:
-    content = r'''POSTGRES_BIN="${POSTGRES_BIN:-}"
-if [[ -n "${POSTGRES_BIN}" ]]; then
-  if [[ ! -d "${POSTGRES_BIN}" ]]; then
-    echo "ERROR: PostgreSQL bin directory not found: ${POSTGRES_BIN}" >&2
-    exit 1
-  fi
-  POSTGRES_BIN="$(cd "${POSTGRES_BIN}" && pwd)"
-fi
-'''
-    for command in commands:
-        content += f'{command.upper()}="${{POSTGRES_BIN:+${{POSTGRES_BIN}}/}}{command}"\n'
-    command_vars = " ".join(f'"${{{command.upper()}}}"' for command in commands)
-    content += 'for COMMAND in ' + command_vars + r'''; do
-  if ! command -v "${COMMAND}" >/dev/null 2>&1; then
-    echo "ERROR: PostgreSQL command not found/executable: ${COMMAND}" >&2
-    exit 1
-  fi
-done
-'''
-    return content
-
-
-def _native_pg_commands_bat(*commands: str) -> str:
-    content = r"""if not defined POSTGRES_BIN goto postgres_from_path
-for %%I in ("%POSTGRES_BIN%") do set "POSTGRES_ATTRIBUTES=%%~aI"
-if /i not "%POSTGRES_ATTRIBUTES:~0,1%"=="d" (
-  echo ERROR: PostgreSQL bin directory not found: "%POSTGRES_BIN%"
-  exit /b 1
-)
-for %%I in ("%POSTGRES_BIN%") do set "POSTGRES_BIN=%%~fI"
-"""
-    for command in commands:
-        variable = command.upper()
-        content += rf'''set "{variable}=%POSTGRES_BIN%\{command}.exe"
-if not exist "%{variable}%" (
-  echo ERROR: PostgreSQL command not found: "%{variable}%"
-  exit /b 1
-)
-for %%I in ("%{variable}%") do set "POSTGRES_ATTRIBUTES=%%~aI"
-if not "%POSTGRES_ATTRIBUTES:~0,1%"=="-" (
-  echo ERROR: PostgreSQL command must be an executable file: "%{variable}%"
-  exit /b 1
-)
-'''
-    content += "goto postgres_commands_ready\n\n:postgres_from_path\n"
-    for command in commands:
-        content += f'''set "{command.upper()}={command}"
-where {command} >nul 2>&1
-if errorlevel 1 (
-  echo ERROR: PostgreSQL command not found on PATH: {command}
-  exit /b 1
-)
-'''
-    content += "\n:postgres_commands_ready\n"
-    return content
-
-
-def _native_restic_command_sh() -> str:
-    return r'''RESTIC_EXE="${RESTIC_BIN:-restic}"
-if ! RESTIC_EXE="$(command -v "${RESTIC_EXE}")"; then
-  echo "ERROR: restic command not found/executable: ${RESTIC_BIN:-restic}" >&2
-  exit 1
-fi
-if [[ "${RESTIC_EXE}" == */* ]]; then
-  RESTIC_EXE="$(cd "$(dirname "${RESTIC_EXE}")" && pwd)/$(basename "${RESTIC_EXE}")"
-fi
-export RESTIC_BIN="${RESTIC_EXE}"
-'''
-
-
-def _native_restic_command_bat() -> str:
-    return r"""set "RESTIC_EXE="
-if not defined RESTIC_BIN goto restic_from_path
-if not exist "%RESTIC_BIN%" (
-  echo ERROR: restic executable not found: "%RESTIC_BIN%"
-  exit /b 1
-)
-for %%I in ("%RESTIC_BIN%") do set "RESTIC_ATTRIBUTES=%%~aI"
-if not "%RESTIC_ATTRIBUTES:~0,1%"=="-" (
-  echo ERROR: RESTIC_BIN must be an executable file: "%RESTIC_BIN%"
-  exit /b 1
-)
-for %%I in ("%RESTIC_BIN%") do set "RESTIC_EXE=%%~fI"
-goto restic_command_ready
-
-:restic_from_path
-for /f "delims=" %%I in ('where restic 2^>nul') do if not defined RESTIC_EXE set "RESTIC_EXE=%%I"
-if not defined RESTIC_EXE (
-  echo ERROR: restic not found on PATH.
-  exit /b 1
-)
-
-:restic_command_ready
-set "RESTIC_BIN=%RESTIC_EXE%"
-"""
-
-
-def write_native_backup_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    pg_env = _native_pg_env_sh(cfg)
-    pg_commands = _native_pg_commands_sh("pg_dump")
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DB_NAME={configured_db_name}
-{pg_env}
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}.dump}}"
-TMP_OUTPUT="${{OUTPUT}}.tmp"
-
-{pg_commands}
-cd "${{ROOT_DIR}}"
-mkdir -p "$(dirname "${{OUTPUT}}")"
-rm -f "${{TMP_OUTPUT}}"
-trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
-
-echo "INFO: Backing up PostgreSQL database '${{DB_NAME}}' to '${{OUTPUT}}'."
-"${{PG_DUMP}}" --format=custom --no-owner --no-acl "${{DB_NAME}}" \
-  > "${{TMP_OUTPUT}}"
-
-mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
-trap - EXIT
-echo "INFO: Database backup created: ${{OUTPUT}}"
-"""
-    return _write_script(layout, "backup-db", "sh", content)
-
-
-def write_native_restore_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    pg_env = _native_pg_env_sh(cfg)
-    pg_commands = _native_pg_commands_sh("psql", "dropdb", "createdb", "pg_restore")
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
-CLICK_ODOO="${{ROOT_DIR}}/venv/bin/click-odoo"
-DB_NAME={configured_db_name}
-{pg_env}
-FORCE=false
-RESTORE_MODE=copy
-SOURCE=""
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] [--copy|--move] BACKUP.dump" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    --copy)
-      RESTORE_MODE=copy
-      ;;
-    --move)
-      RESTORE_MODE=move
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ -n "${{SOURCE}}" ]]; then
-        usage
-        exit 2
-      fi
-      SOURCE="$1"
-      ;;
-  esac
-  shift
-done
-
-if [[ -z "${{SOURCE}}" ]]; then
-  usage
-  exit 2
-fi
-
-if [[ ! -f "${{SOURCE}}" ]]; then
-  echo "ERROR: database backup not found: ${{SOURCE}}" >&2
-  exit 1
-fi
-SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
-
-{pg_commands}
-cd "${{ROOT_DIR}}"
-
-DB_EXISTS=false
-DATABASES="$("${{PSQL}}" -X -d postgres -Atqc "SELECT datname FROM pg_database")"
-if grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
-  DB_EXISTS=true
-fi
-
-if [[ "${{DB_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
-  if [[ ! -x "${{CLICK_ODOO}}" || ! -f "${{CONF}}" ]]; then
-    echo "ERROR: copy restore requires venv click-odoo and Odoo config: ${{CONF}}" >&2
-    exit 1
-  fi
-fi
-
-echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
-echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
-if [[ "${{DB_EXISTS}}" == true ]]; then
-  "${{DROPDB}}" --force --maintenance-db=postgres "${{DB_NAME}}"
-fi
-"${{CREATEDB}}" --maintenance-db=postgres "${{DB_NAME}}"
-"${{PG_RESTORE}}" --verbose --exit-on-error --no-owner --no-acl -d "${{DB_NAME}}" \
-  < "${{SOURCE}}"
-
-if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
-  echo "INFO: Resetting copied Odoo database identity for '${{DB_NAME}}'."
-  printf '%s\n' 'env["ir.config_parameter"].init(force=True)' | \
-    "${{CLICK_ODOO}}" -c "${{CONF}}" -d "${{DB_NAME}}" --log-level=error
-
-  "${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" <<'SQL'
-DELETE FROM ir_config_parameter
-WHERE key = 'database.enterprise_code';
-
-UPDATE ir_config_parameter
-SET value = 'copy'
-WHERE key = 'database.expiration_reason'
-  AND value != 'demo';
-
-UPDATE ir_config_parameter
-SET value = CURRENT_DATE + INTERVAL '2 month'
-WHERE key = 'database.expiration_date';
-SQL
-else
-  echo "INFO: Preserving Odoo database identity (--move)."
-fi
-
-echo "INFO: Database restore completed: ${{DB_NAME}}"
-"""
-    return _write_script(layout, "restore-db", "sh", content)
-
-
-def write_native_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    odoo_bin = _script_odoo_bin_sh(layout)
-    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
-    if odoo_major_version >= 16:
-        neutralize_command = rf"""
-if [[ ! -x "${{PY}}" || ! -f "${{ODOO_BIN}}" || ! -f "${{CONF}}" ]]; then
-  echo "ERROR: native neutralization requires venv python, odoo-bin and Odoo config." >&2
-  exit 1
-fi
-echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
-"${{PY}}" "${{ODOO_BIN}}" neutralize -c "${{CONF}}" -d "${{DB_NAME}}"
-"""
-    else:
-        neutralize_command = rf"""
-echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
-
-echo "INFO: Disabling scheduled actions."
-"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
-  -c 'UPDATE ir_cron SET active = FALSE WHERE active = TRUE;'
-
-echo "INFO: Disabling outgoing mail servers."
-"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
-  -c 'UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;'
-
-echo "INFO: Disabling incoming mail servers if fetchmail is installed."
-"${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" \
-  -c "DO \$\$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END \$\$;"
-"""
-
-    pg_env = _native_pg_env_sh(cfg)
-    pg_commands = _native_pg_commands_sh("psql")
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-PY="${{ROOT_DIR}}/venv/bin/python"
-ODOO_BIN="{odoo_bin}"
-CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
-DB_NAME={configured_db_name}
-{pg_env}
-NEUTRALIZE_DIR="${{ROOT_DIR}}/neutralize"
-
-{pg_commands}
-cd "${{ROOT_DIR}}"
-
-DATABASES="$("${{PSQL}}" -X -d postgres -Atqc "SELECT datname FROM pg_database")"
-if ! grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
-  echo "ERROR: target database '${{DB_NAME}}' does not exist." >&2
-  exit 1
-fi
-
-echo "INFO: Neutralizing Odoo database '${{DB_NAME}}'."
-{neutralize_command}
-if [[ -d "${{NEUTRALIZE_DIR}}" ]]; then
-  shopt -s nullglob
-  NEUTRALIZE_SQL_FILES=("${{NEUTRALIZE_DIR}}"/*.sql)
-  shopt -u nullglob
-  for SQL_FILE in "${{NEUTRALIZE_SQL_FILES[@]}}"; do
-    echo "INFO: Running workspace neutralization script: ${{SQL_FILE##*/}}"
-    "${{PSQL}}" -X -v ON_ERROR_STOP=1 -d "${{DB_NAME}}" < "${{SQL_FILE}}"
-  done
-fi
-
-echo "INFO: Database neutralization completed: ${{DB_NAME}}"
-"""
-    return _write_script(layout, "neutralize-db", "sh", content)
-
-
-def write_native_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    configured_data_dir = _native_filestore_data_dir_sh(layout)
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DB_NAME={configured_db_name}
-DATA_DIR={configured_data_dir}
-FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
-TMP_OUTPUT="${{OUTPUT}}.tmp"
-
-cd "${{ROOT_DIR}}"
-mkdir -p "$(dirname "${{OUTPUT}}")"
-rm -f "${{TMP_OUTPUT}}"
-trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
-
-echo "INFO: Backing up filestore for database '${{DB_NAME}}' to '${{OUTPUT}}'."
-tar -C "${{FILESTORE_PATH}}" -czf - . > "${{TMP_OUTPUT}}"
-
-mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
-trap - EXIT
-echo "INFO: Filestore backup created: ${{OUTPUT}}"
-"""
-    return _write_script(layout, "backup-filestore", "sh", content)
-
-
-def write_native_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    configured_data_dir = _native_filestore_data_dir_sh(layout)
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-DB_NAME={configured_db_name}
-DATA_DIR={configured_data_dir}
-FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
-FORCE=false
-SOURCE=""
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] FILESTORE.tar.gz" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ -n "${{SOURCE}}" ]]; then
-        usage
-        exit 2
-      fi
-      SOURCE="$1"
-      ;;
-  esac
-  shift
-done
-
-if [[ -z "${{SOURCE}}" ]]; then
-  usage
-  exit 2
-fi
-
-if [[ ! -f "${{SOURCE}}" ]]; then
-  echo "ERROR: filestore backup not found: ${{SOURCE}}" >&2
-  exit 1
-fi
-SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
-
-cd "${{ROOT_DIR}}"
-
-FILESTORE_EXISTS=false
-if [[ -e "${{FILESTORE_PATH}}" ]]; then
-  FILESTORE_EXISTS=true
-fi
-
-if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
-echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
-rm -rf -- "${{FILESTORE_PATH}}"
-mkdir -p "${{FILESTORE_PATH}}"
-tar -xzf - -C "${{FILESTORE_PATH}}" < "${{SOURCE}}"
-
-echo "INFO: Filestore restore completed: ${{DB_NAME}}"
-"""
-    return _write_script(layout, "restore-filestore", "sh", content)
-
-
-def write_native_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    configured_data_dir = _native_filestore_data_dir_sh(layout)
-    content = fr'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DB_NAME={configured_db_name}
-RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-DATA_DIR={configured_data_dir}
-FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
-
-if [[ ! -x "${{RESTIC}}" ]]; then
-  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
-  exit 1
-fi
-
-EXTRA_TAG_ARGS=()
-if [[ -n "${{RESTIC_BACKUP_ID:-}}" ]]; then
-  EXTRA_TAG_ARGS+=(--tag "backup-id:${{RESTIC_BACKUP_ID}}")
-fi
-
-echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
-"${{RESTIC}}" backup \
-  --host "${{RESTIC_HOST_NAME}}" \
-  --tag odoo \
-  --tag filestore \
-  --tag "db:${{DB_NAME}}" \
-  "${{EXTRA_TAG_ARGS[@]}}" \
-  "$@" \
-  "${{FILESTORE_PATH}}"
-'''
-    return _write_script(layout, "backup-filestore-restic", "sh", content)
-
-
-def write_native_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_native_default_db_name(cfg))
-    configured_data_dir = _native_filestore_data_dir_sh(layout)
-    restic_command = _native_restic_command_sh()
-    content = fr'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DB_NAME={configured_db_name}
-SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
-RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-FORCE=false
-SNAPSHOT="latest"
-SNAPSHOT_SET=false
-DATA_DIR={configured_data_dir}
-SOURCE_FILESTORE_PATH="${{DATA_DIR}}/filestore/${{SOURCE_DB_NAME}}"
-TARGET_FILESTORE_PATH="${{DATA_DIR}}/filestore/${{DB_NAME}}"
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] [SNAPSHOT]" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ "${{SNAPSHOT_SET}}" == true ]]; then
-        usage
-        exit 2
-      fi
-      SNAPSHOT="$1"
-      SNAPSHOT_SET=true
-      ;;
-  esac
-  shift
-done
-
-if [[ ! -x "${{RESTIC}}" ]]; then
-  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
-  exit 1
-fi
-
-{restic_command}
-cd "${{ROOT_DIR}}"
-
-FILESTORE_EXISTS=false
-if [[ -e "${{TARGET_FILESTORE_PATH}}" ]]; then
-  FILESTORE_EXISTS=true
-fi
-
-if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
-echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
-
-rm -rf -- "${{TARGET_FILESTORE_PATH}}"
-mkdir -p "${{TARGET_FILESTORE_PATH}}"
-
-RESTORE_ARGS=(restore "${{SNAPSHOT}}:${{SOURCE_FILESTORE_PATH}}" --target "${{TARGET_FILESTORE_PATH}}")
-if [[ "${{SNAPSHOT}}" == "latest" ]]; then
-  RESTORE_ARGS+=(--host "${{RESTIC_HOST_NAME}}" --path "${{SOURCE_FILESTORE_PATH}}")
-fi
-
-"${{RESTIC}}" "${{RESTORE_ARGS[@]}}"
-
-echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
-'''
-    return _write_script(layout, "restore-filestore-restic", "sh", content)
-
-
-def write_native_restic_sh(layout: Layout) -> Path:
-    content = r'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $(basename "$0") RESTIC_COMMAND [ARGS...]" >&2
-  exit 2
-fi
-__RESTIC_COMMAND__
-if [[ -z "${RESTIC_REPOSITORY:-}" ]]; then
-  echo "ERROR: RESTIC_REPOSITORY is not set." >&2
-  exit 1
-fi
-
-cd "${ROOT_DIR}"
-if [[ "${RESTIC_REPOSITORY}" == /* ]]; then
-  mkdir -p "${RESTIC_REPOSITORY}"
-elif [[ "${RESTIC_REPOSITORY}" != *:* ]]; then
-  echo "ERROR: local RESTIC_REPOSITORY must be an absolute host path." >&2
-  exit 1
-fi
-if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
-  if [[ ! -f "${RESTIC_PASSWORD_FILE}" ]]; then
-    echo "ERROR: RESTIC_PASSWORD_FILE not found: ${RESTIC_PASSWORD_FILE}" >&2
-    exit 1
-  fi
-elif [[ -z "${RESTIC_PASSWORD:-}" ]]; then
-  echo "ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD." >&2
-  exit 1
-fi
-exec "${RESTIC_EXE}" "$@"
-'''
-    content = content.replace("__RESTIC_COMMAND__", _native_restic_command_sh())
-    return _write_script(layout, "restic", "sh", content)
-
-
-def write_native_backup_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    pg_env = _native_pg_env_bat(cfg)
-    pg_commands = _native_pg_commands_bat("pg_dump")
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DB_NAME={configured_db_name}"
-{pg_env}
-
-for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
-if "%~1"=="" (
-  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%.dump"
-) else (
-  for %%I in ("%~1") do set "OUTPUT=%%~fI"
-)
-for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
-set "TMP_OUTPUT=%OUTPUT%.tmp"
-
-{pg_commands}
-cd /d "%ROOT_DIR%" || exit /b 1
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if errorlevel 1 exit /b 1
-if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-
-echo INFO: Backing up PostgreSQL database '%DB_NAME%' to '%OUTPUT%'.
-"%PG_DUMP%" --format=custom --no-owner --no-acl "%DB_NAME%" > "%TMP_OUTPUT%"
-if errorlevel 1 (
-  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-  exit /b 1
-)
-move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
-if errorlevel 1 exit /b 1
-
-echo INFO: Database backup created: %OUTPUT%
-endlocal
-"""
-    return _write_script(layout, "backup-db", "bat", content)
-
-
-def write_native_restore_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    pg_env = _native_pg_env_bat(cfg)
-    pg_commands = _native_pg_commands_bat("psql", "dropdb", "createdb", "pg_restore")
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf"
-set "CLICK_ODOO=%ROOT_DIR%\venv\Scripts\click-odoo.exe"
-set "DB_NAME={configured_db_name}"
-{pg_env}
-set "FORCE=false"
-set "RESTORE_MODE=copy"
-set "SOURCE="
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-if /i "%~1"=="--copy" goto copy_arg
-if /i "%~1"=="--move" goto move_arg
-set "ARG=%~1"
-if "%ARG:~0,1%"=="-" goto unknown_option
-if defined SOURCE goto usage_error
-set "SOURCE=%~1"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:copy_arg
-set "RESTORE_MODE=copy"
-shift
-goto parse_args
-
-:move_arg
-set "RESTORE_MODE=move"
-shift
-goto parse_args
-
-:args_done
-if not defined SOURCE goto usage_error
-if not exist "%SOURCE%" (
-  echo ERROR: database backup not found: %SOURCE%
-  exit /b 1
-)
-for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
-
-{pg_commands}
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "DATABASES_FILE=%TEMP%\odt-env-databases-%RANDOM%-%RANDOM%.txt"
-"%PSQL%" -X -d postgres -Atqc "SELECT datname FROM pg_database" > "%DATABASES_FILE%"
-if errorlevel 1 (
-  del /q "%DATABASES_FILE%" >nul 2>&1
-  exit /b 1
-)
-set "DB_EXISTS=false"
-for /f "usebackq delims=" %%D in ("%DATABASES_FILE%") do (
-  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
-)
-del /q "%DATABASES_FILE%" >nul 2>&1
-
-if "%DB_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-if /i "%RESTORE_MODE%"=="copy" (
-  if not exist "%CLICK_ODOO%" (
-    echo ERROR: click-odoo not found at %CLICK_ODOO%
-    exit /b 1
-  )
-  if not exist "%CONF%" (
-    echo ERROR: Odoo config not found at %CONF%
-    exit /b 1
-  )
-)
-
-echo INFO: Restoring PostgreSQL database '%DB_NAME%' from '%SOURCE%'.
-echo INFO: Stop the Odoo service first when restoring a database that is currently in use.
-if "%DB_EXISTS%"=="true" (
-  "%DROPDB%" --force --maintenance-db=postgres "%DB_NAME%"
-  if errorlevel 1 exit /b 1
-)
-"%CREATEDB%" --maintenance-db=postgres "%DB_NAME%"
-if errorlevel 1 exit /b 1
-"%PG_RESTORE%" --verbose --exit-on-error --no-owner --no-acl -d "%DB_NAME%" < "%SOURCE%"
-if errorlevel 1 exit /b 1
-
-if /i "%RESTORE_MODE%"=="move" goto restore_done
-
-echo INFO: Resetting copied Odoo database identity for '%DB_NAME%'.
-echo env["ir.config_parameter"].init(force=True^) | "%CLICK_ODOO%" -c "%CONF%" -d "%DB_NAME%" --log-level=error
-if errorlevel 1 exit /b 1
-
-"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code'; UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo'; UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';"
-if errorlevel 1 exit /b 1
-goto restore_done
-
-:restore_done
-if /i "%RESTORE_MODE%"=="move" echo INFO: Preserving Odoo database identity (--move).
-echo INFO: Database restore completed: %DB_NAME%
-endlocal
-exit /b 0
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] [--copy^|--move] BACKUP.dump
-exit /b 2
-"""
-    return _write_script(layout, "restore-db", "bat", content)
-
-
-def write_native_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    odoo_bin = _script_odoo_bin_bat(layout)
-    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
-    if odoo_major_version >= 16:
-        neutralize_command = rf"""if not exist "%PY%" (
-  echo ERROR: venv python not found at %PY%
-  exit /b 1
-)
-if not exist "%ODOO_BIN%" (
-  echo ERROR: odoo-bin not found at %ODOO_BIN%
-  exit /b 1
-)
-if not exist "%CONF%" (
-  echo ERROR: Odoo config not found at %CONF%
-  exit /b 1
-)
-echo INFO: Using native Odoo neutralization for Odoo {odoo_major_version}.
-"%PY%" "%ODOO_BIN%" neutralize -c "%CONF%" -d "%DB_NAME%"
-if errorlevel 1 exit /b 1
-"""
-    else:
-        neutralize_command = rf"""echo INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}.
-
-echo INFO: Disabling scheduled actions.
-"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;"
-if errorlevel 1 exit /b 1
-
-echo INFO: Disabling outgoing mail servers.
-"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;"
-if errorlevel 1 exit /b 1
-
-echo INFO: Disabling incoming mail servers if fetchmail is installed.
-"%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%" -c "DO $$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END $$;"
-if errorlevel 1 exit /b 1
-"""
-
-    pg_env = _native_pg_env_bat(cfg)
-    pg_commands = _native_pg_commands_bat("psql")
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "PY=%ROOT_DIR%\venv\Scripts\python.exe"
-set "ODOO_BIN={odoo_bin}"
-set "CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf"
-set "DB_NAME={configured_db_name}"
-{pg_env}
-set "NEUTRALIZE_DIR=%ROOT_DIR%\neutralize"
-
-{pg_commands}
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "DATABASES_FILE=%TEMP%\odt-env-databases-%RANDOM%-%RANDOM%.txt"
-"%PSQL%" -X -d postgres -Atqc "SELECT datname FROM pg_database" > "%DATABASES_FILE%"
-if errorlevel 1 (
-  del /q "%DATABASES_FILE%" >nul 2>&1
-  exit /b 1
-)
-set "DB_EXISTS=false"
-for /f "usebackq delims=" %%D in ("%DATABASES_FILE%") do (
-  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
-)
-del /q "%DATABASES_FILE%" >nul 2>&1
-
-if not "%DB_EXISTS%"=="true" (
-  echo ERROR: target database '%DB_NAME%' does not exist.
-  exit /b 1
-)
-
-echo INFO: Neutralizing Odoo database '%DB_NAME%'.
-{neutralize_command}
-if exist "%NEUTRALIZE_DIR%\." (
-  for /f "delims=" %%F in ('dir /b /a-d /on "%NEUTRALIZE_DIR%\*.sql" 2^>nul') do (
-    echo INFO: Running workspace neutralization script: %%F
-    type "%NEUTRALIZE_DIR%\%%F" | "%PSQL%" -X -v ON_ERROR_STOP=1 -d "%DB_NAME%"
-    if errorlevel 1 exit /b 1
-  )
-)
-
-echo INFO: Database neutralization completed: %DB_NAME%
-endlocal
-exit /b 0
-"""
-    return _write_script(layout, "neutralize-db", "bat", content)
-
-
-def write_native_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    configured_data_dir = _native_filestore_data_dir_bat(layout)
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DB_NAME={configured_db_name}"
-set "DATA_DIR={configured_data_dir}"
-set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
-
-for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
-if "%~1"=="" (
-  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%_filestore.tar.gz"
-) else (
-  for %%I in ("%~1") do set "OUTPUT=%%~fI"
-)
-for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
-set "TMP_OUTPUT=%OUTPUT%.tmp"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if errorlevel 1 exit /b 1
-if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-
-echo INFO: Backing up filestore for database '%DB_NAME%' to '%OUTPUT%'.
-tar -C "%FILESTORE_PATH%" -czf - . > "%TMP_OUTPUT%"
-if errorlevel 1 (
-  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-  exit /b 1
-)
-move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
-if errorlevel 1 exit /b 1
-
-echo INFO: Filestore backup created: %OUTPUT%
-endlocal
-"""
-    return _write_script(layout, "backup-filestore", "bat", content)
-
-
-def write_native_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    configured_data_dir = _native_filestore_data_dir_bat(layout)
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-set "DATA_DIR={configured_data_dir}"
-set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
-set "FORCE=false"
-set "SOURCE="
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-set "ARG=%~1"
-if "%ARG:~0,1%"=="-" goto unknown_option
-if defined SOURCE goto usage_error
-set "SOURCE=%~1"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:args_done
-if not defined SOURCE goto usage_error
-if not exist "%SOURCE%" (
-  echo ERROR: filestore backup not found: %SOURCE%
-  exit /b 1
-)
-for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "FILESTORE_EXISTS=false"
-if exist "%FILESTORE_PATH%" set "FILESTORE_EXISTS=true"
-
-if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-echo INFO: Restoring filestore for database '%DB_NAME%' from '%SOURCE%'.
-echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
-if exist "%FILESTORE_PATH%" rmdir /s /q "%FILESTORE_PATH%"
-if errorlevel 1 exit /b 1
-mkdir "%FILESTORE_PATH%"
-if errorlevel 1 exit /b 1
-tar -xzf - -C "%FILESTORE_PATH%" < "%SOURCE%"
-if errorlevel 1 exit /b 1
-
-echo INFO: Filestore restore completed: %DB_NAME%
-endlocal
-exit /b 0
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] FILESTORE.tar.gz
-exit /b 2
-"""
-    return _write_script(layout, "restore-filestore", "bat", content)
-
-
-def write_native_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    configured_data_dir = _native_filestore_data_dir_bat(layout)
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DB_NAME={configured_db_name}"
-if defined RESTIC_HOST (
-  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
-) else (
-  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
-)
-set "DATA_DIR={configured_data_dir}"
-set "FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
-
-if not exist "%RESTIC%" (
-  echo ERROR: restic helper not found: %RESTIC%
-  exit /b 1
-)
-
-echo INFO: Backing up filestore for database '%DB_NAME%' with restic.
-if defined RESTIC_BACKUP_ID goto with_backup_id
-
-call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" %* "%FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:with_backup_id
-call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" --tag "backup-id:%RESTIC_BACKUP_ID%" %* "%FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-"""
-    return _write_script(layout, "backup-filestore-restic", "bat", content)
-
-
-def write_native_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _native_default_db_name(cfg).replace("%", "%%")
-    configured_data_dir = _native_filestore_data_dir_bat(layout)
-    restic_command = _native_restic_command_bat()
-    content = rf"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DB_NAME={configured_db_name}"
-if defined RESTIC_SOURCE_DB_NAME (
-  set "SOURCE_DB_NAME=%RESTIC_SOURCE_DB_NAME%"
-) else (
-  set "SOURCE_DB_NAME=%DB_NAME%"
-)
-if defined RESTIC_HOST (
-  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
-) else (
-  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
-)
-set "FORCE=false"
-set "SNAPSHOT=latest"
-set "SNAPSHOT_SET=false"
-set "DATA_DIR={configured_data_dir}"
-set "SOURCE_FILESTORE_PATH=%DATA_DIR%\filestore\%SOURCE_DB_NAME%"
-set "TARGET_FILESTORE_PATH=%DATA_DIR%\filestore\%DB_NAME%"
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-set "ARG=%~1"
-if "%ARG:~0,1%"=="-" goto unknown_option
-if /i "%SNAPSHOT_SET%"=="true" goto usage_error
-set "SNAPSHOT=%~1"
-set "SNAPSHOT_SET=true"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:args_done
-if not exist "%RESTIC%" (
-  echo ERROR: restic helper not found: %RESTIC%
-  exit /b 1
-)
-
-{restic_command}
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "FILESTORE_EXISTS=false"
-if exist "%TARGET_FILESTORE_PATH%" set "FILESTORE_EXISTS=true"
-
-if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-echo INFO: Restoring filestore for database '%DB_NAME%' from restic snapshot '%SNAPSHOT%'.
-echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
-
-if exist "%TARGET_FILESTORE_PATH%" rmdir /s /q "%TARGET_FILESTORE_PATH%"
-if errorlevel 1 exit /b 1
-mkdir "%TARGET_FILESTORE_PATH%"
-if errorlevel 1 exit /b 1
-set "SOURCE_TREE_PATH=%SOURCE_FILESTORE_PATH:\=/%"
-set "SOURCE_TREE_PATH=/%SOURCE_TREE_PATH::=%"
-
-if /i "%SNAPSHOT%"=="latest" goto restore_latest
-call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_TREE_PATH%" --target "%TARGET_FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:restore_latest
-call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_TREE_PATH%" --target "%TARGET_FILESTORE_PATH%" --host "%RESTIC_HOST_NAME%" --path "%SOURCE_FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] [SNAPSHOT]
-exit /b 2
-"""
-    return _write_script(layout, "restore-filestore-restic", "bat", content)
-
-
-def write_native_restic_bat(layout: Layout) -> Path:
-    content = r"""@echo off
-setlocal DisableDelayedExpansion
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..") do set "ROOT_DIR=%%~fI"
-if "%~1"=="" (
-  echo Usage: %~nx0 RESTIC_COMMAND [ARGS...]
-  exit /b 2
-)
-__RESTIC_COMMAND__
-if not defined RESTIC_REPOSITORY (
-  echo ERROR: RESTIC_REPOSITORY is not set.
-  exit /b 1
-)
-cd /d "%ROOT_DIR%" || exit /b 1
-if defined RESTIC_PASSWORD_FILE goto password_file
-if defined RESTIC_PASSWORD goto run_restic
-echo ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD.
-exit /b 1
-
-:password_file
-if not exist "%RESTIC_PASSWORD_FILE%" (
-  echo ERROR: RESTIC_PASSWORD_FILE not found: %RESTIC_PASSWORD_FILE%
-  exit /b 1
-)
-
-:run_restic
-"%RESTIC_EXE%" %*
-exit /b %ERRORLEVEL%
-"""
-    content = content.replace("__RESTIC_COMMAND__", _native_restic_command_bat())
-    return _write_script(layout, "restic", "bat", content)
-
-
-def write_native_backup_scripts(layout: Layout, cfg: ProjectConfig, *, windows: bool) -> None:
-    if windows:
-        write_native_backup_db_bat(layout, cfg)
-        write_native_restore_db_bat(layout, cfg)
-        write_native_neutralize_db_bat(layout, cfg)
-        write_native_backup_filestore_bat(layout, cfg)
-        write_native_restore_filestore_bat(layout, cfg)
-        write_native_backup_filestore_restic_bat(layout, cfg)
-        write_native_restore_filestore_restic_bat(layout, cfg)
-        write_native_restic_bat(layout)
-    else:
-        write_native_backup_db_sh(layout, cfg)
-        write_native_restore_db_sh(layout, cfg)
-        write_native_neutralize_db_sh(layout, cfg)
-        write_native_backup_filestore_sh(layout, cfg)
-        write_native_restore_filestore_sh(layout, cfg)
-        write_native_backup_filestore_restic_sh(layout, cfg)
-        write_native_restore_filestore_restic_sh(layout, cfg)
-        write_native_restic_sh(layout)
-
-
-def write_update_sh(layout: Layout) -> None:
-    content = f"""#!/usr/bin/env bash
-set -euo pipefail
-
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/.." && pwd)"
-
-VENV_DIR="${{ROOT_DIR}}/venv"
-UPDATE_BIN="${{VENV_DIR}}/bin/click-odoo-update"
-CONF="${{ROOT_DIR}}/odoo-configs/odoo-server.conf"
-
-if [[ ! -d "${{VENV_DIR}}" ]]; then
-  echo "ERROR: required venv directory not found at ${{VENV_DIR}}" >&2
-  exit 1
-fi
-if [[ ! -x "${{UPDATE_BIN}}" ]]; then
-  echo "ERROR: click-odoo-update not found/executable at ${{UPDATE_BIN}}" >&2
-  exit 1
-fi
-if [[ ! -f "${{CONF}}" ]]; then
-  echo "ERROR: Odoo config not found at ${{CONF}}" >&2
-  exit 1
-fi
-
-echo "INFO: Updating Odoo addons using config ${{CONF}}. Passing through any extra arguments."
-exec "${{UPDATE_BIN}}" -c "${{CONF}}" --log-level debug "$@"
-"""
-    _write_script(layout, "update", "sh", content)
-
-
-def write_update_bat(layout: Layout) -> None:
-    content = rf"""@echo off
-setlocal enabledelayedexpansion
-
-REM Resolve ROOT directory (parent of this script directory)
-set SCRIPT_DIR=%~dp0
-if "%SCRIPT_DIR:~-1%"=="\" set SCRIPT_DIR=%SCRIPT_DIR:~0,-1%
-for %%I in ("%SCRIPT_DIR%\..") do set ROOT_DIR=%%~fI
-
-set VENV_DIR=%ROOT_DIR%\venv
-set UPDATE_BIN=%VENV_DIR%\Scripts\click-odoo-update.exe
-set CONF=%ROOT_DIR%\odoo-configs\odoo-server.conf
-
-if not exist "%VENV_DIR%" (
-  echo ERROR: required venv directory not found at %VENV_DIR%
-  exit /b 1
-)
-if not exist "%UPDATE_BIN%" (
-  echo ERROR: click-odoo-update not found at %UPDATE_BIN%
-  exit /b 1
-)
-if not exist "%CONF%" (
-  echo ERROR: Odoo config not found at %CONF%
-  exit /b 1
-)
-
-echo INFO: Updating Odoo addons using config %CONF%. Passing through any extra arguments.
-"%UPDATE_BIN%" -c "%CONF%" --log-level debug %*
-
-endlocal
-"""
-    _write_script(layout, "update", "bat", content)
-
-
-# -----------------------------
 # Docker artifact generation
 # -----------------------------
 
@@ -4177,14 +2591,6 @@ def _docker_odoo_dir(docker_context_dir: Path) -> Path:
 
 def _docker_odoo_conf_path(docker_context_dir: Path) -> Path:
     return _docker_configs_dir(docker_context_dir) / "odoo.conf"
-
-
-def _docker_scripts_dir(docker_context_dir: Path) -> Path:
-    return docker_context_dir / "scripts"
-
-
-def _docker_script_path(docker_context_dir: Path, name: str, ext: str = "sh") -> Path:
-    return _docker_scripts_dir(docker_context_dir) / f"{name}.{ext}"
 
 
 def _docker_compose_path(layout: Layout) -> Path:
@@ -4787,1261 +3193,33 @@ def _docker_default_db_name(cfg: ProjectConfig) -> str:
     return db_name
 
 
-def _write_docker_local_script(
-        layout: Layout,
-        name: str,
-        content: str,
-        ext: str = "sh",
-) -> Path:
-    path = _docker_script_path(layout.docker_local_dir, name, ext)
-    _write_text_file(
-        path,
-        content,
-        executable=(ext == "sh"),
-        crlf=(ext == "bat"),
-    )
-    return path
-
-
-def write_docker_backup_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DB_NAME={configured_db_name}
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}.dump}}"
-TMP_OUTPUT="${{OUTPUT}}.tmp"
-
-cd "${{ROOT_DIR}}"
-mkdir -p "$(dirname "${{OUTPUT}}")"
-rm -f "${{TMP_OUTPUT}}"
-trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
-
-echo "INFO: Backing up PostgreSQL database '${{DB_NAME}}' to '${{OUTPUT}}'."
-"${{DOCKER[@]}}" compose exec -T db \
-  pg_dump --format=custom --no-owner --no-acl -U odoo "${{DB_NAME}}" \
-  > "${{TMP_OUTPUT}}"
-
-mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
-trap - EXIT
-echo "INFO: Database backup created: ${{OUTPUT}}"
-"""
-    return _write_docker_local_script(layout, "backup-db", content)
-
-
-def write_docker_restore_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-FORCE=false
-RESTORE_MODE=copy
-SOURCE=""
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] [--copy|--move] BACKUP.dump" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    --copy)
-      RESTORE_MODE=copy
-      ;;
-    --move)
-      RESTORE_MODE=move
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ -n "${{SOURCE}}" ]]; then
-        usage
-        exit 2
-      fi
-      SOURCE="$1"
-      ;;
-  esac
-  shift
-done
-
-if [[ -z "${{SOURCE}}" ]]; then
-  usage
-  exit 2
-fi
-
-if [[ ! -f "${{SOURCE}}" ]]; then
-  echo "ERROR: database backup not found: ${{SOURCE}}" >&2
-  exit 1
-fi
-SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
-
-cd "${{ROOT_DIR}}"
-
-DB_EXISTS=false
-DATABASES="$("${{DOCKER[@]}}" compose exec -T db \
-  psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
-if grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
-  DB_EXISTS=true
-fi
-
-if [[ "${{DB_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-echo "INFO: Restoring PostgreSQL database '${{DB_NAME}}' from '${{SOURCE}}'."
-echo "INFO: Stop the Odoo service first when restoring a database that is currently in use."
-if [[ "${{DB_EXISTS}}" == true ]]; then
-  "${{DOCKER[@]}}" compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "${{DB_NAME}}"
-fi
-"${{DOCKER[@]}}" compose exec -T db createdb -U odoo --maintenance-db=postgres "${{DB_NAME}}"
-"${{DOCKER[@]}}" compose exec -T db \
-  pg_restore --verbose --exit-on-error --no-owner --no-acl -U odoo -d "${{DB_NAME}}" \
-  < "${{SOURCE}}"
-
-if [[ "${{RESTORE_MODE}}" == "copy" ]]; then
-  echo "INFO: Resetting copied Odoo database identity for '${{DB_NAME}}'."
-  printf '%s\n' 'env["ir.config_parameter"].init(force=True)' | \
-    "${{DOCKER[@]}}" compose run --rm --no-deps -T \
-      --entrypoint click-odoo odoo \
-      -c /etc/odoo/odoo.conf \
-      -d "${{DB_NAME}}" \
-      --log-level=error
-
-  "${{DOCKER[@]}}" compose exec -T db \
-    psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" <<'SQL'
-DELETE FROM ir_config_parameter
-WHERE key = 'database.enterprise_code';
-
-UPDATE ir_config_parameter
-SET value = 'copy'
-WHERE key = 'database.expiration_reason'
-  AND value != 'demo';
-
-UPDATE ir_config_parameter
-SET value = CURRENT_DATE + INTERVAL '2 month'
-WHERE key = 'database.expiration_date';
-SQL
-else
-  echo "INFO: Preserving Odoo database identity (--move)."
-fi
-
-echo "INFO: Database restore completed: ${{DB_NAME}}"
-"""
-    return _write_docker_local_script(layout, "restore-db", content)
-
-
-def write_docker_run_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-
-cd "${{ROOT_DIR}}"
-
-echo "INFO: Running Odoo for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec "${{DOCKER[@]}}" compose run --rm --no-deps odoo \
-  -- \
-  -c /etc/odoo/odoo.conf \
-  -d "${{DB_NAME}}" \
-  "$@"
-"""
-    return _write_docker_local_script(layout, "run", content)
-
-
-def write_docker_shell_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-
-cd "${{ROOT_DIR}}"
-
-echo "INFO: Opening Odoo shell for database '${{DB_NAME}}'."
-exec "${{DOCKER[@]}}" compose run --rm --no-deps \
-  --entrypoint odoo odoo \
-  shell \
-  -c /etc/odoo/odoo.conf \
-  -d "${{DB_NAME}}" \
-  "$@"
-"""
-    return _write_docker_local_script(layout, "shell", content)
-
-
-def write_docker_update_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-
-cd "${{ROOT_DIR}}"
-
-echo "INFO: Updating Odoo addons for database '${{DB_NAME}}'. Passing through any extra arguments."
-exec "${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  --entrypoint click-odoo-update odoo \
-  -c /etc/odoo/odoo.conf \
-  -d "${{DB_NAME}}" \
-  --log-level debug \
-  "$@"
-"""
-    return _write_docker_local_script(layout, "update", content)
-
-
-def write_docker_neutralize_db_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
-    if odoo_major_version >= 16:
-        neutralize_command = rf"""
-echo "INFO: Using native Odoo neutralization for Odoo {odoo_major_version}. "
-"${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  --entrypoint odoo odoo \
-  neutralize \
-  -c /etc/odoo/odoo.conf \
-  -d "${{DB_NAME}}"
-"""
-    else:
-        neutralize_command = rf"""
-echo "INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}."
-
-echo "INFO: Disabling scheduled actions."
-"${{DOCKER[@]}}" compose exec -T db \
-  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
-  -c 'UPDATE ir_cron SET active = FALSE WHERE active = TRUE;'
-
-echo "INFO: Disabling outgoing mail servers."
-"${{DOCKER[@]}}" compose exec -T db \
-  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
-  -c 'UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;'
-
-echo "INFO: Disabling incoming mail servers if fetchmail is installed."
-"${{DOCKER[@]}}" compose exec -T db \
-  psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" \
-  -c "DO \$\$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END \$\$;"
-"""
-
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-NEUTRALIZE_DIR="${{ROOT_DIR}}/neutralize"
-
-cd "${{ROOT_DIR}}"
-
-DATABASES="$("${{DOCKER[@]}}" compose exec -T db \
-  psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database")"
-if ! grep -Fxq "${{DB_NAME}}" <<< "${{DATABASES}}"; then
-  echo "ERROR: target database '${{DB_NAME}}' does not exist." >&2
-  exit 1
-fi
-
-echo "INFO: Neutralizing Odoo database '${{DB_NAME}}'."
-{neutralize_command}
-if [[ -d "${{NEUTRALIZE_DIR}}" ]]; then
-  shopt -s nullglob
-  NEUTRALIZE_SQL_FILES=("${{NEUTRALIZE_DIR}}"/*.sql)
-  shopt -u nullglob
-  for SQL_FILE in "${{NEUTRALIZE_SQL_FILES[@]}}"; do
-    echo "INFO: Running workspace neutralization script: ${{SQL_FILE##*/}}"
-    "${{DOCKER[@]}}" compose exec -T db \
-      psql -v ON_ERROR_STOP=1 -U odoo -d "${{DB_NAME}}" < "${{SQL_FILE}}"
-  done
-fi
-
-echo "INFO: Database neutralization completed: ${{DB_NAME}}"
-"""
-    return _write_docker_local_script(layout, "neutralize-db", content)
-
-
-def write_docker_backup_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-BACKUPS_DIR="${{ROOT_DIR}}/odoo-backups"
-DB_NAME={configured_db_name}
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUTPUT="${{1:-${{BACKUPS_DIR}}/${{DB_NAME}}_${{TIMESTAMP}}_filestore.tar.gz}}"
-TMP_OUTPUT="${{OUTPUT}}.tmp"
-
-cd "${{ROOT_DIR}}"
-mkdir -p "$(dirname "${{OUTPUT}}")"
-rm -f "${{TMP_OUTPUT}}"
-trap 'rm -f "${{TMP_OUTPUT}}"' EXIT
-
-echo "INFO: Backing up filestore for database '${{DB_NAME}}' to '${{OUTPUT}}'."
-"${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  --entrypoint tar odoo \
-  -C "/var/lib/odoo/filestore/${{DB_NAME}}" -czf - . \
-  > "${{TMP_OUTPUT}}"
-
-mv "${{TMP_OUTPUT}}" "${{OUTPUT}}"
-trap - EXIT
-echo "INFO: Filestore backup created: ${{OUTPUT}}"
-"""
-    return _write_docker_local_script(layout, "backup-filestore", content)
-
-
-def write_docker_restore_filestore_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr"""#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-DB_NAME={configured_db_name}
-FORCE=false
-SOURCE=""
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] FILESTORE.tar.gz" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ -n "${{SOURCE}}" ]]; then
-        usage
-        exit 2
-      fi
-      SOURCE="$1"
-      ;;
-  esac
-  shift
-done
-
-if [[ -z "${{SOURCE}}" ]]; then
-  usage
-  exit 2
-fi
-
-if [[ ! -f "${{SOURCE}}" ]]; then
-  echo "ERROR: filestore backup not found: ${{SOURCE}}" >&2
-  exit 1
-fi
-SOURCE="$(cd "$(dirname "${{SOURCE}}")" && pwd)/$(basename "${{SOURCE}}")"
-
-cd "${{ROOT_DIR}}"
-
-FILESTORE_EXISTS=false
-FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  -e DB_NAME="${{DB_NAME}}" \
-  --entrypoint sh odoo \
-  -c 'if [ -d "/var/lib/odoo/filestore/${{DB_NAME}}" ]; then echo exists; else echo missing; fi')"
-if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
-  FILESTORE_EXISTS=true
-fi
-
-if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-echo "INFO: Restoring filestore for database '${{DB_NAME}}' from '${{SOURCE}}'."
-echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
-"${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  -e DB_NAME="${{DB_NAME}}" \
-  --entrypoint sh odoo \
-  -c 'set -eu
-target="/var/lib/odoo/filestore/${{DB_NAME}}"
-rm -rf "${{target}}"
-mkdir -p "${{target}}"
-tar -xzf - -C "${{target}}"' \
-  < "${{SOURCE}}"
-
-echo "INFO: Filestore restore completed: ${{DB_NAME}}"
-"""
-    return _write_docker_local_script(layout, "restore-filestore", content)
-
-
-def write_docker_restic_sh(layout: Layout) -> Path:
-    content = r'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${ODOO_DOCKER_SUDO:-0}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $(basename "$0") RESTIC_COMMAND [ARGS...]" >&2
-  exit 2
-fi
-
-if [[ -z "${RESTIC_REPOSITORY:-}" ]]; then
-  echo "ERROR: RESTIC_REPOSITORY is not set." >&2
-  exit 1
-fi
-
-cd "${ROOT_DIR}"
-
-DOCKER_ARGS=(
-  compose run --rm --no-deps -T
-  --user 0:0
-  -e RESTIC_REPOSITORY
-  -e RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic
-)
-
-# Absolute local repository paths refer to the Docker host. Mount the same
-# path into the one-off container so RESTIC_REPOSITORY works unchanged.
-if [[ "${RESTIC_REPOSITORY}" == /* ]]; then
-  mkdir -p "${RESTIC_REPOSITORY}"
-  DOCKER_ARGS+=( -v "${RESTIC_REPOSITORY}:${RESTIC_REPOSITORY}" )
-elif [[ "${RESTIC_REPOSITORY}" != *:* ]]; then
-  echo "ERROR: local RESTIC_REPOSITORY must be an absolute host path." >&2
-  exit 1
-fi
-
-if [[ -n "${RESTIC_PASSWORD_FILE:-}" ]]; then
-  if [[ ! -f "${RESTIC_PASSWORD_FILE}" ]]; then
-    echo "ERROR: RESTIC_PASSWORD_FILE not found: ${RESTIC_PASSWORD_FILE}" >&2
-    exit 1
-  fi
-  RESTIC_PASSWORD_FILE_ABS="$(cd "$(dirname "${RESTIC_PASSWORD_FILE}")" && pwd)/$(basename "${RESTIC_PASSWORD_FILE}")"
-  DOCKER_ARGS+=(
-    -v "${RESTIC_PASSWORD_FILE_ABS}:${RESTIC_PASSWORD_FILE_ABS}:ro"
-    -e "RESTIC_PASSWORD_FILE=${RESTIC_PASSWORD_FILE_ABS}"
-  )
-elif [[ -n "${RESTIC_PASSWORD:-}" ]]; then
-  DOCKER_ARGS+=( -e RESTIC_PASSWORD )
-else
-  echo "ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD." >&2
-  exit 1
-fi
-
-exec "${DOCKER[@]}" "${DOCKER_ARGS[@]}" --entrypoint restic odoo "$@"
-'''
-    return _write_docker_local_script(layout, "restic", content)
-
-
-def write_docker_backup_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DB_NAME={configured_db_name}
-RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
-
-if [[ ! -x "${{RESTIC}}" ]]; then
-  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
-  exit 1
-fi
-
-EXTRA_TAG_ARGS=()
-if [[ -n "${{RESTIC_BACKUP_ID:-}}" ]]; then
-  EXTRA_TAG_ARGS+=(--tag "backup-id:${{RESTIC_BACKUP_ID}}")
-fi
-
-echo "INFO: Backing up filestore for database '${{DB_NAME}}' with restic."
-"${{RESTIC}}" backup \
-  --host "${{RESTIC_HOST_NAME}}" \
-  --tag odoo \
-  --tag filestore \
-  --tag "db:${{DB_NAME}}" \
-  "${{EXTRA_TAG_ARGS[@]}}" \
-  "$@" \
-  "${{FILESTORE_PATH}}"
-'''
-    return _write_docker_local_script(layout, "backup-filestore-restic", content)
-
-
-def write_docker_restore_filestore_restic_sh(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = shlex.quote(_docker_default_db_name(cfg))
-    content = fr'''#!/usr/bin/env bash
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
-ROOT_DIR="$(cd "${{SCRIPT_DIR}}/../../.." && pwd)"
-
-DOCKER=(docker)
-if [[ "${{ODOO_DOCKER_SUDO:-0}}" == "1" ]]; then
-  DOCKER=(sudo docker)
-fi
-RESTIC="${{SCRIPT_DIR}}/restic.sh"
-DB_NAME={configured_db_name}
-SOURCE_DB_NAME="${{RESTIC_SOURCE_DB_NAME:-${{DB_NAME}}}}"
-RESTIC_HOST_NAME="${{RESTIC_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
-FORCE=false
-SNAPSHOT="latest"
-SNAPSHOT_SET=false
-SOURCE_FILESTORE_PATH="/var/lib/odoo/filestore/${{SOURCE_DB_NAME}}"
-TARGET_FILESTORE_PATH="/var/lib/odoo/filestore/${{DB_NAME}}"
-
-usage() {{
-  echo "Usage: $(basename "$0") [--force] [SNAPSHOT]" >&2
-}}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --force)
-      FORCE=true
-      ;;
-    -*)
-      echo "ERROR: unknown option: $1" >&2
-      usage
-      exit 2
-      ;;
-    *)
-      if [[ "${{SNAPSHOT_SET}}" == true ]]; then
-        usage
-        exit 2
-      fi
-      SNAPSHOT="$1"
-      SNAPSHOT_SET=true
-      ;;
-  esac
-  shift
-done
-
-if [[ ! -x "${{RESTIC}}" ]]; then
-  echo "ERROR: restic helper not found: ${{RESTIC}}" >&2
-  exit 1
-fi
-
-cd "${{ROOT_DIR}}"
-
-FILESTORE_EXISTS=false
-FILESTORE_STATE="$("${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  --user 0:0 \
-  -e DB_NAME="${{DB_NAME}}" \
-  --entrypoint sh odoo \
-  -c 'if [ -d "/var/lib/odoo/filestore/${{DB_NAME}}" ]; then echo exists; else echo missing; fi')"
-if [[ "${{FILESTORE_STATE}}" == "exists" ]]; then
-  FILESTORE_EXISTS=true
-fi
-
-if [[ "${{FILESTORE_EXISTS}}" == true && "${{FORCE}}" != true ]]; then
-  echo "ERROR: target filestore for database '${{DB_NAME}}' already exists. Use --force to replace it." >&2
-  exit 1
-fi
-
-echo "INFO: Restoring filestore for database '${{DB_NAME}}' from restic snapshot '${{SNAPSHOT}}'."
-echo "INFO: Stop the Odoo service first when restoring a filestore that is currently in use."
-
-"${{DOCKER[@]}}" compose run --rm --no-deps -T \
-  --user 0:0 \
-  -e DB_NAME="${{DB_NAME}}" \
-  --entrypoint sh odoo \
-  -c 'set -eu
-rm -rf "/var/lib/odoo/filestore/${{DB_NAME}}"
-mkdir -p "/var/lib/odoo/filestore/${{DB_NAME}}"'
-
-RESTORE_ARGS=(restore "${{SNAPSHOT}}:${{SOURCE_FILESTORE_PATH}}" --target "${{TARGET_FILESTORE_PATH}}")
-if [[ "${{SNAPSHOT}}" == "latest" ]]; then
-  RESTORE_ARGS+=(--host "${{RESTIC_HOST_NAME}}" --path "${{SOURCE_FILESTORE_PATH}}")
-fi
-
-"${{RESTIC}}" "${{RESTORE_ARGS[@]}}"
-
-echo "INFO: Restic filestore restore completed: ${{DB_NAME}}"
-'''
-    return _write_docker_local_script(layout, "restore-filestore-restic", content)
-
-
-def write_docker_backup_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DB_NAME={configured_db_name}"
-
-for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
-if "%~1"=="" (
-  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%.dump"
-) else (
-  for %%I in ("%~1") do set "OUTPUT=%%~fI"
-)
-for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
-set "TMP_OUTPUT=%OUTPUT%.tmp"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if errorlevel 1 exit /b 1
-if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-
-echo INFO: Backing up PostgreSQL database '%DB_NAME%' to '%OUTPUT%'.
-docker compose exec -T db pg_dump --format=custom --no-owner --no-acl -U odoo "%DB_NAME%" > "%TMP_OUTPUT%"
-if errorlevel 1 (
-  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-  exit /b 1
-)
-move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
-if errorlevel 1 exit /b 1
-
-echo INFO: Database backup created: %OUTPUT%
-endlocal
-"""
-    return _write_docker_local_script(layout, "backup-db", content, ext="bat")
-
-
-def write_docker_restore_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-set "FORCE=false"
-set "RESTORE_MODE=copy"
-set "SOURCE="
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-if /i "%~1"=="--copy" goto copy_arg
-if /i "%~1"=="--move" goto move_arg
-if "%~1:~0,1%"=="-" goto unknown_option
-if defined SOURCE goto usage_error
-set "SOURCE=%~1"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:copy_arg
-set "RESTORE_MODE=copy"
-shift
-goto parse_args
-
-:move_arg
-set "RESTORE_MODE=move"
-shift
-goto parse_args
-
-:args_done
-if not defined SOURCE goto usage_error
-if not exist "%SOURCE%" (
-  echo ERROR: database backup not found: %SOURCE%
-  exit /b 1
-)
-for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "DB_EXISTS=false"
-for /f "usebackq delims=" %%D in (`docker compose exec -T db psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database"`) do (
-  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
-)
-
-if "%DB_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-echo INFO: Restoring PostgreSQL database '%DB_NAME%' from '%SOURCE%'.
-echo INFO: Stop the Odoo service first when restoring a database that is currently in use.
-if "%DB_EXISTS%"=="true" (
-  docker compose exec -T db dropdb --force -U odoo --maintenance-db=postgres "%DB_NAME%"
-  if errorlevel 1 exit /b 1
-)
-docker compose exec -T db createdb -U odoo --maintenance-db=postgres "%DB_NAME%"
-if errorlevel 1 exit /b 1
-docker compose exec -T db pg_restore --verbose --exit-on-error --no-owner --no-acl -U odoo -d "%DB_NAME%" < "%SOURCE%"
-if errorlevel 1 exit /b 1
-
-if /i "%RESTORE_MODE%"=="move" goto restore_done
-
-echo INFO: Resetting copied Odoo database identity for '%DB_NAME%'.
-echo env["ir.config_parameter"].init(force=True^) | docker compose run --rm --no-deps -T --entrypoint click-odoo odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level=error
-if errorlevel 1 exit /b 1
-
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code'; UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo'; UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';"
-if errorlevel 1 exit /b 1
-goto restore_done
-
-:restore_done
-if /i "%RESTORE_MODE%"=="move" echo INFO: Preserving Odoo database identity (--move).
-echo INFO: Database restore completed: %DB_NAME%
-endlocal
-exit /b 0
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] [--copy^|--move] BACKUP.dump
-exit /b 2
-"""
-    return _write_docker_local_script(layout, "restore-db", content, ext="bat")
-
-
-def write_docker_run_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-echo INFO: Running Odoo for database '%DB_NAME%'. Passing through any extra arguments.
-docker compose run --rm --no-deps odoo -- -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
-exit /b %ERRORLEVEL%
-"""
-    return _write_docker_local_script(layout, "run", content, ext="bat")
-
-
-def write_docker_shell_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-echo INFO: Opening Odoo shell for database '%DB_NAME%'.
-docker compose run --rm --no-deps --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d "%DB_NAME%" %*
-exit /b %ERRORLEVEL%
-"""
-    return _write_docker_local_script(layout, "shell", content, ext="bat")
-
-
-def write_docker_update_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-echo INFO: Updating Odoo addons for database '%DB_NAME%'. Passing through any extra arguments.
-docker compose run --rm --no-deps -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d "%DB_NAME%" --log-level debug %*
-exit /b %ERRORLEVEL%
-"""
-    return _write_docker_local_script(layout, "update", content, ext="bat")
-
-
-def write_docker_neutralize_db_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    odoo_major_version = _parse_odoo_version(cfg.odoo.version)
-    if odoo_major_version >= 16:
-        neutralize_command = rf"""echo INFO: Using native Odoo neutralization for Odoo {odoo_major_version}.
-docker compose run --rm --no-deps -T --entrypoint odoo odoo neutralize -c /etc/odoo/odoo.conf -d "%DB_NAME%"
-if errorlevel 1 exit /b 1
-"""
-    else:
-        neutralize_command = rf"""echo INFO: Using legacy minimal neutralization for Odoo {odoo_major_version}.
-
-echo INFO: Disabling scheduled actions.
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;"
-if errorlevel 1 exit /b 1
-
-echo INFO: Disabling outgoing mail servers.
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;"
-if errorlevel 1 exit /b 1
-
-echo INFO: Disabling incoming mail servers if fetchmail is installed.
-docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%" -c "DO $$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END $$;"
-if errorlevel 1 exit /b 1
-"""
-
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-set "NEUTRALIZE_DIR=%ROOT_DIR%\neutralize"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "DB_EXISTS=false"
-for /f "usebackq delims=" %%D in (`docker compose exec -T db psql -U odoo -d postgres -Atqc "SELECT datname FROM pg_database"`) do (
-  if "%%D"=="%DB_NAME%" set "DB_EXISTS=true"
-)
-
-if not "%DB_EXISTS%"=="true" (
-  echo ERROR: target database '%DB_NAME%' does not exist.
-  exit /b 1
-)
-
-echo INFO: Neutralizing Odoo database '%DB_NAME%'.
-{neutralize_command}
-if exist "%NEUTRALIZE_DIR%\." (
-  for /f "delims=" %%F in ('dir /b /a-d /on "%NEUTRALIZE_DIR%\*.sql" 2^>nul') do (
-    echo INFO: Running workspace neutralization script: %%F
-    type "%NEUTRALIZE_DIR%\%%F" | docker compose exec -T db psql -v ON_ERROR_STOP=1 -U odoo -d "%DB_NAME%"
-    if errorlevel 1 exit /b 1
-  )
-)
-
-echo INFO: Database neutralization completed: %DB_NAME%
-endlocal
-exit /b 0
-"""
-    return _write_docker_local_script(layout, "neutralize-db", content, ext="bat")
-
-
-def write_docker_backup_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "BACKUPS_DIR=%ROOT_DIR%\odoo-backups"
-set "DB_NAME={configured_db_name}"
-
-for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set "TIMESTAMP=%%I"
-if "%~1"=="" (
-  set "OUTPUT=%BACKUPS_DIR%\%DB_NAME%_%TIMESTAMP%_filestore.tar.gz"
-) else (
-  for %%I in ("%~1") do set "OUTPUT=%%~fI"
-)
-for %%I in ("%OUTPUT%") do set "OUTPUT_DIR=%%~dpI"
-set "TMP_OUTPUT=%OUTPUT%.tmp"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-if errorlevel 1 exit /b 1
-if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-
-echo INFO: Backing up filestore for database '%DB_NAME%' to '%OUTPUT%'.
-docker compose run --rm --no-deps -T --entrypoint tar odoo -C "/var/lib/odoo/filestore/%DB_NAME%" -czf - . > "%TMP_OUTPUT%"
-if errorlevel 1 (
-  if exist "%TMP_OUTPUT%" del /q "%TMP_OUTPUT%"
-  exit /b 1
-)
-move /y "%TMP_OUTPUT%" "%OUTPUT%" >nul
-if errorlevel 1 exit /b 1
-
-echo INFO: Filestore backup created: %OUTPUT%
-endlocal
-"""
-    return _write_docker_local_script(layout, "backup-filestore", content, ext="bat")
-
-
-def write_docker_restore_filestore_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "DB_NAME={configured_db_name}"
-set "FORCE=false"
-set "SOURCE="
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-if "%~1:~0,1%"=="-" goto unknown_option
-if defined SOURCE goto usage_error
-set "SOURCE=%~1"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:args_done
-if not defined SOURCE goto usage_error
-if not exist "%SOURCE%" (
-  echo ERROR: filestore backup not found: %SOURCE%
-  exit /b 1
-)
-for %%I in ("%SOURCE%") do set "SOURCE=%%~fI"
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "STATE_FILE=%TEMP%\odt-env-filestore-state-%RANDOM%-%RANDOM%.txt"
-docker compose run --rm --no-deps -T -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
-if errorlevel 1 (
-  if exist "%STATE_FILE%" del /q "%STATE_FILE%"
-  exit /b 1
-)
-set "FILESTORE_EXISTS=false"
-findstr /x /c:"exists" "%STATE_FILE%" >nul
-if not errorlevel 1 set "FILESTORE_EXISTS=true"
-del /q "%STATE_FILE%" >nul 2>&1
-
-if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-echo INFO: Restoring filestore for database '%DB_NAME%' from '%SOURCE%'.
-echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
-docker compose run --rm --no-deps -T -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; target=/var/lib/odoo/filestore/$DB_NAME; rm -rf $target; mkdir -p $target; tar -xzf - -C $target" < "%SOURCE%"
-if errorlevel 1 exit /b 1
-
-echo INFO: Filestore restore completed: %DB_NAME%
-endlocal
-exit /b 0
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] FILESTORE.tar.gz
-exit /b 2
-"""
-    return _write_docker_local_script(layout, "restore-filestore", content, ext="bat")
-
-
-def write_docker_restic_bat(layout: Layout) -> Path:
-    content = r"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-
-if "%~1"=="" (
-  echo Usage: %~nx0 RESTIC_COMMAND [ARGS...]
-  exit /b 2
-)
-
-if not defined RESTIC_REPOSITORY (
-  echo ERROR: RESTIC_REPOSITORY is not set.
-  exit /b 1
-)
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "REPO_LOCAL=false"
-set "RESTIC_REPOSITORY_HOST="
-set "RESTIC_REPOSITORY_CONTAINER=%RESTIC_REPOSITORY%"
-if "%RESTIC_REPOSITORY:~1,1%"==":" goto local_repository
-if "%RESTIC_REPOSITORY:~0,2%"=="\\" goto local_repository
-goto repository_ready
-
-:local_repository
-set "REPO_LOCAL=true"
-for %%I in ("%RESTIC_REPOSITORY%") do set "RESTIC_REPOSITORY_HOST=%%~fI"
-if not exist "%RESTIC_REPOSITORY_HOST%" mkdir "%RESTIC_REPOSITORY_HOST%"
-if errorlevel 1 exit /b 1
-set "RESTIC_REPOSITORY_CONTAINER=/restic-repository"
-
-:repository_ready
-set "PASSWORD_MODE="
-set "RESTIC_PASSWORD_FILE_HOST="
-if defined RESTIC_PASSWORD_FILE goto password_file
-if defined RESTIC_PASSWORD goto password_env
-echo ERROR: set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD.
-exit /b 1
-
-:password_file
-if not exist "%RESTIC_PASSWORD_FILE%" (
-  echo ERROR: RESTIC_PASSWORD_FILE not found: %RESTIC_PASSWORD_FILE%
-  exit /b 1
-)
-for %%I in ("%RESTIC_PASSWORD_FILE%") do set "RESTIC_PASSWORD_FILE_HOST=%%~fI"
-set "PASSWORD_MODE=file"
-goto run_restic
-
-:password_env
-set "PASSWORD_MODE=env"
-
-:run_restic
-if "%REPO_LOCAL%"=="true" if "%PASSWORD_MODE%"=="file" goto run_local_file
-if "%REPO_LOCAL%"=="true" goto run_local_env
-if "%PASSWORD_MODE%"=="file" goto run_remote_file
-goto run_remote_env
-
-:run_local_file
-docker compose run --rm --no-deps -T --user 0:0 ^
-  -v "%RESTIC_REPOSITORY_HOST%:/restic-repository" ^
-  -e "RESTIC_REPOSITORY=/restic-repository" ^
-  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
-  -v "%RESTIC_PASSWORD_FILE_HOST%:/run/secrets/odt-env-restic-password:ro" ^
-  -e "RESTIC_PASSWORD_FILE=/run/secrets/odt-env-restic-password" ^
-  --entrypoint restic odoo %*
-exit /b %ERRORLEVEL%
-
-:run_local_env
-docker compose run --rm --no-deps -T --user 0:0 ^
-  -v "%RESTIC_REPOSITORY_HOST%:/restic-repository" ^
-  -e "RESTIC_REPOSITORY=/restic-repository" ^
-  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
-  -e RESTIC_PASSWORD ^
-  --entrypoint restic odoo %*
-exit /b %ERRORLEVEL%
-
-:run_remote_file
-docker compose run --rm --no-deps -T --user 0:0 ^
-  -e "RESTIC_REPOSITORY=%RESTIC_REPOSITORY_CONTAINER%" ^
-  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
-  -v "%RESTIC_PASSWORD_FILE_HOST%:/run/secrets/odt-env-restic-password:ro" ^
-  -e "RESTIC_PASSWORD_FILE=/run/secrets/odt-env-restic-password" ^
-  --entrypoint restic odoo %*
-exit /b %ERRORLEVEL%
-
-:run_remote_env
-docker compose run --rm --no-deps -T --user 0:0 ^
-  -e "RESTIC_REPOSITORY=%RESTIC_REPOSITORY_CONTAINER%" ^
-  -e "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic" ^
-  -e RESTIC_PASSWORD ^
-  --entrypoint restic odoo %*
-exit /b %ERRORLEVEL%
-"""
-    return _write_docker_local_script(layout, "restic", content, ext="bat")
-
-
-def write_docker_backup_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DB_NAME={configured_db_name}"
-if defined RESTIC_HOST (
-  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
-) else (
-  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
-)
-set "FILESTORE_PATH=/var/lib/odoo/filestore/%DB_NAME%"
-
-if not exist "%RESTIC%" (
-  echo ERROR: restic helper not found: %RESTIC%
-  exit /b 1
-)
-
-echo INFO: Backing up filestore for database '%DB_NAME%' with restic.
-if defined RESTIC_BACKUP_ID goto with_backup_id
-
-call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" %* "%FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:with_backup_id
-call "%RESTIC%" backup --host "%RESTIC_HOST_NAME%" --tag odoo --tag filestore --tag "db:%DB_NAME%" --tag "backup-id:%RESTIC_BACKUP_ID%" %* "%FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-"""
-    return _write_docker_local_script(layout, "backup-filestore-restic", content, ext="bat")
-
-
-def write_docker_restore_filestore_restic_bat(layout: Layout, cfg: ProjectConfig) -> Path:
-    configured_db_name = _docker_default_db_name(cfg).replace("%", "%%")
-    content = rf"""@echo off
-setlocal
-
-set "SCRIPT_DIR=%~dp0"
-if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
-for %%I in ("%SCRIPT_DIR%\..\..\..") do set "ROOT_DIR=%%~fI"
-set "RESTIC=%SCRIPT_DIR%\restic.bat"
-set "DB_NAME={configured_db_name}"
-if defined RESTIC_SOURCE_DB_NAME (
-  set "SOURCE_DB_NAME=%RESTIC_SOURCE_DB_NAME%"
-) else (
-  set "SOURCE_DB_NAME=%DB_NAME%"
-)
-if defined RESTIC_HOST (
-  set "RESTIC_HOST_NAME=%RESTIC_HOST%"
-) else (
-  for /f "delims=" %%H in ('hostname') do set "RESTIC_HOST_NAME=%%H"
-)
-set "FORCE=false"
-set "SNAPSHOT=latest"
-set "SNAPSHOT_SET=false"
-set "SOURCE_FILESTORE_PATH=/var/lib/odoo/filestore/%SOURCE_DB_NAME%"
-set "TARGET_FILESTORE_PATH=/var/lib/odoo/filestore/%DB_NAME%"
-
-goto parse_args
-
-:parse_args
-if "%~1"=="" goto args_done
-if /i "%~1"=="--force" goto force_arg
-if "%~1:~0,1%"=="-" goto unknown_option
-if /i "%SNAPSHOT_SET%"=="true" goto usage_error
-set "SNAPSHOT=%~1"
-set "SNAPSHOT_SET=true"
-shift
-goto parse_args
-
-:force_arg
-set "FORCE=true"
-shift
-goto parse_args
-
-:args_done
-if not exist "%RESTIC%" (
-  echo ERROR: restic helper not found: %RESTIC%
-  exit /b 1
-)
-
-cd /d "%ROOT_DIR%" || exit /b 1
-
-set "STATE_FILE=%TEMP%\odt-env-restic-filestore-state-%RANDOM%-%RANDOM%.txt"
-docker compose run --rm --no-deps -T --user 0:0 -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "if [ -d /var/lib/odoo/filestore/$DB_NAME ]; then echo exists; else echo missing; fi" > "%STATE_FILE%"
-if errorlevel 1 (
-  if exist "%STATE_FILE%" del /q "%STATE_FILE%"
-  exit /b 1
-)
-set "FILESTORE_EXISTS=false"
-findstr /x /c:"exists" "%STATE_FILE%" >nul
-if not errorlevel 1 set "FILESTORE_EXISTS=true"
-del /q "%STATE_FILE%" >nul 2>&1
-
-if "%FILESTORE_EXISTS%"=="true" if /i not "%FORCE%"=="true" (
-  echo ERROR: target filestore for database '%DB_NAME%' already exists. Use --force to replace it.
-  exit /b 1
-)
-
-echo INFO: Restoring filestore for database '%DB_NAME%' from restic snapshot '%SNAPSHOT%'.
-echo INFO: Stop the Odoo service first when restoring a filestore that is currently in use.
-
-docker compose run --rm --no-deps -T --user 0:0 -e "DB_NAME=%DB_NAME%" --entrypoint sh odoo -c "set -eu; rm -rf /var/lib/odoo/filestore/$DB_NAME; mkdir -p /var/lib/odoo/filestore/$DB_NAME"
-if errorlevel 1 exit /b 1
-
-if /i "%SNAPSHOT%"=="latest" goto restore_latest
-call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_FILESTORE_PATH%" --target "%TARGET_FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:restore_latest
-call "%RESTIC%" restore "%SNAPSHOT%:%SOURCE_FILESTORE_PATH%" --target "%TARGET_FILESTORE_PATH%" --host "%RESTIC_HOST_NAME%" --path "%SOURCE_FILESTORE_PATH%"
-exit /b %ERRORLEVEL%
-
-:unknown_option
-echo ERROR: unknown option: %~1
-goto usage_error
-
-:usage_error
-echo Usage: %~nx0 [--force] [SNAPSHOT]
-exit /b 2
-"""
-    return _write_docker_local_script(layout, "restore-filestore-restic", content, ext="bat")
-
-
-def write_docker_local_scripts(layout: Layout, cfg: ProjectConfig) -> dict[str, Path]:
-    if sys.platform.startswith("win"):
-        return {
-            "run": write_docker_run_bat(layout, cfg),
-            "shell": write_docker_shell_bat(layout, cfg),
-            "update": write_docker_update_bat(layout, cfg),
-            "backup_db": write_docker_backup_db_bat(layout, cfg),
-            "restore_db": write_docker_restore_db_bat(layout, cfg),
-            "neutralize_db": write_docker_neutralize_db_bat(layout, cfg),
-            "backup_filestore": write_docker_backup_filestore_bat(layout, cfg),
-            "restore_filestore": write_docker_restore_filestore_bat(layout, cfg),
-            "restic": write_docker_restic_bat(layout),
-            "backup_filestore_restic": write_docker_backup_filestore_restic_bat(layout, cfg),
-            "restore_filestore_restic": write_docker_restore_filestore_restic_bat(layout, cfg),
-        }
-
-    return {
-        "run": write_docker_run_sh(layout, cfg),
-        "shell": write_docker_shell_sh(layout, cfg),
-        "update": write_docker_update_sh(layout, cfg),
-        "backup_db": write_docker_backup_db_sh(layout, cfg),
-        "restore_db": write_docker_restore_db_sh(layout, cfg),
-        "neutralize_db": write_docker_neutralize_db_sh(layout, cfg),
-        "backup_filestore": write_docker_backup_filestore_sh(layout, cfg),
-        "restore_filestore": write_docker_restore_filestore_sh(layout, cfg),
-        "restic": write_docker_restic_sh(layout),
-        "backup_filestore_restic": write_docker_backup_filestore_restic_sh(layout, cfg),
-        "restore_filestore_restic": write_docker_restore_filestore_restic_sh(layout, cfg),
-    }
+def _native_default_db_name(cfg: ProjectConfig) -> str:
+    db_name = str(cfg.config.get("db_name") or "").strip()
+    if not db_name:
+        raise Exception("Native database commands require [config].db_name.")
+    # These names become PostgreSQL identifiers, filesystem path components and
+    # Windows batch variables. Reject traversal, CMD metacharacters and names
+    # that PostgreSQL could silently truncate to another database name.
+    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
+        raise Exception(
+            "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
+            "underscores, dots or hyphens, starting with a letter, digit or underscore."
+        )
+    return db_name
+
+
+def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
+    # libpq reads these environment variables, keeping passwords out of command
+    # arguments. Missing/False options leave libpq defaults and .pgpass intact.
+    values: dict[str, str] = {}
+    for key, variable in (
+        ("db_host", "PGHOST"), ("db_port", "PGPORT"), ("db_user", "PGUSER"),
+        ("db_password", "PGPASSWORD"), ("db_sslmode", "PGSSLMODE"),
+    ):
+        value = _format_conf_value(cfg.config.get(key, "")).strip()
+        if value and value.lower() not in ("false", "none"):
+            values[variable] = value
+    return values
 
 
 def write_dockerfile(
@@ -6218,12 +3396,10 @@ def create_local_docker_artifacts(
         include_config=False,
     )
     compose_path = write_docker_compose(layout, cfg, source_ini, effective_ini_sha256)
-    script_paths = write_docker_local_scripts(layout, cfg)
 
     _logger.info("Generated local Docker build context: %s", layout.docker_local_dir)
     _logger.info("Generated local Dockerfile: %s", dockerfile_path)
     _logger.info("Generated local Docker Odoo config: %s", docker_conf_path)
-    _logger.info("Generated local Docker helper scripts: %s", _docker_scripts_dir(layout.docker_local_dir))
 
     return {
         "docker_dir": layout.docker_local_dir,
@@ -6231,7 +3407,6 @@ def create_local_docker_artifacts(
         "dockerignore": dockerignore_path,
         "odoo_config": docker_conf_path,
         "compose": compose_path,
-        "scripts": script_paths,
         "requirements_dir": _docker_requirements_dir(layout.docker_local_dir),
         "requirements_input": input_path,
         "constraints": constraints_path if constraints_path.is_file() else None,
@@ -6930,7 +4105,6 @@ def _sync_project_impl(
         create_venv: bool = False,
         clear_pip_wheel_cache: bool = False,
         no_configs: bool = False,
-        no_scripts: bool = False,
         no_data_dir: bool = False,
         target: str = "docker",
         create_docker_deploy_requested: bool = False,
@@ -7061,12 +4235,11 @@ def _sync_project_impl(
                 )
             else:
                 _logger.info(
-                    "No sync target selected; regenerating config and helper scripts only (skipping venv/repo operations)."
+                    "No sync target selected; regenerating workspace configuration only (skipping venv/repo operations)."
                 )
 
     if target == "venv":
         layout.configs_dir.mkdir(parents=True, exist_ok=True)
-        layout.scripts_dir.mkdir(parents=True, exist_ok=True)
         layout.backups_dir.mkdir(parents=True, exist_ok=True)
         if not no_data_dir:
             layout.data_dir.mkdir(parents=True, exist_ok=True)
@@ -7372,25 +4545,11 @@ def _sync_project_impl(
     else:
         _logger.info("Skipping native config generation (target=%s, --no-configs=%s).", target, no_configs)
 
-    is_windows = sys.platform.startswith("win")
-
-    # Generate helper scripts (unless disabled).
-    if target == "venv" and not no_scripts:
-        if is_windows:
-            write_run_bat(layout)
-            write_test_bat(layout)
-            write_shell_bat(layout)
-            write_update_bat(layout)
-        else:
-            write_run_sh(layout)
-            write_instance_sh(layout)
-            write_test_sh(layout)
-            write_shell_sh(layout)
-            write_update_sh(layout)
-
-        write_native_backup_scripts(layout, cfg, windows=is_windows)
-    else:
-        _logger.info("Skipping native script generation (target=%s, --no-scripts=%s).", target, no_scripts)
+    # Remove obsolete generated helpers when upgrading an existing native workspace.
+    if target == "venv":
+        for script_name in (*_BACKUP_RESTORE_SCRIPT_NAMES, "neutralize-db", "run", "shell", "update", "test", "instance"):
+            for ext in ("sh", "bat"):
+                (layout.root / "odoo-scripts" / f"{script_name}.{ext}").unlink(missing_ok=True)
 
     bundle_created: Optional[Path] = None
     if bundle_output is not None:
@@ -7420,8 +4579,6 @@ def _sync_project_impl(
     generated: list[str] = []
     if target == "venv" and not no_configs:
         generated.append("configs")
-    if target == "venv" and not no_scripts:
-        generated.append("scripts")
     if target == "docker":
         generated.append("docker/local + compose")
     if create_docker_deploy_requested:
@@ -7497,16 +4654,6 @@ def _sync_project_impl(
         build_cmd.append(_compose_host_path(layout, layout.docker_deploy_dir))
         _logger.info(f"  Deploy Build:       {_format_cmd(build_cmd)}")
 
-    if target == "docker":
-        _logger.info("  Native Scripts:     SKIPPED (target=docker)")
-    elif no_scripts:
-        _logger.info("  Scripts:            SKIPPED (--no-scripts)")
-    else:
-        ext = "bat" if is_windows else "sh"
-        _logger.info("  Scripts:")
-        for name in ("run", "test", "shell", "update", *_NATIVE_BACKUP_SCRIPT_NAMES):
-            _logger.info("  - %-20s %s", name + ":", layout.script(name, ext))
-
     if project_ini_status:
         _logger.info("  Project INI:")
         _logger.info("  - %s", project_ini_status)
@@ -7527,7 +4674,6 @@ def sync_project(
         create_venv: bool = False,
         clear_pip_wheel_cache: bool = False,
         no_configs: bool = False,
-        no_scripts: bool = False,
         no_data_dir: bool = False,
         target: str = "docker",
         create_docker_deploy_requested: bool = False,
@@ -7559,7 +4705,6 @@ def sync_project(
             create_venv=create_venv,
             clear_pip_wheel_cache=clear_pip_wheel_cache,
             no_configs=no_configs,
-            no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
@@ -7611,7 +4756,6 @@ def sync_project(
             "create_venv": create_venv,
             "clear_pip_wheel_cache": clear_pip_wheel_cache,
             "no_configs": no_configs,
-            "no_scripts": no_scripts,
             "no_data_dir": no_data_dir,
             "target": target,
             "create_docker_deploy": create_docker_deploy_requested,
@@ -7667,7 +4811,6 @@ def sync_project(
             create_venv=create_venv,
             clear_pip_wheel_cache=clear_pip_wheel_cache,
             no_configs=no_configs,
-            no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
@@ -8295,29 +5438,35 @@ def _prepare_included_project_ini(
         return output_path
 
 
-def build_parser(prog: str = "odoo-compose", target: str = "docker") -> argparse.ArgumentParser:
+def build_parser(prog: str = "odoo-compose", target: str = "docker", *, init_command: bool = False) -> argparse.ArgumentParser:
     if target == "docker":
         epilog = """Generate Docker Compose artifacts for Odoo and PostgreSQL.
 
 Examples:
 
   Creating a Docker workspace:
-    odoo-compose --init ./odoo19 --sync-addons
+    odoo-compose init ./odoo19 --sync-addons
 
   Generating a deploy Docker build context:
     odoo-compose /path/to/odoo-project.ini --sync-addons --create-docker-deploy
+
+  Previewing workspace neutralization SQL:
+    odoo-compose neutralize --dry-run
+
+  Neutralizing the workspace database:
+    odoo-compose neutralize
 
   Inspecting provisioning history:
     odoo-compose /path/to/odoo-project.ini --show-last-run
 """
     else:
-        epilog = """Generate native Odoo configuration and helper scripts.
+        epilog = """Generate native Odoo workspace configuration.
 A virtual environment is created only when explicitly requested.
 
 Examples:
 
   Creating a venv workspace:
-    odoo-compose-venv --init ./odoo18-workspace --sync-all --create-venv --set odoo:version=18.0
+    odoo-compose-venv init ./odoo18-workspace --sync-all --create-venv --set odoo:version=18.0
 
   Using multiple project files:
     odoo-compose-venv -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
@@ -8330,7 +5479,39 @@ Examples:
 
   Restoring a workspace from a bundle:
     odoo-compose-venv --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
+
+  Previewing workspace neutralization SQL:
+    odoo-compose-venv neutralize --dry-run
 """
+
+    if init_command:
+        epilog = (
+            "Initialize a workspace using the bundled default project template.\n"
+            "Accepts standard provisioning options.\n\n"
+            "Examples:\n"
+            f"  {prog} ./odoo19 --sync-addons\n"
+            f"  {prog} --root ./odoo19 --set odoo:version=19.0\n"
+        )
+
+    commands = (
+        ("init", "Initialize a workspace (provisioning options supported)"),
+        ("run", "Run Odoo"),
+        ("shell", "Open an Odoo shell"),
+        ("update", "Update installed Odoo modules"),
+        ("test", "Run Odoo tests"),
+        ("neutralize", "Neutralize the workspace database"),
+        ("backup-db", "Back up the database"),
+        ("restore-db", "Restore the database"),
+        ("backup-filestore", "Back up the filestore"),
+        ("restore-filestore", "Restore the filestore"),
+        ("restic", "Run a Restic command"),
+        ("backup-filestore-restic", "Back up the filestore using Restic"),
+        ("restore-filestore-restic", "Restore a Restic filestore snapshot"),
+    )
+    if not init_command:
+        epilog += "\nCommands:\n" + "\n".join(
+            f"  {name:<27} {description}" for name, description in commands
+        ) + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n"
 
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -8346,29 +5527,41 @@ Examples:
         help="Show the program version and exit.",
     )
 
-    parser.add_argument(
-        "ini",
-        metavar="INI",
-        nargs="?",
-        help=(
-            "Optional local path to odoo-project.ini, Git-backed remote INI "
-            "git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-            "If omitted and no -i/--include is provided, ROOT/odoo-project.ini is used."
-        ),
-    )
+    if init_command:
+        parser.add_argument(
+            "init_root",
+            nargs="?",
+            metavar="ROOT",
+            help="Optional workspace directory (alternative to --root ROOT).",
+        )
+        parser.set_defaults(ini=None)
+    else:
+        parser.add_argument(
+            "ini",
+            metavar="INI",
+            nargs="?",
+            help=(
+                "Optional local path to odoo-project.ini, Git-backed remote INI "
+                "git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
+                "If omitted and no -i/--include is provided, ROOT/odoo-project.ini is used."
+            ),
+        )
 
-    parser.add_argument(
-        "-i",
-        "--include",
-        dest="include_inis",
-        action="append",
-        default=[],
-        metavar="INI",
-        help=(
-            "Include an additional project layer. Can be passed multiple times; "
-            "layers are processed in CLI order and later layers override earlier layers."
-        ),
-    )
+    if not init_command:
+        parser.add_argument(
+            "-i",
+            "--include",
+            dest="include_inis",
+            action="append",
+            default=[],
+            metavar="INI",
+            help=(
+                "Include an additional project layer. Can be passed multiple times; "
+                "layers are processed in CLI order and later layers override earlier layers."
+            ),
+        )
+    else:
+        parser.set_defaults(include_inis=[])
 
     parser.add_argument(
         "--root",
@@ -8378,22 +5571,6 @@ Examples:
             "Override workspace ROOT directory. "
             "When INI is omitted, ROOT defaults to the current working directory. "
             "Explicit ROOT is created automatically if needed."
-        ),
-    )
-
-    parser.add_argument(
-        "--init",
-        "--init-project",
-        dest="init_project",
-        nargs="?",
-        const="",
-        default=None,
-        metavar="ROOT",
-        help=(
-            "Create ROOT/odoo-project.ini from the bundled default template if it does not already exist. "
-            "An optional ROOT can be supplied directly as shorthand for --root. "
-            "If ROOT is supplied here, --root must not also be used. "
-            "Without --init, an existing ROOT/odoo-project.ini is required."
         ),
     )
 
@@ -8439,7 +5616,6 @@ Examples:
         create_from_bundle=None,
         create_docker_deploy=False,
         no_configs=False,
-        no_scripts=False,
     )
 
     if target == "venv":
@@ -8500,11 +5676,6 @@ Examples:
             "--no-configs",
             action="store_true",
             help="Do not (re)generate native config files (odoo-compose-venv only).",
-        )
-        parser.add_argument(
-            "--no-scripts",
-            action="store_true",
-            help="Do not (re)generate native helper scripts (odoo-compose-venv only).",
         )
         parser.add_argument(
             "--no-data-dir",
@@ -8630,6 +5801,619 @@ def _root_for_show_last_run(parser: argparse.ArgumentParser, args: argparse.Name
     return root
 
 
+class _NeutralizeSqlError(Exception):
+    """Invalid or unresolved SQL substitution."""
+
+
+def _neutralize_sql_literal(value: str) -> str:
+    """Render one PostgreSQL text literal, independent of string settings."""
+    if "\x00" in value:
+        raise _NeutralizeSqlError("NUL bytes are not valid PostgreSQL text")
+    escaped = (value.replace("\\", "\\\\").replace("'", "''")
+               .replace("\r", "\\r").replace("\n", "\\n"))
+    return "E'" + escaped + "'"
+
+
+def _render_neutralize_sql(sql: str, cp: configparser.ConfigParser) -> str:
+    """Resolve ${section:option} using the existing INI parser; quote SQL values."""
+    output: list[str] = []
+    cursor = 0
+    while True:
+        pos = sql.find("${", cursor)
+        if pos < 0:
+            output.append(sql[cursor:])
+            break
+        prefix = sql[cursor:pos]
+        slash_count = len(prefix) - len(prefix.rstrip("\\"))
+        output.append(prefix[:-slash_count] if slash_count else prefix)
+        output.append("\\" * (slash_count // 2))
+        end = sql.find("}", pos + 2)
+        if slash_count % 2:
+            # The reference is literal, even if it names a missing variable.
+            if end < 0:
+                output.append("${")
+                cursor = pos + 2
+            else:
+                output.append(sql[pos:end + 1])
+                cursor = end + 1
+            continue
+        if end < 0:
+            raise _NeutralizeSqlError("unclosed interpolation reference")
+        ref = sql[pos + 2:end]
+        if ref.count(":") != 1 or not all(ref.split(":")):
+            raise _NeutralizeSqlError("invalid interpolation reference")
+        section, option = ref.split(":", 1)
+        if not cp.has_section(section) or not cp.has_option(section, option):
+            raise _NeutralizeSqlError("missing interpolation reference")
+        # _IniInterpolation also resolves nested references.
+        value = cp.get(section, option)
+        output.append(_neutralize_sql_literal(value))
+        cursor = end + 1
+    return "".join(output)
+
+
+def _run_neutralize_command(
+        command: list[str], root: Path, *, env: Optional[dict[str, str]] = None,
+        input_sql: Optional[str] = None,
+) -> None:
+    """Run an Odoo/SQL command without leaking database output or substituted values."""
+    try:
+        result = subprocess.run(
+            command, cwd=root, env=env,
+            input=input_sql.encode("utf-8") if input_sql is not None else None,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError as exc:
+        raise _NeutralizeSqlError("could not launch neutralization command") from exc
+    if result.returncode:
+        raise _NeutralizeSqlError(f"neutralization command failed (exit {result.returncode})")
+
+
+def _run_neutralize_cli(target: str, args: list[str], prog: str) -> int:
+    """Neutralize an existing workspace directly from the installed CLI."""
+    parser = argparse.ArgumentParser(
+        prog=f"{prog} neutralize",
+        description="Neutralize an existing workspace database or preview interpolated workspace SQL.",
+    )
+    parser.add_argument("--root", default=".", metavar="ROOT", help="Workspace directory (default: current directory).")
+    parser.add_argument(
+        "--dry-run", nargs="?", const="", default=None, metavar="OUTPUT_DIR",
+        help="Only save interpolated neutralize/*.sql to OUTPUT_DIR; default: .odt-env/neutralize-preview.",
+    )
+    opts = parser.parse_args(args)
+    root = Path(opts.root).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"workspace ROOT does not exist: {root}")
+    ini_path = root / _DEFAULT_PROJECT_INI_NAME
+    if not ini_path.is_file():
+        parser.error(f"workspace project file not found: {ini_path}")
+
+    try:
+        cfg = load_project_config(ini_path, log_resolved=False, log_overrides=False)
+        db_name = _docker_default_db_name(cfg) if target == "docker" else _native_default_db_name(cfg)
+        version = _parse_odoo_version(cfg.odoo.version)
+        cp = _read_ini(ini_path, log_overrides=False)
+        # Resolve every SQL file before touching the database. Never change sources.
+        sql_files = sorted((root / "neutralize").glob("*.sql"))
+        sql_contents = [
+            (path, _render_neutralize_sql(path.read_text(encoding="utf-8"), cp))
+            for path in sql_files if path.is_file()
+        ]
+
+        if opts.dry_run is not None:
+            directory = Path(opts.dry_run).expanduser() if opts.dry_run else Path(".odt-env/neutralize-preview")
+            if not directory.is_absolute():
+                directory = root / directory
+            directory = directory.resolve()
+            for source, _ in sql_contents:
+                if (directory / source.name).resolve() == source.resolve():
+                    raise _NeutralizeSqlError("preview directory cannot overwrite source SQL")
+            # Preview may contain secrets: create files atomically with mode 0600.
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            for source, sql in sql_contents:
+                temp_path = None
+                try:
+                    fd, name = tempfile.mkstemp(prefix=".neutralize-", dir=directory)
+                    temp_path = Path(name)
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                        stream.write(sql)
+                    os.replace(temp_path, directory / source.name)
+                finally:
+                    if temp_path is not None:
+                        temp_path.unlink(missing_ok=True)
+                _logger.info("Prepared neutralization SQL: %s", source.name)
+            _logger.info("SQL preview saved to: %s", directory)
+            return 0
+
+        if target == "docker":
+            docker_name = "docker.exe" if os.name == "nt" else "docker"
+            docker = [shutil.which(docker_name) or docker_name]
+            if os.name != "nt" and os.environ.get("ODOO_DOCKER_SUDO") == "1":
+                docker.insert(0, "sudo")
+            pg_base = docker + ["compose", "exec", "-T", "db", "psql"]
+            pg_query = pg_base + ["-U", "odoo", "-d", "postgres", "-Atqc",
+                                  "SELECT datname FROM pg_database"]
+            pg_execute = pg_base + ["-v", "ON_ERROR_STOP=1", "-U", "odoo", "-d", db_name]
+            env = None
+        else:
+            bin_dir = os.environ.get("POSTGRES_BIN", "")
+            psql = str(Path(bin_dir) / ("psql.exe" if os.name == "nt" else "psql")) if bin_dir else "psql"
+            pg_query = [psql, "-X", "-d", "postgres", "-Atqc", "SELECT datname FROM pg_database"]
+            pg_execute = [psql, "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name]
+            env = {**os.environ, **_native_pg_env(cfg)}
+
+        try:
+            databases = subprocess.run(
+                pg_query, cwd=root, env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError as exc:
+            raise _NeutralizeSqlError(
+                f"could not check target database ({type(exc).__name__})"
+            ) from exc
+        if databases.returncode:
+            raise _NeutralizeSqlError(
+                f"could not check target database (exit code {databases.returncode})"
+            )
+        if db_name.encode("utf-8") not in databases.stdout.splitlines():
+            raise _NeutralizeSqlError(f"target database does not exist: {db_name}")
+
+        _logger.info("Neutralizing Odoo database: %s", db_name)
+        if version >= 16:
+            if target == "docker":
+                command = docker + ["compose", "run", "--rm", "--no-deps", "-T",
+                                    "--entrypoint", "odoo", "odoo", "neutralize",
+                                    "-c", "/etc/odoo/odoo.conf", "-d", db_name]
+            else:
+                executable = root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                layout = Layout.from_root(root)
+                odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
+                conf = layout.conf_path
+                if not executable.is_file() or not odoo_bin.is_file() or not conf.is_file():
+                    raise _NeutralizeSqlError("native Odoo neutralization requires venv python, odoo-bin and Odoo config")
+                command = [str(executable), str(odoo_bin), "neutralize", "-c", str(conf), "-d", db_name]
+            _logger.info("Using native Odoo neutralization for Odoo %s", version)
+            _run_neutralize_command(command, root, env=env)
+        else:
+            _logger.info("Using legacy minimal neutralization for Odoo %s", version)
+            legacy_sql = (
+                "UPDATE ir_cron SET active = FALSE WHERE active = TRUE;",
+                "UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;",
+                "DO $$ BEGIN IF to_regclass('fetchmail_server') IS NOT NULL THEN "
+                "UPDATE fetchmail_server SET active = FALSE WHERE active = TRUE; END IF; END $$;",
+            )
+            for sql in legacy_sql:
+                _run_neutralize_command(pg_execute + ["-c", sql], root, env=env)
+
+        for source, sql in sql_contents:
+            _logger.info("Running workspace neutralization SQL: %s", source.name)
+            _run_neutralize_command(pg_execute, root, env=env, input_sql=sql)
+        _logger.info("Database neutralization completed: %s", db_name)
+        return 0
+    except (OSError, UnicodeError, configparser.Error, ValueError, _NeutralizeSqlError) as exc:
+        # SQL content and resolved INI values must never appear in errors/logs.
+        if isinstance(exc, _NeutralizeSqlError):
+            _logger.error("%s", exc)
+        else:
+            _logger.error("Could not process workspace neutralization configuration")
+        return 1
+    except Exception:
+        _logger.error("Could not complete database neutralization")
+        return 1
+
+
+class _WorkspaceOperationError(Exception):
+    """Expected backup, restore or Restic failure."""
+
+
+def _workspace_command(
+        command: list[str], root: Path, *, env: Optional[dict[str, str]] = None,
+        stdin=None, stdout=None, capture: bool = False,
+) -> bytes:
+    """Run an external command without accidentally printing credentials."""
+    try:
+        process = subprocess.run(
+            command, cwd=root, env=env, stdin=stdin,
+            stdout=subprocess.PIPE if capture else stdout,
+            stderr=subprocess.DEVNULL if capture else None, check=False,
+        )
+    except OSError as exc:
+        raise _WorkspaceOperationError(f"could not execute {Path(command[0]).name} ({type(exc).__name__})") from exc
+    if process.returncode:
+        raise _WorkspaceOperationError(
+            f"{Path(command[0]).name} exited with status {process.returncode}"
+        )
+    return process.stdout or b"" if capture else b""
+
+
+def _workspace_docker_command() -> list[str]:
+    name = "docker.exe" if os.name == "nt" else "docker"
+    command = [shutil.which(name) or name]
+    if os.name != "nt" and os.environ.get("ODOO_DOCKER_SUDO") == "1":
+        command.insert(0, "sudo")
+    return command
+
+
+def _workspace_postgres_command(program: str) -> str:
+    bin_dir = os.environ.get("POSTGRES_BIN", "")
+    executable = program + (".exe" if os.name == "nt" else "")
+    return str(Path(bin_dir) / executable) if bin_dir else executable
+
+
+def _workspace_db_command(target: str, program: str, *args: str) -> list[str]:
+    if target == "docker":
+        return (_workspace_docker_command() + ["compose", "exec", "-T", "db", program,
+                "-U", "odoo", *args])
+    return [_workspace_postgres_command(program), *args]
+
+
+def _workspace_db_exists(target: str, root: Path, env: Optional[dict[str, str]], db_name: str) -> bool:
+    if target == "docker":
+        cmd = _workspace_docker_command() + ["compose", "exec", "-T", "db", "psql",
+                                             "-U", "odoo", "-d", "postgres", "-Atqc",
+                                             "SELECT datname FROM pg_database"]
+    else:
+        cmd = [_workspace_postgres_command("psql"), "-X", "-d", "postgres", "-Atqc",
+               "SELECT datname FROM pg_database"]
+    databases = _workspace_command(cmd, root, env=env, capture=True)
+    return db_name.encode("utf-8") in databases.splitlines()
+
+
+def _workspace_restic_command(target: str, root: Path, args: list[str]) -> list[str]:
+    repository = os.environ.get("RESTIC_REPOSITORY", "")
+    if not repository:
+        raise _WorkspaceOperationError("RESTIC_REPOSITORY is not set")
+    password_file = os.environ.get("RESTIC_PASSWORD_FILE", "")
+    if password_file:
+        password_file_path = Path(password_file).expanduser().resolve()
+        if not password_file_path.is_file():
+            raise _WorkspaceOperationError("RESTIC_PASSWORD_FILE does not exist")
+    elif not os.environ.get("RESTIC_PASSWORD"):
+        raise _WorkspaceOperationError("set RESTIC_PASSWORD_FILE or RESTIC_PASSWORD")
+
+    if target == "venv":
+        command = os.environ.get("RESTIC_BIN", "restic")
+        return [shutil.which(command) or command, *args]
+
+    cmd = _workspace_docker_command() + [
+        "compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
+        "-e", "RESTIC_CACHE_DIR=/var/lib/odoo/.cache/restic",
+    ]
+    # Docker Desktop requires Windows host paths to be mounted at Linux paths.
+    local_repository = (Path(repository).is_absolute() if os.name == "nt" else repository.startswith("/"))
+    if local_repository:
+        host_repo = Path(repository).expanduser().resolve()
+        host_repo.mkdir(parents=True, exist_ok=True)
+        container_repo = "/restic-repository" if os.name == "nt" else str(host_repo)
+        cmd += ["-v", f"{host_repo}:{container_repo}", "-e", f"RESTIC_REPOSITORY={container_repo}"]
+    else:
+        if ":" not in repository:
+            raise _WorkspaceOperationError("local RESTIC_REPOSITORY must be an absolute path")
+        cmd += ["-e", f"RESTIC_REPOSITORY={repository}"]
+    if password_file:
+        container_password = "/run/secrets/odt-env-restic-password" if os.name == "nt" else str(password_file_path)
+        cmd += ["-v", f"{password_file_path}:{container_password}:ro",
+                "-e", f"RESTIC_PASSWORD_FILE={container_password}"]
+    else:
+        cmd += ["-e", "RESTIC_PASSWORD"]
+    return cmd + ["--entrypoint", "restic", "odoo", *args]
+
+
+def _workspace_filestore_path(target: str, root: Path, cfg: ProjectConfig, db_name: str) -> Any:
+    if target == "docker":
+        return f"/var/lib/odoo/filestore/{db_name}"
+    layout = Layout.from_root(root)
+    raw_dir = str(cfg.config.get("data_dir") or "").strip()
+    if raw_dir:
+        specified_dir = Path(raw_dir).expanduser()
+        layout = replace(layout, data_dir=(specified_dir if specified_dir.is_absolute()
+                                           else root / specified_dir).resolve())
+    return layout.data_dir / "filestore" / db_name
+
+
+def _workspace_tar_command(target: str, arguments: list[str]) -> list[str]:
+    if target == "docker":
+        return _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+                                              "--entrypoint", "tar", "odoo", *arguments]
+    return ["tar", *arguments]
+
+
+def _workspace_temp_backup(output: Path, command: list[str], root: Path, env: Optional[dict[str, str]]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+    tmp_path = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            _workspace_command(command, root, env=env, stdout=stream)
+        os.replace(tmp_path, output)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str) -> int:
+    """Execute backup/restore tasks directly from the installed CLI (no generated scripts)."""
+    descriptions = {
+        "backup-db": "Create a PostgreSQL custom-format database backup.",
+        "restore-db": "Restore a PostgreSQL dump into the workspace database.",
+        "backup-filestore": "Create a compressed backup of the database filestore.",
+        "restore-filestore": "Restore the database filestore from a compressed archive.",
+        "restic": "Run a Restic command against the configured repository.",
+        "backup-filestore-restic": "Create an incremental filestore backup using Restic.",
+        "restore-filestore-restic": "Restore the database filestore from a Restic snapshot.",
+    }
+    parser = argparse.ArgumentParser(
+        prog=f"{prog} {action}", description=descriptions[action],
+    )
+    parser.add_argument("--root", default=".", metavar="ROOT", help="Workspace root (default: current directory).")
+    if action in ("restore-db", "restore-filestore", "restore-filestore-restic"):
+        parser.add_argument("--force", action="store_true", help="Replace an existing destination (destructive).")
+    if action == "restore-db":
+        mode = parser.add_mutually_exclusive_group()
+        mode.add_argument("--copy", action="store_true", help="Regenerate database identity (default).")
+        mode.add_argument("--move", action="store_true", help="Preserve database identity.")
+    if action in ("backup-db", "backup-filestore"):
+        parser.add_argument("output", nargs="?", metavar="OUTPUT", help="Backup destination (default: timestamped file under odoo-backups/).")
+    elif action in ("restore-db", "restore-filestore"):
+        parser.add_argument("source", metavar="BACKUP", help="Path to the backup file to restore.")
+    elif action == "restore-filestore-restic":
+        parser.add_argument("snapshot", nargs="?", default="latest", metavar="SNAPSHOT", help="Restic snapshot ID (default: latest).")
+    elif action in ("restic", "backup-filestore-restic"):
+        parser.add_argument("restic_args", nargs=argparse.REMAINDER, metavar="RESTIC_ARGS", help="Arguments forwarded to Restic.")
+    if action in ("restic", "backup-filestore-restic"):
+        opts, extra = parser.parse_known_args(args)
+        opts.restic_args = extra + opts.restic_args
+    else:
+        opts = parser.parse_args(args)
+    root = Path(opts.root).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"workspace ROOT does not exist: {root}")
+    ini_path = root / _DEFAULT_PROJECT_INI_NAME
+    if not ini_path.is_file():
+        parser.error(f"workspace project file not found: {ini_path}")
+
+    try:
+        cfg = load_project_config(ini_path, log_resolved=False, log_overrides=False)
+        db_name = _docker_default_db_name(cfg) if target == "docker" else _native_default_db_name(cfg)
+        env = {**os.environ, **_native_pg_env(cfg)} if target == "venv" else None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filestore = _workspace_filestore_path(target, root, cfg, db_name)
+
+        if action in ("backup-db", "backup-filestore"):
+            ext = ".dump" if action == "backup-db" else "_filestore.tar.gz"
+            output = Path(opts.output).expanduser() if opts.output else root / "odoo-backups" / f"{db_name}_{stamp}{ext}"
+            if not output.is_absolute():
+                output = root / output
+            output = output.absolute()
+            if action == "backup-db":
+                if target == "docker":
+                    command = _workspace_docker_command() + ["compose", "exec", "-T", "db", "pg_dump",
+                        "--format=custom", "--no-owner", "--no-acl", "-U", "odoo", db_name]
+                else:
+                    command = [_workspace_postgres_command("pg_dump"), "--format=custom", "--no-owner", "--no-acl", db_name]
+            else:
+                command = _workspace_tar_command(target, ["-C", str(filestore), "-czf", "-", "."])
+            _logger.info("Backing up %s to %s", action, output)
+            _workspace_temp_backup(output, command, root, env)
+            _logger.info("Backup created: %s", output)
+            return 0
+
+        if action in ("restore-db", "restore-filestore"):
+            source = Path(opts.source).expanduser()
+            if not source.is_absolute():
+                source = root / source
+            if not source.is_file():
+                raise _WorkspaceOperationError(f"backup not found: {source}")
+            source = source.resolve()
+            if action == "restore-db":
+                exists = _workspace_db_exists(target, root, env, db_name)
+                if exists and not opts.force:
+                    raise _WorkspaceOperationError(f"target database '{db_name}' already exists. Use --force to replace it.")
+                if target == "venv" and not opts.move:
+                    click = root / "venv" / ("Scripts/click-odoo.exe" if os.name == "nt" else "bin/click-odoo")
+                    conf = root / "odoo-configs/odoo-server.conf"
+                    if not click.is_file() or not conf.is_file():
+                        raise _WorkspaceOperationError("--copy requires venv click-odoo and Odoo config")
+                _logger.info("Restoring database %s from %s", db_name, source)
+                if exists:
+                    drop = _workspace_db_command(target, "dropdb", "--force", "--maintenance-db=postgres", db_name)
+                    _workspace_command(drop, root, env=env)
+                _workspace_command(_workspace_db_command(target, "createdb", "--maintenance-db=postgres", db_name), root, env=env)
+                cmd = _workspace_db_command(target, "pg_restore", "--verbose", "--exit-on-error", "--no-owner", "--no-acl", "-d", db_name)
+                with source.open("rb") as stream:
+                    _workspace_command(cmd, root, env=env, stdin=stream)
+                if not opts.move:
+                    identity = 'env["ir.config_parameter"].init(force=True)\n'.encode("utf-8")
+                    if target == "docker":
+                        cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+                            "--entrypoint", "click-odoo", "odoo", "-c", "/etc/odoo/odoo.conf",
+                            "-d", db_name, "--log-level=error"]
+                    else:
+                        cmd = [str(click), "-c", str(conf), "-d", db_name, "--log-level=error"]
+                    try:
+                        result = subprocess.run(cmd, cwd=root, env=env, input=identity, check=False)
+                    except OSError as exc:
+                        raise _WorkspaceOperationError("could not run database identity reset") from exc
+                    if result.returncode:
+                        raise _WorkspaceOperationError("database identity reset failed")
+                    reset_sql = ("DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code';\n"
+                        "UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo';\n"
+                        "UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';\n").encode("utf-8")
+                    if target == "docker":
+                        sql_cmd = _workspace_docker_command() + ["compose", "exec", "-T", "db", "psql", "-v", "ON_ERROR_STOP=1", "-U", "odoo", "-d", db_name]
+                    else:
+                        sql_cmd = [_workspace_postgres_command("psql"), "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name]
+                    result = subprocess.run(sql_cmd, cwd=root, env=env, input=reset_sql, check=False)
+                    if result.returncode:
+                        raise _WorkspaceOperationError("database identity SQL reset failed")
+                _logger.info("Database restore completed: %s", db_name)
+                return 0
+
+            path = str(filestore)
+            if target == "docker":
+                exists_cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+                    "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo",
+                    "-c", 'if [ -d "/var/lib/odoo/filestore/${DB_NAME}" ]; then echo exists; else echo missing; fi']
+                exists = _workspace_command(exists_cmd, root, capture=True).strip() == b"exists"
+            else:
+                exists = Path(path).exists()
+            if exists and not opts.force:
+                raise _WorkspaceOperationError(f"target filestore for database '{db_name}' already exists. Use --force to replace it.")
+            _logger.info("Restoring filestore for %s from %s", db_name, source)
+            if target == "docker":
+                cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+                    "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
+                    'set -eu; target="/var/lib/odoo/filestore/${DB_NAME}"; rm -rf "${target}"; mkdir -p "${target}"; tar -xzf - -C "${target}"']
+                with source.open("rb") as stream:
+                    _workspace_command(cmd, root, stdin=stream)
+            else:
+                if Path(path).exists():
+                    if Path(path).is_dir() and not Path(path).is_symlink():
+                        shutil.rmtree(path)
+                    else:
+                        Path(path).unlink()
+                Path(path).mkdir(parents=True, exist_ok=True)
+                with source.open("rb") as stream:
+                    _workspace_command(["tar", "-xzf", "-", "-C", path], root, stdin=stream, env=env)
+            _logger.info("Filestore restore completed: %s", db_name)
+            return 0
+
+        if action in ("backup-filestore-restic", "restore-filestore-restic", "restic"):
+            host = os.environ.get("RESTIC_HOST") or socket.getfqdn()
+            if action == "restic":
+                if not opts.restic_args:
+                    parser.error("RESTIC_COMMAND is required")
+                command = _workspace_restic_command(target, root, opts.restic_args)
+            elif action == "backup-filestore-restic":
+                extra_tags = (["--tag", f"backup-id:{os.environ['RESTIC_BACKUP_ID']}"]
+                              if os.environ.get("RESTIC_BACKUP_ID") else [])
+                command = _workspace_restic_command(target, root, ["backup", "--host", host,
+                    "--tag", "odoo", "--tag", "filestore", "--tag", f"db:{db_name}",
+                    *extra_tags, *opts.restic_args, str(filestore)])
+            else:
+                # Respect the source database name from the original backup.
+                source_db = os.environ.get("RESTIC_SOURCE_DB_NAME", db_name)
+                if len(source_db) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", source_db):
+                    raise _WorkspaceOperationError("invalid RESTIC_SOURCE_DB_NAME")
+                source_filestore = _workspace_filestore_path(target, root, cfg, source_db)
+                path = str(filestore)
+                if target == "docker":
+                    exists_cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
+                        "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo",
+                        "-c", 'if [ -d "/var/lib/odoo/filestore/${DB_NAME}" ]; then echo exists; else echo missing; fi']
+                    exists = _workspace_command(exists_cmd, root, capture=True).strip() == b"exists"
+                else:
+                    exists = Path(path).exists()
+                if exists and not opts.force:
+                    raise _WorkspaceOperationError(f"target filestore for database '{db_name}' already exists. Use --force to replace it.")
+                _logger.info("Restoring filestore for %s from Restic snapshot %s", db_name, opts.snapshot)
+                if target == "docker":
+                    cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
+                        "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
+                        'set -eu; rm -rf "/var/lib/odoo/filestore/${DB_NAME}"; mkdir -p "/var/lib/odoo/filestore/${DB_NAME}"']
+                    _workspace_command(cmd, root)
+                else:
+                    if Path(path).exists():
+                        if Path(path).is_dir() and not Path(path).is_symlink():
+                            shutil.rmtree(path)
+                        else:
+                            Path(path).unlink()
+                    Path(path).mkdir(parents=True, exist_ok=True)
+                restic_args = ["restore", f"{opts.snapshot}:{source_filestore}", "--target", path]
+                if opts.snapshot == "latest":
+                    restic_args += ["--host", host, "--path", str(source_filestore)]
+                command = _workspace_restic_command(target, root, restic_args)
+            _workspace_command(command, root, env=os.environ.copy())
+            _logger.info("Restic operation completed")
+            return 0
+        parser.error("unsupported command")
+    except (_WorkspaceOperationError, OSError, ValueError, configparser.Error) as exc:
+        if isinstance(exc, _WorkspaceOperationError):
+            _logger.error("%s", exc)
+        else:
+            _logger.error("Could not complete %s", action)
+        return 1
+    except Exception:
+        _logger.error("Could not complete %s", action)
+        return 1
+
+
+def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
+    """Run an Odoo operation directly, preserving its terminal and exit status."""
+    descriptions = {
+        "run": "Run Odoo in the selected workspace.",
+        "shell": "Open an interactive Odoo shell in the selected workspace.",
+        "update": "Update installed Odoo modules using click-odoo-update.",
+        "test": "Run Odoo tests (--test-enable --stop-after-init).",
+    }
+    parser = argparse.ArgumentParser(
+        prog=f"{prog} {action}", description=descriptions[action],
+        epilog="Additional options are forwarded to Odoo or click-odoo-update. "
+               "Use '-- --help' to request help from the underlying executable.",
+    )
+    parser.add_argument("--root", default=".", metavar="ROOT", help="Workspace root (default: current directory).")
+    if action == "update":
+        parser.add_argument("--all", action="store_true", help="Update all installed modules (maps to --update-all).")
+    opts, passthrough = parser.parse_known_args(args)
+    if passthrough and passthrough[0] == "--":
+        passthrough = passthrough[1:]
+    root = Path(opts.root).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"workspace ROOT does not exist: {root}")
+    ini = root / _DEFAULT_PROJECT_INI_NAME
+    if not ini.is_file():
+        parser.error(f"workspace project file not found: {ini}")
+    try:
+        cfg = load_project_config(ini, log_resolved=False, log_overrides=False)
+        if target == "docker":
+            db_name = _docker_default_db_name(cfg)
+            docker = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps"]
+            conf = "/etc/odoo/odoo.conf"
+            if action == "run":
+                command = docker + ["odoo", "--", "-c", conf, "-d", db_name, *passthrough]
+            elif action == "shell":
+                command = docker + ["--entrypoint", "odoo", "odoo", "shell", "-c", conf, "-d", db_name, *passthrough]
+            elif action == "test":
+                command = docker + ["-T", "odoo", "--", "-c", conf, "-d", db_name,
+                                    "--test-enable", "--stop-after-init", *passthrough]
+            else:
+                command = docker + ["-T", "--entrypoint", "click-odoo-update", "odoo",
+                                    "-c", conf, "-d", db_name, "--log-level", "debug"]
+                if opts.all:
+                    command.append("--update-all")
+                command.extend(passthrough)
+        else:
+            layout = Layout.from_root(root)
+            conf = layout.conf_path
+            venv = root / "venv"
+            if not venv.is_dir() or not conf.is_file():
+                raise _WorkspaceOperationError("native virtualenv or Odoo config does not exist")
+            if action == "update":
+                executable = venv / ("Scripts/click-odoo-update.exe" if os.name == "nt" else "bin/click-odoo-update")
+                command = [str(executable), "-c", str(conf), "--log-level", "debug"]
+                if opts.all:
+                    command.append("--update-all")
+                command.extend(passthrough)
+            else:
+                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
+                if not python.is_file() or not odoo_bin.is_file():
+                    raise _WorkspaceOperationError("native Odoo Python or odoo-bin not found")
+                command = [str(python), str(odoo_bin)]
+                if action == "shell":
+                    command.append("shell")
+                command += ["-c", str(conf)]
+                if action == "test":
+                    command += ["--test-enable", "--stop-after-init"]
+                command.extend(passthrough)
+        # Inherit stdin/stdout/stderr (interactive shells, Ctrl+C and CI output).
+        return subprocess.run(command, cwd=root, check=False).returncode
+    except (OSError, ValueError, configparser.Error, _WorkspaceOperationError) as exc:
+        _logger.error("Could not run %s: %s", action, exc)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
 def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     # Standard logging to stdout only.
     logging.basicConfig(
@@ -8637,23 +6421,32 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if sys.argv[1:2] and sys.argv[1] in ("run", "shell", "update", "test"):
+        raise SystemExit(_run_odoo_cli(target, sys.argv[1], sys.argv[2:], prog))
+    if sys.argv[1:2] == ["neutralize"]:
+        raise SystemExit(_run_neutralize_cli(target, sys.argv[2:], prog))
+    if sys.argv[1:2] and sys.argv[1] in _BACKUP_RESTORE_SCRIPT_NAMES:
+        raise SystemExit(_run_backup_restore_cli(target, sys.argv[1], sys.argv[2:], prog))
     _logger.info("%s %s", prog, __version__)
 
-    parser = build_parser(prog=prog, target=target)
-    args = parser.parse_args()
-
-    init_project_raw = getattr(args, 'init_project', None)
-    init_project = init_project_raw is not None
-    init_project_root_raw = (init_project_raw or "").strip() if init_project else ""
+    # The init subcommand uses the same provisioning path as ordinary INI runs.
+    init_command = sys.argv[1:2] == ["init"]
+    parser = build_parser(
+        prog=f"{prog} init" if init_command else prog,
+        target=target,
+        init_command=init_command,
+    )
+    args = parser.parse_args(sys.argv[2:] if init_command else sys.argv[1:])
+    init_project_root_raw = (args.init_root or "").strip() if init_command else ""
 
     if init_project_root_raw and args.root:
         parser.error(
-            "workspace ROOT was specified both as --init ROOT and --root; "
+            "workspace ROOT was specified both as init ROOT and --root; "
             "use only one of them."
         )
 
-    if bool(getattr(args, 'show_last_run', False)) and init_project:
-        parser.error("--init cannot be used together with --show-last-run.")
+    if bool(getattr(args, 'show_last_run', False)) and init_command:
+        parser.error("init cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
         parser.error("--create-from-bundle cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
@@ -8673,7 +6466,6 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     reuse_wheelhouse = create_venv_from_wheelhouse
     create_venv = bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse
     no_configs = bool(getattr(args, 'no_configs', False))
-    no_scripts = bool(getattr(args, 'no_scripts', False))
     no_data_dir = bool(getattr(args, 'no_data_dir', False))
     create_docker_deploy_requested = bool(getattr(args, 'create_docker_deploy', False))
     no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
@@ -8710,8 +6502,6 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             conflicting_options.append("INI")
         if getattr(args, 'include_inis', None):
             conflicting_options.append("--include")
-        if init_project:
-            conflicting_options.append("--init")
         if args.all or args.odoo or args.addons:
             conflicting_options.append("--sync-*")
         if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
@@ -8757,7 +6547,6 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 create_venv=True,
                 clear_pip_wheel_cache=False,
                 no_configs=no_configs,
-                no_scripts=no_scripts,
                 no_data_dir=no_data_dir,
                 # Bundle import is the offline deployment path. Local-development
                 # Docker artifacts intentionally require online dependency resolution
@@ -8792,15 +6581,12 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     preserved_db_name: Optional[str] = None
     source_snapshot_ready = False
 
-    if init_project and not implicit_ini:
-        parser.error("--init can only be used when INI is omitted and no -i/--include is provided.")
-
     if implicit_ini:
         if init_project_root_raw:
             root_override = _validate_root_override(
                 parser,
                 init_project_root_raw,
-                option_name="--init ROOT",
+                option_name="init ROOT",
             )
         elif args.root:
             root_override = _validate_root_override(parser, args.root)
@@ -8828,7 +6614,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
 
         try:
             created_default_ini = False
-            if init_project:
+            if init_command:
                 created_default_ini = not ini_path.exists()
                 _write_default_project_ini_template(ini_path)
                 if created_default_ini:
@@ -8837,7 +6623,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                     project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                     _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
             elif not ini_path.is_file():
-                suggested_cmd = [parser.prog, "--init"]
+                suggested_cmd = [prog, "init"]
                 if args.root:
                     suggested_cmd.append(str(root_override))
                 parser.error(
@@ -9034,7 +6820,6 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             create_venv=create_venv,
             clear_pip_wheel_cache=clear_pip_wheel_cache,
             no_configs=no_configs,
-            no_scripts=no_scripts,
             no_data_dir=no_data_dir,
             target=target,
             create_docker_deploy_requested=create_docker_deploy_requested,
@@ -9055,7 +6840,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
 
 
 def main_venv() -> None:
-    """Entry point for native Odoo config and scripts (venv is opt-in)."""
+    """Entry point for native Odoo workspaces (venv is opt-in)."""
     main(target="venv", prog="odoo-compose-venv")
 
 

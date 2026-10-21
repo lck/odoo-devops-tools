@@ -38,7 +38,7 @@ jobs:
             index=$((index + 1))
             workspace="$tmp/valid-$index"
             mkdir -p "$workspace"
-            uv run odoo-compose --init --root "$workspace" --no-provisioning-log \
+            uv run odoo-compose init --root "$workspace" --no-provisioning-log \
               --set "docker:base_image=$image"
             grep -Fxq "FROM $image" "$workspace/docker/local/Dockerfile"
           done
@@ -52,7 +52,7 @@ jobs:
             index=$((index + 1))
             workspace="$tmp/invalid-$index"
             mkdir -p "$workspace"
-            if uv run odoo-compose --init --root "$workspace" --no-provisioning-log \
+            if uv run odoo-compose init --root "$workspace" --no-provisioning-log \
               --set "docker:base_image=$image" > "$tmp/rejected.log" 2>&1; then
               echo "Unsafe Docker base_image was accepted: $image" >&2
               exit 1
@@ -102,7 +102,7 @@ jobs:
             index=$((index + 1))
             key="${override#docker:}"
             key="${key%%=*}"
-            if uv run odoo-compose --init --root "$tmp/invalid-$index" \
+            if uv run odoo-compose init --root "$tmp/invalid-$index" \
               --no-provisioning-log --set "$override" > "$tmp/rejected.log" 2>&1; then
               echo "Invalid Docker resource setting was accepted: $override" >&2
               exit 1
@@ -117,7 +117,7 @@ jobs:
           trap 'rm -rf "$tmp"' EXIT
 
           for policy in no always unless-stopped on-failure; do
-            uv run odoo-compose --init --root "$tmp/$policy" --no-provisioning-log \
+            uv run odoo-compose init --root "$tmp/$policy" --no-provisioning-log \
               --set docker:mailpit_enabled=true \
               --set "docker:restart=$policy"
             (cd "$tmp/$policy" && docker compose config --format json) | \
@@ -134,7 +134,7 @@ jobs:
           index=0
           for invalid in '' yes false on-fail 'always; echo BAD'; do
             index=$((index + 1))
-            if uv run odoo-compose --init --root "$tmp/invalid-$index" \
+            if uv run odoo-compose init --root "$tmp/invalid-$index" \
               --no-provisioning-log --set "docker:restart=$invalid" \
               > "$tmp/rejected.log" 2>&1; then
               echo "Invalid Docker restart was accepted: $invalid" >&2
@@ -148,7 +148,7 @@ jobs:
           set -euo pipefail
           workspace="$(mktemp -d)"
           trap 'rm -rf "$workspace"' EXIT
-          uv run odoo-compose --init --root "$workspace" --no-provisioning-log
+          uv run odoo-compose init --root "$workspace" --no-provisioning-log
           compose="$workspace/compose.yaml"
           ini="$workspace/odoo-project.ini"
 
@@ -184,7 +184,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --init --sync-addons \
+          uv run odoo-compose init --sync-addons \
             --set odoo:version=18.0 \
             --set docker:postgres_version=18 \
             --set docker:mailpit_enabled=true \
@@ -205,7 +205,7 @@ jobs:
             index=$((index + 1))
             workspace="odoo-workspace-unsafe-db-${index}"
             mkdir -p "${workspace}"
-            if (cd "${workspace}" && uv run odoo-compose --init --set "config:db_name=${invalid_db}") > "invalid-db-${index}.log" 2>&1; then
+            if (cd "${workspace}" && uv run odoo-compose init --set "config:db_name=${invalid_db}") > "invalid-db-${index}.log" 2>&1; then
               echo "ERROR: unsafe db_name was accepted: ${invalid_db}" >&2
               exit 1
             fi
@@ -219,24 +219,17 @@ jobs:
           test -f odoo-workspace/docker/local/.dockerignore
           test -f odoo-workspace/docker/local/configs/odoo.conf
           test -f odoo-workspace/docker/local/requirements/all-requirements.in.txt
-          test -x odoo-workspace/docker/local/scripts/run.sh
-          test -x odoo-workspace/docker/local/scripts/shell.sh
-          test -x odoo-workspace/docker/local/scripts/update.sh
-          test -x odoo-workspace/docker/local/scripts/backup-db.sh
-          test -x odoo-workspace/docker/local/scripts/restore-db.sh
-          test -x odoo-workspace/docker/local/scripts/neutralize-db.sh
-          test -x odoo-workspace/docker/local/scripts/backup-filestore.sh
-          test -x odoo-workspace/docker/local/scripts/restore-filestore.sh
-          test -x odoo-workspace/docker/local/scripts/restic.sh
-          test -x odoo-workspace/docker/local/scripts/backup-filestore-restic.sh
-          test -x odoo-workspace/docker/local/scripts/restore-filestore-restic.sh
-
-          for helper in \
-            run shell update backup-db restore-db neutralize-db \
-            backup-filestore restore-filestore restic restore-filestore-restic; do
-            grep -Fq 'ODOO_DOCKER_SUDO' "odoo-workspace/docker/local/scripts/${helper}.sh"
-            grep -Fq 'DOCKER=(sudo docker)' "odoo-workspace/docker/local/scripts/${helper}.sh"
-          done
+          test ! -e odoo-workspace/docker/local/scripts/run.sh
+          test ! -e odoo-workspace/docker/local/scripts/shell.sh
+          test ! -e odoo-workspace/docker/local/scripts/update.sh
+          test ! -e odoo-workspace/docker/local/scripts/backup-db.sh
+          test ! -e odoo-workspace/docker/local/scripts/restore-db.sh
+          test ! -e odoo-workspace/docker/local/scripts/neutralize-db.sh
+          test ! -e odoo-workspace/docker/local/scripts/backup-filestore.sh
+          test ! -e odoo-workspace/docker/local/scripts/restore-filestore.sh
+          test ! -e odoo-workspace/docker/local/scripts/restic.sh
+          test ! -e odoo-workspace/docker/local/scripts/backup-filestore-restic.sh
+          test ! -e odoo-workspace/docker/local/scripts/restore-filestore-restic.sh
 
           test ! -e odoo-workspace/docker/local/requirements/all-requirements.lock.txt
           grep -q 'uv pip compile .*all-requirements.in.txt' odoo-workspace/docker/local/Dockerfile
@@ -288,21 +281,15 @@ jobs:
             ((.services.mailpit.mem_limit | tostring) == "268435456")
           '
 
-      - name: Check legacy neutralization helper generation
+      - name: Check legacy neutralize subcommand preview
         run: |
-          mkdir -p odoo-workspace-legacy
+          mkdir -p odoo-workspace-legacy/neutralize
+          printf '%s\n' 'SELECT ${odoo:version};' > odoo-workspace-legacy/neutralize/10-version.sql
           cd odoo-workspace-legacy
-          uv run odoo-compose --init --set odoo:version=15.0
-          test -x docker/local/scripts/neutralize-db.sh
-          grep -Fq "Using legacy minimal neutralization for Odoo 15." docker/local/scripts/neutralize-db.sh
-          grep -Fq "INFO: Disabling scheduled actions." docker/local/scripts/neutralize-db.sh
-          grep -Fq "INFO: Disabling outgoing mail servers." docker/local/scripts/neutralize-db.sh
-          grep -Fq "INFO: Disabling incoming mail servers if fetchmail is installed." docker/local/scripts/neutralize-db.sh
-          test "$(grep -c -- '^  -c ' docker/local/scripts/neutralize-db.sh || true)" -eq 3
-          grep -Fq 'UPDATE ir_cron SET active = FALSE WHERE active = TRUE;' docker/local/scripts/neutralize-db.sh
-          grep -Fq 'UPDATE ir_mail_server SET active = FALSE WHERE active = TRUE;' docker/local/scripts/neutralize-db.sh
-          grep -Fq "to_regclass('fetchmail_server')" docker/local/scripts/neutralize-db.sh
-          ! grep -Fq -- "--entrypoint click-odoo odoo" docker/local/scripts/neutralize-db.sh
+          uv run odoo-compose init --set odoo:version=15.0
+          test ! -e docker/local/scripts/neutralize-db.sh
+          uv run odoo-compose neutralize --dry-run
+          grep -Fq "E'15.0'" .odt-env/neutralize-preview/10-version.sql
 
       - name: Build local Docker image with Compose
         working-directory: ./odoo-workspace
@@ -339,10 +326,10 @@ jobs:
         working-directory: ./odoo-workspace
         run: docker compose up -d db mailpit
 
-      - name: Init database with generated run helper
+      - name: Init database with CLI run
         working-directory: ./odoo-workspace
         run: |
-          ./docker/local/scripts/run.sh \
+          uv run odoo-compose run \
             -i fleet \
             --without-demo=all \
             --stop-after-init
@@ -362,17 +349,17 @@ jobs:
           # Keep the application stopped during subsequent database/filestore restore checks.
           docker compose stop odoo
 
-      - name: Test Docker shell and update helpers
+      - name: Test Docker shell and update subcommands
         working-directory: ./odoo-workspace
         run: |
-          printf 'print(env.cr.dbname)\n' | ./docker/local/scripts/shell.sh > shell-output.log
+          printf 'print(env.cr.dbname)\n' | uv run odoo-compose shell > shell-output.log
           grep -Fq "odoo" shell-output.log
 
-          ./docker/local/scripts/update.sh --help > update-help.log 2>&1
-          grep -Fq "Usage:" update-help.log
+          uv run odoo-compose update --help > update-help.log 2>&1
+          grep -Fq "usage: odoo-compose update" update-help.log
 
-          ODOO_DOCKER_SUDO=1 ./docker/local/scripts/update.sh --help > update-sudo-help.log 2>&1
-          grep -Fq "Usage:" update-sudo-help.log
+          ODOO_DOCKER_SUDO=1 uv run odoo-compose update --help > update-sudo-help.log 2>&1
+          grep -Fq "usage: odoo-compose update" update-sudo-help.log
 
       - name: Test Mailpit SMTP, POP3 and persistence
         working-directory: ./odoo-workspace
@@ -445,8 +432,8 @@ jobs:
       - name: Back up database and filestore with generated helpers
         working-directory: ./odoo-workspace
         run: |
-          ./docker/local/scripts/backup-db.sh ./odoo-backups/test.dump
-          ./docker/local/scripts/backup-filestore.sh ./odoo-backups/test-filestore.tar.gz
+          uv run odoo-compose backup-db ./odoo-backups/test.dump
+          uv run odoo-compose backup-filestore ./odoo-backups/test-filestore.tar.gz
           test -s ./odoo-backups/test.dump
           test -s ./odoo-backups/test-filestore.tar.gz
 
@@ -458,11 +445,11 @@ jobs:
           test -n "${source_uuid}"
 
           uv run odoo-compose --set config:db_name=odoo_restore
-          ./docker/local/scripts/restore-db.sh ./odoo-backups/test.dump
+          uv run odoo-compose restore-db ./odoo-backups/test.dump
           uv run odoo-compose --set config:db_name=odoo_move
-          ./docker/local/scripts/restore-db.sh --move ./odoo-backups/test.dump
+          uv run odoo-compose restore-db --move ./odoo-backups/test.dump
           uv run odoo-compose --set config:db_name=odoo_restore
-          ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz
+          uv run odoo-compose restore-filestore ./odoo-backups/test-filestore.tar.gz
 
           copy_uuid="$(docker compose exec -T db psql -U odoo -d odoo_restore -tAc \
             "SELECT value FROM ir_config_parameter WHERE key = 'database.uuid';")"
@@ -478,15 +465,14 @@ jobs:
         run: |
           cp -R ../examples/neutralize ./neutralize
 
-          ./docker/local/scripts/neutralize-db.sh \
-            2>&1 | tee neutralize-db.log
+          uv run odoo-compose neutralize \
+            2>&1 | tee neutralize.log
 
-          grep -Fq "INFO: Using native Odoo neutralization for Odoo 18." neutralize-db.log
-          grep -Fq "Neutralization finished" neutralize-db.log
-          grep -Fq "INFO: Running workspace neutralization script: 01-delete-fetchmail-servers.sql" neutralize-db.log
-          grep -Fq "INFO: Running workspace neutralization script: 02-disable-outgoing-mail-servers.sql" neutralize-db.log
-          grep -Fq "INFO: Running workspace neutralization script: 03-set-ir-config-params.sql" neutralize-db.log
-          grep -Fq "INFO: Database neutralization completed: odoo_restore" neutralize-db.log
+          grep -Fq "Using native Odoo neutralization for Odoo 18" neutralize.log
+          grep -Fq "Running workspace neutralization SQL: 01-delete-fetchmail-servers.sql" neutralize.log
+          grep -Fq "Running workspace neutralization SQL: 02-disable-outgoing-mail-servers.sql" neutralize.log
+          grep -Fq "Running workspace neutralization SQL: 03-set-ir-config-params.sql" neutralize.log
+          grep -Fq "Database neutralization completed: odoo_restore" neutralize.log
 
           base_url="$(docker compose exec -T db psql -U odoo -d odoo_restore -tAc \
             "SELECT value FROM ir_config_parameter WHERE key = 'web.base.url';")"
@@ -500,9 +486,9 @@ jobs:
         working-directory: ./odoo-workspace
         run: |
           set +e
-          db_output="$(./docker/local/scripts/restore-db.sh ./odoo-backups/test.dump 2>&1)"
+          db_output="$(uv run odoo-compose restore-db ./odoo-backups/test.dump 2>&1)"
           db_status=$?
-          fs_output="$(./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz 2>&1)"
+          fs_output="$(uv run odoo-compose restore-filestore ./odoo-backups/test-filestore.tar.gz 2>&1)"
           fs_status=$?
           set -e
 
@@ -512,8 +498,8 @@ jobs:
           test "${fs_status}" -ne 0
           grep -Fq "target filestore for database 'odoo_restore' already exists. Use --force to replace it." <<< "${fs_output}"
 
-          ./docker/local/scripts/restore-db.sh --force ./odoo-backups/test.dump
-          ./docker/local/scripts/restore-filestore.sh ./odoo-backups/test-filestore.tar.gz --force
+          uv run odoo-compose restore-db --force ./odoo-backups/test.dump
+          uv run odoo-compose restore-filestore ./odoo-backups/test-filestore.tar.gz --force
 
       - name: Back up and restore filestore with restic
         working-directory: ./odoo-workspace
@@ -522,24 +508,24 @@ jobs:
           RESTIC_PASSWORD: test-restic-password
           RESTIC_HOST: odoo-compose-ci
         run: |
-          ./docker/local/scripts/restic.sh init
+          uv run odoo-compose restic init
 
           uv run odoo-compose --set config:db_name=odoo
           RESTIC_BACKUP_ID=ci-test \
-            ./docker/local/scripts/backup-filestore-restic.sh
+            uv run odoo-compose backup-filestore-restic
 
-          ./docker/local/scripts/restic.sh snapshots \
+          uv run odoo-compose restic snapshots \
             --host odoo-compose-ci \
             --path /var/lib/odoo/filestore/odoo \
             --tag filestore
 
           uv run odoo-compose --set config:db_name=odoo_restic_restore
           RESTIC_SOURCE_DB_NAME=odoo \
-            ./docker/local/scripts/restore-filestore-restic.sh latest
+            uv run odoo-compose restore-filestore-restic latest
 
           set +e
           restic_output="$(RESTIC_SOURCE_DB_NAME=odoo \
-            ./docker/local/scripts/restore-filestore-restic.sh latest 2>&1)"
+            uv run odoo-compose restore-filestore-restic latest 2>&1)"
           restic_status=$?
           set -e
 
@@ -547,7 +533,7 @@ jobs:
           grep -Fq "target filestore for database 'odoo_restic_restore' already exists. Use --force to replace it." <<< "${restic_output}"
 
           RESTIC_SOURCE_DB_NAME=odoo \
-            ./docker/local/scripts/restore-filestore-restic.sh latest --force
+            uv run odoo-compose restore-filestore-restic latest --force
 
       - name: Verify restored database and filestore
         working-directory: ./odoo-workspace

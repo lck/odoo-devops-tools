@@ -91,26 +91,48 @@ jobs:
           INI
           }
 
-          echo '--- Implicit INI and --init ---'
+          echo '--- Implicit INI and init ---'
           mkdir -p "$tmp/empty" "$tmp/shortcut"
           reject --root "$tmp/empty"
           missing "$tmp/empty/odoo-project.ini" 'missing implicit INI not created'
-          ini --init --root "$tmp/empty"
-          exists "$tmp/empty/odoo-project.ini" '--init creates workspace INI'
+          ini init --root "$tmp/empty"
+          exists "$tmp/empty/odoo-project.ini" 'init creates workspace INI'
           exists "$tmp/empty/odoo-configs/odoo-server.conf" 'native config generated without building venv'
-          exists "$tmp/empty/odoo-scripts/run.sh" 'native helper scripts generated'
+          test ! -d "$tmp/empty/odoo-scripts" || { echo 'Unexpected native helper directory'; exit 1; }
+          ok 'native provisioning does not create an unused helper directory'
+          missing "$tmp/empty/odoo-scripts/run.sh" 'native operations require no generated run helper'
           missing "$tmp/empty/venv" 'no virtualenv provisioned'
           cp "$tmp/empty/odoo-project.ini" "$tmp/init.original"
-          ini --init --root "$tmp/empty"
-          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'repeated --init preserves existing INI'
+          ini init --root "$tmp/empty"
+          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'repeated init preserves existing INI'
           ini --root "$tmp/empty"
           same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'no overrides: workspace INI unchanged'
-          ini --init "$tmp/shortcut"
-          exists "$tmp/shortcut/odoo-project.ini" '--init ROOT shortcut'
+          ini init "$tmp/shortcut"
+          exists "$tmp/shortcut/odoo-project.ini" 'init ROOT shorthand'
           reject --init "$tmp/shortcut" --root "$tmp/shortcut"
-          ini --init --root "$tmp/empty" --set docker:restart=no -e test_num=96
-          contains "$tmp/empty/odoo-project.ini" 'restart = no' '--init + --set adds Docker section'
-          contains "$tmp/empty/odoo-project.ini" 'test_num = 96' '--init + -e adds vars section'
+          ini init --root "$tmp/empty" --set docker:restart=no -e test_num=96
+          contains "$tmp/empty/odoo-project.ini" 'restart = no' 'init + --set adds Docker section'
+          contains "$tmp/empty/odoo-project.ini" 'test_num = 96' 'init + -e adds vars section'
+
+          echo '--- init subcommand (native and Docker) ---'
+          mkdir -p "$tmp/native-init" "$tmp/docker-init" "$tmp/native-root-flag"
+          ini init "$tmp/native-init" --set odoo:version=18.0
+          exists "$tmp/native-init/odoo-project.ini" 'native init ROOT creates project INI'
+          contains "$tmp/native-init/odoo-project.ini" 'version = 18.0' 'native init accepts --set'
+          cp "$tmp/native-init/odoo-project.ini" "$tmp/native-init.original"
+          ini init "$tmp/native-init"
+          same "$tmp/native-init.original" "$tmp/native-init/odoo-project.ini" 'native init preserves project INI'
+          ini init --root "$tmp/native-root-flag"
+          exists "$tmp/native-root-flag/odoo-project.ini" 'native init --root works'
+          ini_docker init "$tmp/docker-init" --set docker:restart=no
+          exists "$tmp/docker-init/odoo-project.ini" 'Docker init ROOT creates project INI'
+          contains "$tmp/docker-init/odoo-project.ini" 'restart = no' 'Docker init accepts --set'
+          reject init "$tmp/native-init" --root "$tmp/native-init"
+          reject init "$tmp/native-init" -i "$tmp/empty/odoo-project.ini"
+          reject --init --root "$tmp/native-init"
+          reject --init-project "$tmp/native-init"
+          odoo-compose-venv init --help | grep -Fq 'usage: odoo-compose-venv init'
+          odoo-compose init --help | grep -Fq 'usage: odoo-compose init'
 
           echo '--- Implicit --set / -S / -e / --extra-var ---'
           mkdir -p "$tmp/implicit"
@@ -404,5 +426,223 @@ jobs:
           contains "$tmp/http-root/project.ini" 'restart = unless-stopped' 'URL fixture not modified'
           ini 'http://127.0.0.1:18765/project.ini' --root "$tmp/http-target"
           contains "$tmp/http-target/odoo-project.ini" 'restart = unless-stopped' 'URL INI without overrides refreshes workspace'
+
+          echo '--- Workspace neutralization SQL interpolation / dry-run (no DB, Docker or venv) ---'
+          mkdir -p "$tmp/sql-mock-bin"
+          cat > "$tmp/sql-mock-bin/psql" <<'SH'
+          #!/usr/bin/env bash
+          echo "psql $*" >> "$MOCK_SQL_CALLS"
+          if [[ "$*" == *'SELECT datname'* ]]; then
+            echo testdb
+          elif [[ "$*" != *' -c '* ]]; then
+            cat > "$MOCK_SQL_INPUT"
+            if [[ "${FAIL_SQL:-0}" == '1' ]]; then
+              echo 'SENSITIVE_RESULT_NEVER_LOG' >&2
+              exit 7
+            fi
+          fi
+          SH
+          cat > "$tmp/sql-mock-bin/docker" <<'SH'
+          #!/usr/bin/env bash
+          echo "docker $*" >> "$MOCK_SQL_CALLS"
+          if [[ "$*" == *'SELECT datname'* ]]; then
+            echo testdb
+          elif [[ "$*" == *' psql '* && "$*" != *' -c '* ]]; then
+            cat > "$MOCK_SQL_INPUT"
+            if [[ "${FAIL_SQL:-0}" == '1' ]]; then
+              echo 'SENSITIVE_RESULT_NEVER_LOG' >&2
+              exit 7
+            fi
+          fi
+          SH
+          chmod +x "$tmp/sql-mock-bin/psql" "$tmp/sql-mock-bin/docker"
+          for mode in native docker; do
+            work="$tmp/sql-$mode"
+            mkdir -p "$work/neutralize"
+            cat > "$work/odoo-project.ini" <<'INI'
+          [odoo]
+          version = 13.0
+          [vars]
+          company = John's Company
+          suffix = stage
+          url = https://${vars:suffix}.example.com
+          [config]
+          db_name = testdb
+          INI
+            cat > "$work/neutralize/03-params.sql" <<'SQL'
+          UPDATE ir_config_parameter SET value = ${vars:url}
+          WHERE key = ${vars:company};
+          SELECT $$, $100, \${vars:company}, ${vars:company};
+          SQL
+            cp "$work/neutralize/03-params.sql" "$work/original.sql"
+            if [[ "$mode" == native ]]; then
+              ini --root "$work"
+              missing "$work/odoo-scripts/neutralize-db.sh" "$mode does not generate a neutralization helper"
+              mkdir -p "$work/odoo-scripts"
+              printf 'obsolete\n' > "$work/odoo-scripts/neutralize-db.sh"
+              printf 'obsolete\n' > "$work/odoo-scripts/neutralize-db.bat"
+              ini --root "$work"
+              missing "$work/odoo-scripts/neutralize-db.sh" "$mode removes old shell neutralization helper"
+              missing "$work/odoo-scripts/neutralize-db.bat" "$mode removes old Windows neutralization helper"
+            else
+              ini_docker --root "$work"
+              missing "$work/docker/local/scripts/neutralize-db.sh" "$mode does not generate a neutralization helper"
+              mkdir -p "$work/docker/local/scripts" # Simulate a retired script directory from an older workspace.
+              printf 'obsolete\n' > "$work/docker/local/scripts/neutralize-db.sh"
+              printf 'obsolete\n' > "$work/docker/local/scripts/neutralize-db.bat"
+              ini_docker --root "$work"
+              missing "$work/docker/local/scripts/neutralize-db.sh" "$mode removes old shell neutralization helper"
+              missing "$work/docker/local/scripts/neutralize-db.bat" "$mode removes old Windows neutralization helper"
+            fi
+          done
+
+
+          echo '--- Direct neutralize commands ---'
+          for mode in native docker; do
+            work="$tmp/sql-$mode"
+            export MOCK_SQL_CALLS="$work/cli-db.calls" MOCK_SQL_INPUT="$work/cli-sql.input"
+            rm -f "$MOCK_SQL_CALLS" "$MOCK_SQL_INPUT"
+            if [[ "$mode" == native ]]; then
+              command=(odoo-compose-venv)
+            else
+              command=(odoo-compose)
+            fi
+            PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" --dry-run > "$work/cli.log" 2>&1 || {
+              cat "$work/cli.log"; exit 1;
+            }
+            exists "$work/.odt-env/neutralize-preview/03-params.sql" "$mode CLI preview without helper"
+            missing "$MOCK_SQL_CALLS" "$mode CLI preview never contacts DB or Docker"
+            contains "$work/.odt-env/neutralize-preview/03-params.sql" "E'John''s Company'" "$mode CLI quotes SQL literals"
+            contains "$work/.odt-env/neutralize-preview/03-params.sql" '$$, $100, ${vars:company}' "$mode preserves dollars and escaped interpolation"
+            same "$work/original.sql" "$work/neutralize/03-params.sql" "$mode SQL source preserved after preview"
+            if [[ "$(stat -c '%a' "$work/.odt-env/neutralize-preview/03-params.sql")" != 600 ]]; then
+              echo 'SQL preview permissions not private'; exit 1
+            fi
+            ok "$mode preview permissions 0600"
+            PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" --dry-run ./cli-preview > "$work/cli.log" 2>&1
+            exists "$work/cli-preview/03-params.sql" "$mode CLI custom preview destination"
+            PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" > "$work/cli.log" 2>&1 || {
+              cat "$work/cli.log"; exit 1;
+            }
+            exists "$MOCK_SQL_INPUT" "$mode CLI sends SQL to PostgreSQL without helper"
+            contains "$MOCK_SQL_INPUT" "E'https://stage.example.com'" "$mode CLI resolves nested interpolation"
+            contains "$MOCK_SQL_CALLS" 'UPDATE ir_cron SET active' "$mode CLI executes legacy neutralization"
+            same "$work/original.sql" "$work/neutralize/03-params.sql" "$mode CLI never overwrites SQL source"
+            if PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" --dry-run neutralize > "$work/cli.log" 2>&1; then
+              echo "$mode CLI preview unexpectedly overwrote source SQL"; exit 1
+            fi
+            same "$work/original.sql" "$work/neutralize/03-params.sql" "$mode CLI rejects source overwrite"
+            rm -f "$MOCK_SQL_CALLS" "$MOCK_SQL_INPUT"
+            printf 'SELECT ${vars:missing};\n' > "$work/neutralize/03-params.sql"
+            if PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" > "$work/cli.log" 2>&1; then
+              echo "$mode CLI unexpectedly accepted unknown interpolation"; exit 1
+            fi
+            if PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" --dry-run ./bad-preview > "$work/cli.log" 2>&1; then
+              echo "$mode CLI accepted missing variable during preview"; exit 1
+            fi
+            missing "$work/bad-preview/03-params.sql" "$mode CLI does not write invalid SQL preview"
+            absent "$work/cli.log" 'John' "$mode CLI errors do not contain interpolated secrets"
+            missing "$MOCK_SQL_CALLS" "$mode CLI rejects invalid SQL before DB access"
+            cp "$work/original.sql" "$work/neutralize/03-params.sql"
+            if PATH="$tmp/sql-mock-bin:$PATH" FAIL_SQL=1 "${command[@]}" neutralize --root "$work" > "$work/cli.log" 2>&1; then
+              echo "$mode CLI unexpectedly succeeded after SQL failure"; exit 1
+            fi
+            absent "$work/cli.log" 'SENSITIVE_RESULT_NEVER_LOG' "$mode CLI suppresses sensitive SQL errors"
+          done
+
+          echo '--- Direct run / shell / update commands ---'
+          work="$tmp/direct-commands"
+          mkdir -p "$work" "$tmp/direct-mock-bin"
+          cat > "$work/odoo-project.ini" <<'INI'
+          [odoo]
+          version = 19.0
+          [config]
+          db_name = odt_direct_test
+          INI
+          ini_docker --root "$work"
+          for helper in run shell update test; do
+            missing "$work/docker/local/scripts/$helper.sh" "Docker $helper has no generated helper"
+          done
+          cat > "$tmp/direct-mock-bin/docker" <<'SH'
+          #!/bin/sh
+          printf '%s\n' "$*" >> "$ODT_DIRECT_LOG"
+          SH
+          chmod +x "$tmp/direct-mock-bin/docker"
+          export ODT_DIRECT_LOG="$tmp/direct.log"
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose run --root "$work" -i base --stop-after-init
+          contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps odoo -- -c /etc/odoo/odoo.conf -d odt_direct_test -i base --stop-after-init' 'Docker run forwards Odoo arguments'
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose shell --root "$work" --no-http
+          contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d odt_direct_test --no-http' 'Docker shell forwards Odoo arguments'
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose update --root "$work" --all
+          contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d odt_direct_test --log-level debug --update-all' 'update --all maps to click-odoo-update --update-all'
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose test --root "$work" -i sale --test-tags /sale
+          contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps -T odoo -- -c /etc/odoo/odoo.conf -d odt_direct_test --test-enable --stop-after-init -i sale --test-tags /sale' 'Docker test uses test flags and forwards Odoo options'
+          ini --root "$work"
+          for helper in run shell update test instance; do
+            missing "$work/odoo-scripts/$helper.sh" "Native $helper has no generated helper"
+          done
+          mkdir -p "$work/odoo-scripts" # Simulate an older workspace for cleanup.
+          for helper in run shell update test instance; do
+            printf 'old\n' > "$work/odoo-scripts/$helper.sh"
+            printf 'old\n' > "$work/odoo-scripts/$helper.bat"
+          done
+          ini --root "$work"
+          for helper in run shell update test instance; do
+            missing "$work/odoo-scripts/$helper.sh" "Native $helper shell helper is cleaned up"
+            missing "$work/odoo-scripts/$helper.bat" "Native $helper Windows helper is cleaned up"
+          done
+
+          echo '--- Native test command and custom Odoo path ---'
+          work="$tmp/custom-native"
+          mkdir -p "$work/venv/bin" "$work/odoo-configs" "$tmp/shared-odoo"
+          cat > "$work/odoo-project.ini" <<'INI'
+          [odoo]
+          version = 19.0
+          path = ../shared-odoo
+          [config]
+          db_name = testdb
+          INI
+          : > "$tmp/shared-odoo/odoo-bin"
+          : > "$work/odoo-configs/odoo-server.conf"
+          cat > "$work/venv/bin/python" <<'SH'
+          #!/bin/sh
+          printf '%s\n' "$*" >> "$ODT_NATIVE_CLI_LOG"
+          exit "${ODT_NATIVE_EXIT_CODE:-0}"
+          SH
+          chmod +x "$work/venv/bin/python"
+          export ODT_NATIVE_CLI_LOG="$tmp/custom-native.log"
+          odoo-compose-venv test --root "$work" -i sale --test-tags /sale
+          contains "$ODT_NATIVE_CLI_LOG" "$tmp/shared-odoo/odoo-bin -c $work/odoo-configs/odoo-server.conf --test-enable --stop-after-init -i sale --test-tags /sale" 'native test respects local [odoo].path and forwards test flags'
+          if ODT_NATIVE_EXIT_CODE=17 odoo-compose-venv test --root "$work" -i sale; then
+            echo 'Native test did not forward the subprocess exit status'; exit 1
+          else
+            status=$?
+            test "$status" -eq 17 || { echo "Wrong native test exit status: $status"; exit 1; }
+          fi
+          ok 'native test propagates Odoo exit status'
+          export MOCK_SQL_CALLS="$tmp/custom-native-psql.log"
+          export MOCK_SQL_INPUT="$tmp/custom-native-sql.log"
+          PATH="$tmp/sql-mock-bin:$PATH" odoo-compose-venv neutralize --root "$work"
+          contains "$ODT_NATIVE_CLI_LOG" "$tmp/shared-odoo/odoo-bin neutralize -c $work/odoo-configs/odoo-server.conf -d testdb" 'native neutralize resolves custom [odoo].path'
+
+          echo '--- All CLI commands provide standalone --help ---'
+          for cli in odoo-compose odoo-compose-venv; do
+            for action in run shell update neutralize backup-db restore-db backup-filestore restore-filestore restic backup-filestore-restic restore-filestore-restic; do
+              "$cli" "$action" --root "$tmp/nonexistent-help-workspace" --help > "$tmp/subcommand-help.txt" 2>&1
+              contains "$tmp/subcommand-help.txt" "usage: $cli $action" "$cli $action has its own --help"
+            done
+          done
+          for cli in odoo-compose odoo-compose-venv; do
+            "$cli" init --help > "$tmp/subcommand-help.txt" 2>&1
+            contains "$tmp/subcommand-help.txt" "usage: $cli init" "$cli init has its own --help"
+            "$cli" test --root "$tmp/nonexistent-help-workspace" --help > "$tmp/subcommand-help.txt" 2>&1
+            contains "$tmp/subcommand-help.txt" "usage: $cli test" "$cli test has its own --help"
+          done
+          odoo-compose update --help > "$tmp/subcommand-help.txt" 2>&1
+          contains "$tmp/subcommand-help.txt" '--all' 'update help documents --all'
+          odoo-compose --help > "$tmp/subcommand-help.txt" 2>&1
+          contains "$tmp/subcommand-help.txt" 'Commands:' 'Docker top-level help lists commands'
+          odoo-compose-venv --help > "$tmp/subcommand-help.txt" 2>&1
+          contains "$tmp/subcommand-help.txt" 'Commands:' 'native top-level help lists commands'
 
           echo "All $count INI-only checks passed."

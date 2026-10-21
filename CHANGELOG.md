@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Migrate all generated scripts to CLI commands.
+
+### Removed
+
+- Remove generated scripts in favor of CLI commands.
+
 ## 1.24.6 (2026-10-20)
 
 ### Fixed
