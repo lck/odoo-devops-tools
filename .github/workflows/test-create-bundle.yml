@@ -285,7 +285,7 @@ jobs:
           test -d restored-workspace/odoo-addons/oca-helpdesk
           test -d restored-workspace/wheelhouse
           test -x restored-workspace/venv/bin/python
-          test -x restored-workspace/odoo-scripts/run.sh
+          test ! -e restored-workspace/odoo-scripts/run.sh
           test ! -e restored-workspace/odoo/.git
           test ! -e restored-workspace/odoo-addons/oca-web/.git
           test ! -e restored-workspace/odoo-addons/oca-helpdesk/.git
@@ -316,7 +316,7 @@ jobs:
 
       - name: Initialize database from restored bundle
         working-directory: restored-workspace
-        run: ./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt --stop-after-init
+        run: uv run odoo-compose-venv run -i web_notify,helpdesk_mgmt --stop-after-init
 
       - name: Verify OCA addons installed from restored bundle
         env:

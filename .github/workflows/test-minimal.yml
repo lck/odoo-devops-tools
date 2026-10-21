@@ -123,10 +123,8 @@ jobs:
           [[ "$other" =~ ^shared_[0-9a-f]{10}$ ]]
           test "$name" != "$other"
           grep -Fqx "db_name = $name" "$first/odoo-configs/odoo-server.conf"
-          grep -Fqx "DB_NAME=$name" "$first/odoo-scripts/backup-db.sh"
 
           # Missing connection keys must not override PG* at script execution.
-          ! grep -Eq '^export PG(HOST|PORT|USER|PASSWORD)=' "$first/odoo-scripts/backup-db.sh"
           mkdir -p "$tmp/bin"
           cat > "$tmp/bin/pg_dump" <<'SH'
           #!/usr/bin/env bash
@@ -137,7 +135,7 @@ jobs:
           chmod +x "$tmp/bin/pg_dump"
           PG_CAPTURE="$tmp/pg-env" POSTGRES_BIN="$tmp/bin" \
             PGHOST=127.0.0.9 PGPORT=6543 PGUSER=ci_user PGPASSWORD=ci_password \
-            "$first/odoo-scripts/backup-db.sh" "$tmp/db.dump"
+            uv run odoo-compose-venv backup-db --root "$first" "$tmp/db.dump"
           printf '127.0.0.9\n6543\nci_user\nci_password\n%s\n' "$name" > "$tmp/expected-pg-env"
           cmp "$tmp/expected-pg-env" "$tmp/pg-env"
           grep -Fqx 'mock dump' "$tmp/db.dump"
@@ -157,9 +155,7 @@ jobs:
           printf '[odoo]\nversion = 19.0\n' > "$tmp/docker-only/odoo-project.ini"
           uv run odoo-compose --root "$tmp/docker-only" --no-provisioning-log
           ! grep -q '^db_name' "$tmp/docker-only/odoo-project.ini"
-          grep -Fqx 'DB_NAME=odoo' "$tmp/docker-only/docker/local/scripts/backup-db.sh"
           uv run odoo-compose --root "$tmp/first/moved" --no-provisioning-log
-          grep -Fqx "DB_NAME=$name" "$tmp/first/moved/docker/local/scripts/backup-db.sh"
 
           # External INI sources must remain unchanged across generation.
           printf '[odoo]\nversion = 19.0\n' > "$tmp/external.ini"
@@ -190,9 +186,9 @@ jobs:
           uv run odoo-compose-venv --root "$root" --no-provisioning-log
           grep -Fqx "data_dir = $data" "$root/odoo-configs/odoo-server.conf"
           printf 'original' > "$data/filestore/ci_custom/attachment"
-          "$root/odoo-scripts/backup-filestore.sh" "$tmp/filestore.tar.gz"
+          uv run odoo-compose-venv backup-filestore --root "$root" "$tmp/filestore.tar.gz"
           printf 'changed' > "$data/filestore/ci_custom/attachment"
-          "$root/odoo-scripts/restore-filestore.sh" --force "$tmp/filestore.tar.gz"
+          uv run odoo-compose-venv restore-filestore --root "$root" --force "$tmp/filestore.tar.gz"
           test "$(cat "$data/filestore/ci_custom/attachment")" = original
           test ! -e "$root/odoo-data/filestore/ci_custom"
 
@@ -200,11 +196,11 @@ jobs:
           export RESTIC_PASSWORD=ci-filestore-password
           export RESTIC_HOST=ci-custom
           export RESTIC_BIN="$(command -v restic)"
-          "$root/odoo-scripts/restic.sh" init
-          "$root/odoo-scripts/backup-filestore-restic.sh"
+          uv run odoo-compose-venv restic --root "$root" init
+          uv run odoo-compose-venv backup-filestore-restic --root "$root"
           uv run odoo-compose-venv --root "$root" --no-provisioning-log \
             --set config:db_name=ci_restored
-          RESTIC_SOURCE_DB_NAME=ci_custom "$root/odoo-scripts/restore-filestore-restic.sh"
+          RESTIC_SOURCE_DB_NAME=ci_custom uv run odoo-compose-venv restore-filestore-restic --root "$root"
           test "$(cat "$data/filestore/ci_restored/attachment")" = original
           test ! -e "$root/odoo-data/filestore/ci_restored"
 
@@ -217,29 +213,29 @@ jobs:
           mkdir -p "$portable/custom-data/filestore/portable_db"
           printf 'portable' > "$portable/custom-data/filestore/portable_db/attachment"
           mv "$portable" "$tmp/moved workspace"
-          "$tmp/moved workspace/odoo-scripts/backup-filestore.sh" "$tmp/portable.tar.gz"
+          uv run odoo-compose-venv backup-filestore --root "$tmp/moved workspace" "$tmp/portable.tar.gz"
           tar -xOzf "$tmp/portable.tar.gz" ./attachment | grep -Fqx portable
 
       - name: Reject duplicate workspace root options
         shell: bash
         run: |
           set +e
-          uv run odoo-compose --init ./init-project-root --root ./explicit-root \
+          uv run odoo-compose init ./init-project-root --root ./explicit-root \
             > duplicate-root.log 2>&1
           status=$?
           set -e
 
           cat duplicate-root.log
           test "$status" -ne 0
-          grep -F "workspace ROOT was specified both as --init ROOT and --root" duplicate-root.log
+          grep -F "workspace ROOT was specified both as init ROOT and --root" duplicate-root.log
           test ! -e init-project-root
           test ! -e explicit-root
 
-      - name: Provision Odoo workspace with --init ROOT shorthand
+      - name: Provision Odoo workspace with init ROOT shorthand
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odoo-compose-venv --init ./odoo-workspace --sync-all --create-venv \
+          uv run odoo-compose-venv init ./odoo-workspace --sync-all --create-venv \
             --set odoo:version=19.0 \
             --set config:db_host=127.0.0.1 \
             --set config:db_port=5432 \
@@ -262,20 +258,23 @@ jobs:
 
       - name: Check generated scripts
         run: |
-          test -x odoo-workspace/odoo-scripts/run.sh
-          for helper in backup-db restore-db neutralize-db backup-filestore \
+          test ! -e odoo-workspace/odoo-scripts/run.sh
+          for helper in backup-db restore-db backup-filestore \
             restore-filestore restic backup-filestore-restic restore-filestore-restic; do
-            test -x "odoo-workspace/odoo-scripts/${helper}.sh"
+            test ! -e "odoo-workspace/odoo-scripts/${helper}.sh"
           done
-          ls -la odoo-workspace/odoo-scripts
+          test ! -e odoo-workspace/odoo-scripts/neutralize-db.sh
+          test ! -e odoo-workspace/odoo-scripts/instance.sh
+          test ! -e odoo-workspace/odoo-scripts/test.sh
+          test ! -d odoo-workspace/odoo-scripts
 
       - name: Init database
         working-directory: odoo-workspace
-        run: ./odoo-scripts/run.sh --stop-after-init
+        run: uv run odoo-compose-venv run --stop-after-init
 
       - name: Update addons
         working-directory: odoo-workspace
-        run: ./odoo-scripts/update.sh
+        run: uv run odoo-compose-venv update
 
       - name: Back up native database and filestore
         working-directory: odoo-workspace
@@ -289,8 +288,8 @@ jobs:
           mkdir -p odoo-data/filestore/odoo
           printf '%s' 'native-filestore-test' > odoo-data/filestore/odoo/attachment
           export POSTGRES_BIN=/usr/lib/postgresql/16/bin
-          ./odoo-scripts/backup-db.sh ./odoo-backups/native.dump
-          ./odoo-scripts/backup-filestore.sh ./odoo-backups/native-filestore.tar.gz
+          uv run odoo-compose-venv backup-db ./odoo-backups/native.dump
+          uv run odoo-compose-venv backup-filestore ./odoo-backups/native-filestore.tar.gz
           pg_restore --list ./odoo-backups/native.dump >/dev/null
           tar -tzf ./odoo-backups/native-filestore.tar.gz
 
@@ -304,25 +303,25 @@ jobs:
         run: |
           export POSTGRES_BIN=/usr/lib/postgresql/16/bin
           uv run odoo-compose-venv --set config:db_name=odoo_native_restore
-          ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump
-          ./odoo-scripts/restore-filestore.sh ./odoo-backups/native-filestore.tar.gz
+          uv run odoo-compose-venv restore-db ./odoo-backups/native.dump
+          uv run odoo-compose-venv restore-filestore ./odoo-backups/native-filestore.tar.gz
           copied_uuid="$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")"
           test -n "$copied_uuid"
           test "$copied_uuid" != test-source-identity
           test "$(cat odoo-data/filestore/odoo_native_restore/attachment)" = native-filestore-test
-          if ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump; then
+          if uv run odoo-compose-venv restore-db ./odoo-backups/native.dump; then
             echo 'Database restore succeeded without --force'; exit 1
           fi
-          if ./odoo-scripts/restore-filestore.sh ./odoo-backups/native-filestore.tar.gz; then
+          if uv run odoo-compose-venv restore-filestore ./odoo-backups/native-filestore.tar.gz; then
             echo 'Filestore restore succeeded without --force'; exit 1
           fi
-          ./odoo-scripts/restore-db.sh ./odoo-backups/native.dump --force --move
+          uv run odoo-compose-venv restore-db ./odoo-backups/native.dump --force --move
           test "$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")" = test-source-identity
-          ./odoo-scripts/restore-filestore.sh --force ./odoo-backups/native-filestore.tar.gz
+          uv run odoo-compose-venv restore-filestore --force ./odoo-backups/native-filestore.tar.gz
           mkdir -p neutralize
           printf '%s\n' "SELECT 1;" > neutralize/10-first.sql
           printf '%s\n' "UPDATE ir_config_parameter SET value='neutralized' WHERE key='database.uuid';" > neutralize/20-last.sql
-          ./odoo-scripts/neutralize-db.sh
+          uv run odoo-compose-venv neutralize
           test "$(psql -d odoo_native_restore -Atqc "SELECT value FROM ir_config_parameter WHERE key='database.uuid'")" = neutralized
 
       - name: Test native restic filestore roundtrip
@@ -333,15 +332,15 @@ jobs:
           RESTIC_HOST: native-ci
         run: |
           export RESTIC_BIN="$(command -v restic)"
-          ./odoo-scripts/restic.sh init
-          ./odoo-scripts/backup-filestore-restic.sh
+          uv run odoo-compose-venv restic init
+          uv run odoo-compose-venv backup-filestore-restic
           uv run odoo-compose-venv --set config:db_name=odoo_native_restic
-          RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh
+          RESTIC_SOURCE_DB_NAME=odoo_native_restore uv run odoo-compose-venv restore-filestore-restic
           test "$(cat odoo-data/filestore/odoo_native_restic/attachment)" = native-filestore-test
-          if RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh; then
+          if RESTIC_SOURCE_DB_NAME=odoo_native_restore uv run odoo-compose-venv restore-filestore-restic; then
             echo 'Restic restore succeeded without --force'; exit 1
           fi
-          RESTIC_SOURCE_DB_NAME=odoo_native_restore ./odoo-scripts/restore-filestore-restic.sh --force
+          RESTIC_SOURCE_DB_NAME=odoo_native_restore uv run odoo-compose-venv restore-filestore-restic --force
 
       - name: Test shallow Odoo branch switching against upstream Git repository
         shell: bash

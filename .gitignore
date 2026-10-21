@@ -81,3 +81,6 @@ tests
 .env
 .env.*
 !.env.example
+
+# Workspace metadata and neutralization SQL previews (may contain secrets)
+.odt-env/

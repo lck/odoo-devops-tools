@@ -25,17 +25,16 @@ From this configuration, `odoo-compose` can generate a workspace such as:
 ROOT/
 ├── docker/                 # generated Docker artifacts
 │   ├── local/              # Docker workflow artifacts
-│   │   └── scripts/        # database and filestore backup/restore helpers
+│   │   └── configs/        # generated local Odoo config
 │   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
 ├── odoo-addons/            # addon sources
 │   ├── oca-web/
 │   └── oca-helpdesk/
 ├── odoo-configs/           # generated Odoo configuration
-├── odoo-scripts/           # run, test, shell, update, database/filestore helpers
 ├── odoo-data/              # Odoo data directory
 ├── odoo-logs/              # runtime logs
-├── odoo-backups/           # backups created by helper scripts
+├── odoo-backups/           # backups created by CLI commands
 ├── wheelhouse/             # offline Python wheelhouse
 ├── venv/                   # Python virtual environment
 ├── compose.yaml            # Docker Compose file
@@ -87,12 +86,14 @@ odoo-compose --help
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
+Both CLIs also support [commands](#cli-commands) for database backup, restore, filestore/Restic operations and neutralization.
+
 ## 1. Docker workflow
 
 Create a new workspace:
 
 ```bash
-odoo-compose --init ./odoo19
+odoo-compose init ./odoo19
 ```
 
 This creates `./odoo19/odoo-project.ini` with this initial content:
@@ -112,7 +113,7 @@ docker compose up -d --build --wait
 Optionally initialize the Odoo database from the command line instead of through the web interface:
 
 ```bash
-./docker/local/scripts/run.sh -i base --without-demo=all --stop-after-init
+odoo-compose run -i base --without-demo=all --stop-after-init
 ```
 
 Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
@@ -153,13 +154,13 @@ The repositories are cloned into `ROOT/odoo-addons/` and bind-mounted into the O
 Install the new modules:
 
 ```bash
-./docker/local/scripts/run.sh -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
+odoo-compose run -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
 ```
 
 For subsequent addon updates, use:
 
 ```bash
-./docker/local/scripts/update.sh
+odoo-compose update
 ```
 
 ### 1.2. Running Odoo from workspace source
@@ -251,265 +252,7 @@ odoo-compose
 docker compose up -d --build --wait
 ```
 
-### 1.6. Script reference
-
-The Docker workflow generates platform-specific helper scripts under `ROOT/docker/local/scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers.
-
-```text
-docker/local/scripts/
-├── run.sh
-├── shell.sh
-├── update.sh
-├── backup-db.sh
-├── restore-db.sh
-├── neutralize-db.sh
-├── backup-filestore.sh
-├── restore-filestore.sh
-├── restic.sh
-├── backup-filestore-restic.sh
-└── restore-filestore-restic.sh
-```
-
-On Unix-like hosts where Docker requires `sudo`, run generated Docker helpers with `ODOO_DOCKER_SUDO=1`.
-
-```bash
-ODOO_DOCKER_SUDO=1 ./docker/local/scripts/run.sh --help
-```
-
-Docker helpers use `[config].db_name` when configured, or `odoo` by default.
-
-#### 1.6.1. run
-
-Runs Odoo in a one-off Docker container for the configured database:
-
-```bash
-./docker/local/scripts/run.sh
-```
-
-Any extra arguments are passed through to Odoo:
-
-```bash
-./docker/local/scripts/run.sh -i base --stop-after-init
-```
-
-#### 1.6.2. shell
-
-Opens an Odoo shell for the configured database:
-
-```bash
-./docker/local/scripts/shell.sh
-```
-
-Any extra arguments are passed through to the underlying Odoo shell command.
-
-#### 1.6.3. update
-
-Updates installed addons using `click-odoo-update`:
-
-```bash
-./docker/local/scripts/update.sh
-```
-
-Any extra arguments are passed through to `click-odoo-update`:
-
-```bash
-./docker/local/scripts/update.sh --update-all
-```
-
-#### 1.6.4. Database backup
-
-Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
-
-```bash
-./docker/local/scripts/backup-db.sh
-```
-
-The default output name is timestamped, for example:
-
-```text
-odoo-backups/odoo_20260923_093000.dump
-```
-
-Pass an output path explicitly when needed:
-
-```bash
-./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
-#### 1.6.5. Database restore
-
-Restore a database dump with `pg_restore`:
-
-```bash
-./docker/local/scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
-Database restores use copy semantics by default.
-After `pg_restore`, Odoo database identity parameters are regenerated so the restored
-database can coexist with the source database:
-
-```bash
-./docker/local/scripts/restore-db.sh --copy ./odoo-backups/pre-upgrade.dump
-```
-
-Use `--move` only when the restored database replaces the original database and its
-identity must be preserved:
-
-```bash
-./docker/local/scripts/restore-db.sh --move ./odoo-backups/pre-upgrade.dump
-```
-
-If the target database already exists, the restore is rejected unless `--force` is used. With `--force`, the existing database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/restore-db.sh --force ./odoo-backups/pre-upgrade.dump
-docker compose up -d odoo
-```
-
-#### 1.6.6. Database neutralization
-
-For development or test databases restored from production, run the generated neutralization helper explicitly:
-
-```bash
-./docker/local/scripts/neutralize-db.sh
-```
-
-For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization mechanism. This applies the `neutralize.sql` scripts provided by installed Odoo modules, disabling or redirecting production-side effects such as scheduled actions, outgoing email, and supported external integrations.
-
-For Odoo 13.0 through 15.0, where the native neutralization framework is not available, the helper applies a deliberately minimal compatibility neutralization through the Odoo ORM: it disables scheduled actions, configured outgoing mail servers, and configured incoming mail servers.
-
-Workspace-specific SQL can be run after the standard neutralization by placing scripts in `ROOT/neutralize/`:
-
-```text
-neutralize/
-├── 01-delete-fetchmail-servers.sql
-├── 02-disable-outgoing-mail-servers.sql
-└── 03-set-ir-config-params.sql
-```
-
-If the `neutralize/` directory does not exist, only the standard Odoo/legacy neutralization runs. When the directory exists, all `*.sql` files directly inside it are executed in lexicographic filename order against the selected database. SQL execution stops on the first error. Subdirectories are not traversed.
-
-Ready-to-adapt SQL examples are available in `examples/neutralize/`. They demonstrate removing incoming mail servers, disabling outgoing mail servers, and overriding environment-specific `ir.config_parameter` values.
-
-Neutralization is intentionally separate from database restore. A typical test/staging restore workflow is therefore:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/restore-db.sh --copy ./odoo-backups/production.dump
-./docker/local/scripts/restore-filestore.sh ./odoo-backups/production-filestore.tar.gz
-./docker/local/scripts/neutralize-db.sh
-docker compose up -d odoo
-```
-
-#### 1.6.7. Filestore backup
-
-Create a compressed tar archive of the selected database filestore:
-
-```bash
-./docker/local/scripts/backup-filestore.sh
-```
-
-The default output name is timestamped, for example:
-
-```text
-odoo-backups/odoo_20260923_093000_filestore.tar.gz
-```
-
-Pass an output path explicitly when needed:
-
-```bash
-./docker/local/scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-The helper uses a one-off Odoo container with the same `odoo-data` volume, so the main Odoo service does not need to be running.
-
-When creating a matching database and filestore backup for migration or disaster recovery, stop Odoo first to prevent writes while both parts are captured:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
-./docker/local/scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-docker compose up -d odoo
-```
-
-#### 1.6.8. Filestore restore
-
-Restore a filestore archive:
-
-```bash
-./docker/local/scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-If the target filestore already exists, the restore is rejected unless `--force` is used. With `--force`, the existing filestore directory is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/restore-filestore.sh --force ./odoo-backups/pre-upgrade-filestore.tar.gz
-docker compose up -d odoo
-```
-
-#### 1.6.9. Restic filestore backup
-
-The generated Docker image also includes `restic`. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
-
-Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the Docker host, use an absolute path. The wrapper automatically bind-mounts the repository into the one-off container; Windows drive paths such as `C:\backups\odoo` are supported by `restic.bat`:
-
-```bash
-export RESTIC_REPOSITORY=/srv/restic/odoo
-export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
-
-./docker/local/scripts/restic.sh init
-```
-
-A remote restic repository URL can be used instead of a local path. Backend-specific authentication or external helper programs, when required by that backend, must also be made available to the container.
-
-Create a restic snapshot of the selected database filestore:
-
-```bash
-./docker/local/scripts/backup-filestore-restic.sh
-```
-
-The database name comes from `[config].db_name`. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the Docker host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
-
-An optional backup identifier can be added as another snapshot tag:
-
-```bash
-RESTIC_BACKUP_ID=20260923_020000 ./docker/local/scripts/backup-filestore-restic.sh
-```
-
-This is useful for pairing a PostgreSQL dump with the corresponding filestore snapshot.
-
-List or inspect snapshots through the generic wrapper:
-
-```bash
-./docker/local/scripts/restic.sh snapshots
-./docker/local/scripts/restic.sh check
-```
-
-#### 1.6.10. Restic filestore restore
-
-Restore the latest matching filestore snapshot:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/restore-filestore-restic.sh --force
-docker compose up -d odoo
-```
-
-If the target filestore does not exist yet, `--force` is not required. If it already exists, the restore is rejected unless `--force` is used.
-
-Or restore a specific snapshot ID:
-
-```bash
-docker compose stop odoo
-./docker/local/scripts/restore-filestore-restic.sh --force SNAPSHOT_ID
-docker compose up -d odoo
-```
-
-With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
-
-### 1.7. Creating a Docker deploy build context
+### 1.6. Creating a Docker deploy build context
 
 Use `--create-docker-deploy` to generate a self-contained Docker build context for CI/CD, testing, staging, production, or another non-local deployment workflow.
 
@@ -551,7 +294,7 @@ In this workflow, Odoo runs directly on the host using a generated Python virtua
 Create the workspace with the Odoo source and virtual environment:
 
 ```bash
-odoo-compose-venv --init ./odoo19 --sync-all --create-venv \
+odoo-compose-venv init ./odoo19 --sync-all --create-venv \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
   --set config:db_user=odoo \
@@ -574,11 +317,11 @@ db_user = odoo
 db_password = odoo
 ```
 
-Then start Odoo with the generated script:
+Then start Odoo with the CLI:
 
 ```bash
 cd ./odoo19
-./odoo-scripts/run.sh
+odoo-compose-venv run
 ```
 
 Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
@@ -610,16 +353,16 @@ The repositories are cloned into `ROOT/odoo-addons/` and automatically added to 
 Install the new modules:
 
 ```bash
-./odoo-scripts/run.sh -i web_notify,helpdesk_mgmt
+odoo-compose-venv run -i web_notify,helpdesk_mgmt
 ```
 
 For subsequent addon updates, use:
 
 ```bash
-./odoo-scripts/update.sh
+odoo-compose-venv update
 ```
 
-The update script uses `click-odoo-update` with the workspace Odoo configuration.
+The `update` command uses `click-odoo-update` with the workspace Odoo configuration.
 
 ### 2.2. Using system Python instead of managed Python
 
@@ -651,310 +394,6 @@ odoo-compose-venv --sync-all --create-venv
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
 
-### 2.3. Script reference
-
-The native venv workflow generates platform-specific helper scripts under `ROOT/odoo-scripts/`. Unix-like systems generate `.sh` helpers; Windows generates the corresponding `.bat` helpers. `instance.sh` is available only on Unix-like systems.
-
-```text
-odoo-scripts/
-├── run.sh
-├── shell.sh
-├── update.sh
-├── backup-db.sh
-├── restore-db.sh
-├── neutralize-db.sh
-├── backup-filestore.sh
-├── restore-filestore.sh
-├── restic.sh
-├── backup-filestore-restic.sh
-├── restore-filestore-restic.sh
-├── instance.sh
-└── test.sh
-```
-
-Database and filestore helpers use `[config].db_name` from `odoo-project.ini`. If the
-name is missing, `odoo-compose-venv` generates a workspace-specific database name
-and saves it to `ROOT/odoo-project.ini`.
-
-PostgreSQL connection settings are taken from `[config]` or, when omitted, from
-standard environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.).
-Password authentication can also use `.pgpass`.
-
-By default, PostgreSQL client tools and Restic are resolved from `PATH`.
-The following environment variables allow selecting specific installed versions:
-
-| Variable | Value |
-| --- | --- |
-| `POSTGRES_BIN` | Directory containing the PostgreSQL client executables (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`). |
-| `RESTIC_BIN` | Path to the restic executable. |
-
-These variables are read when a helper runs, so script regeneration is not required.
-
-```bash
-export POSTGRES_BIN=/usr/lib/postgresql/16/bin
-export RESTIC_BIN=/opt/restic/restic
-
-./odoo-scripts/backup-db.sh
-./odoo-scripts/backup-filestore-restic.sh
-```
-
-On Windows, set the variables in the command prompt before running the `.bat` helpers:
-
-```bat
-set "POSTGRES_BIN=C:\Program Files\PostgreSQL\16\bin"
-set "RESTIC_BIN=C:\Tools\restic\restic.exe"
-
-odoo-scripts\backup-db.bat
-odoo-scripts\backup-filestore-restic.bat
-```
-
-#### 2.3.1. run
-
-Runs Odoo in the foreground using the workspace venv and generated configuration:
-
-```bash
-./odoo-scripts/run.sh
-```
-
-Any extra arguments are passed through to Odoo:
-
-```bash
-./odoo-scripts/run.sh -i base --stop-after-init
-```
-
-#### 2.3.2. shell
-
-Opens an Odoo shell using the workspace venv and generated configuration:
-
-```bash
-./odoo-scripts/shell.sh
-```
-
-Any extra arguments are passed through to the underlying Odoo shell command.
-
-#### 2.3.3. update
-
-Updates installed addons using `click-odoo-update`:
-
-```bash
-./odoo-scripts/update.sh
-```
-
-Any extra arguments are passed through to `click-odoo-update`:
-
-```bash
-./odoo-scripts/update.sh --update-all
-```
-
-#### 2.3.4. Database backup
-
-Create a PostgreSQL custom-format dump under `ROOT/odoo-backups/`:
-
-```bash
-./odoo-scripts/backup-db.sh
-```
-
-The default output name is timestamped, for example:
-
-```text
-odoo-backups/odoo_20260923_093000.dump
-```
-
-Pass an output path explicitly when needed:
-
-```bash
-./odoo-scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
-#### 2.3.5. Database restore
-
-Restore a database dump with `pg_restore`:
-
-```bash
-./odoo-scripts/restore-db.sh ./odoo-backups/pre-upgrade.dump
-```
-
-Database restores use copy semantics by default.
-After `pg_restore`, Odoo database identity parameters are regenerated so the restored
-database can coexist with the source database:
-
-```bash
-./odoo-scripts/restore-db.sh --copy ./odoo-backups/pre-upgrade.dump
-```
-
-Use `--move` only when the restored database replaces the original database and its
-identity must be preserved:
-
-```bash
-./odoo-scripts/restore-db.sh --move ./odoo-backups/pre-upgrade.dump
-```
-
-If the target database already exists, the restore is rejected unless `--force` is used. With `--force`, the existing database is dropped and recreated before the dump is restored. When restoring the database currently used by the Odoo service, stop Odoo first and start it again after the restore:
-
-```bash
-./odoo-scripts/restore-db.sh --force ./odoo-backups/pre-upgrade.dump
-```
-
-#### 2.3.6. Database neutralization
-
-For development or test databases restored from production, run the generated neutralization helper explicitly:
-
-```bash
-./odoo-scripts/neutralize-db.sh
-```
-
-For Odoo 16.0 and newer, the helper uses Odoo's native database neutralization mechanism. This applies the `neutralize.sql` scripts provided by installed Odoo modules, disabling or redirecting production-side effects such as scheduled actions, outgoing email, and supported external integrations.
-
-For Odoo 13.0 through 15.0, where the native neutralization framework is not available, the helper applies a deliberately minimal compatibility neutralization through PostgreSQL commands: it disables scheduled actions, configured outgoing mail servers, and configured incoming mail servers.
-
-Workspace-specific SQL can be run after the standard neutralization by placing scripts in `ROOT/neutralize/`:
-
-```text
-neutralize/
-├── 01-delete-fetchmail-servers.sql
-├── 02-disable-outgoing-mail-servers.sql
-└── 03-set-ir-config-params.sql
-```
-
-If the `neutralize/` directory does not exist, only the standard Odoo/legacy neutralization runs. When the directory exists, all `*.sql` files directly inside it are executed in lexicographic filename order against the selected database. SQL execution stops on the first error. Subdirectories are not traversed.
-
-Ready-to-adapt SQL examples are available in `examples/neutralize/`. They demonstrate removing incoming mail servers, disabling outgoing mail servers, and overriding environment-specific `ir.config_parameter` values.
-
-Neutralization is intentionally separate from database restore. A typical test/staging restore workflow is therefore:
-
-```bash
-./odoo-scripts/restore-db.sh --copy ./odoo-backups/production.dump
-./odoo-scripts/restore-filestore.sh ./odoo-backups/production-filestore.tar.gz
-./odoo-scripts/neutralize-db.sh
-```
-
-#### 2.3.7. Filestore backup
-
-Create a compressed tar archive of the selected database filestore:
-
-```bash
-./odoo-scripts/backup-filestore.sh
-```
-
-The default output name is timestamped, for example:
-
-```text
-odoo-backups/odoo_20260923_093000_filestore.tar.gz
-```
-
-Pass an output path explicitly when needed:
-
-```bash
-./odoo-scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-The helper reads the native filestore under `ROOT/odoo-data/filestore/<database>`, so the Odoo service does not need to be running.
-
-When creating a matching database and filestore backup for migration or disaster recovery, stop Odoo first to prevent writes while both parts are captured:
-
-```bash
-./odoo-scripts/backup-db.sh ./odoo-backups/pre-upgrade.dump
-./odoo-scripts/backup-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-#### 2.3.8. Filestore restore
-
-Restore a filestore archive:
-
-```bash
-./odoo-scripts/restore-filestore.sh ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-If the target filestore already exists, the restore is rejected unless `--force` is used. With `--force`, the existing filestore directory is removed before the archive is extracted. When restoring the filestore currently used by the Odoo service, stop Odoo first:
-
-```bash
-./odoo-scripts/restore-filestore.sh --force ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-#### 2.3.9. Restic filestore backup
-
-Install `restic` on the host and make it available on `PATH`, or select its executable with `RESTIC_BIN`, to use these helpers. Restic is an additional option intended especially for large filestores where incremental snapshots and deduplication are useful.
-
-Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` before using the helpers. For a local repository on the host, use an absolute path. Windows drive paths such as `C:\backups\odoo` are supported by `restic.bat`:
-
-```bash
-export RESTIC_REPOSITORY=/srv/restic/odoo
-export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
-
-./odoo-scripts/restic.sh init
-```
-
-A remote restic repository URL can be used instead of a local path. Backend-specific authentication or external helper programs, when required by that backend, must also be made available on the host.
-
-Create a restic snapshot of the selected database filestore:
-
-```bash
-./odoo-scripts/backup-filestore-restic.sh
-```
-
-The database name comes from `[config].db_name`. Snapshots are tagged with `odoo`, `filestore`, and `db:<database>`. The helper also uses a stable host identifier from the native host for restic snapshot grouping; override it with `RESTIC_HOST` when needed.
-
-An optional backup identifier can be added as another snapshot tag:
-
-```bash
-RESTIC_BACKUP_ID=20260923_020000 ./odoo-scripts/backup-filestore-restic.sh
-```
-
-This is useful for pairing a PostgreSQL dump with the corresponding filestore snapshot.
-
-List or inspect snapshots through the generic wrapper:
-
-```bash
-./odoo-scripts/restic.sh snapshots
-./odoo-scripts/restic.sh check
-```
-
-#### 2.3.10. Restic filestore restore
-
-Restore the latest matching filestore snapshot:
-
-```bash
-./odoo-scripts/restore-filestore-restic.sh --force
-```
-
-If the target filestore does not exist yet, `--force` is not required. If it already exists, the restore is rejected unless `--force` is used.
-
-Or restore a specific snapshot ID:
-
-```bash
-./odoo-scripts/restore-filestore-restic.sh --force SNAPSHOT_ID
-```
-
-With `--force`, the restore helper removes the target database filestore before restoring it. When `latest` is used, the snapshot selection is restricted to the current `RESTIC_HOST` and source filestore path. Use the same `RESTIC_HOST` value that was used when the snapshot was created if the restore is performed from another host.
-
-Set `RESTIC_SOURCE_DB_NAME` to restore another database's filestore into the selected database. Snapshots record the absolute native filestore path, so use the same workspace/data path when restoring from another host.
-
-#### 2.3.11. instance
-
-Manages Odoo as a background service on Unix-like systems:
-
-```bash
-./odoo-scripts/instance.sh start
-./odoo-scripts/instance.sh stop
-./odoo-scripts/instance.sh restart
-./odoo-scripts/instance.sh status
-```
-
-Logs are written to `ROOT/odoo-logs/odoo-server.log` and the PID is stored in `ROOT/odoo-logs/odoo-server.pid`.
-
-#### 2.3.12. test
-
-Runs Odoo tests with `--test-enable --stop-after-init`:
-
-```bash
-./odoo-scripts/test.sh
-```
-
-Any extra arguments are passed through to Odoo:
-
-```bash
-./odoo-scripts/test.sh -i sale --test-tags /sale
-```
 
 ---
 
@@ -1031,7 +470,7 @@ manifest.json
 odoo-project.ini
 ```
 
-The bundle does not contain the virtual environment, database data, logs, backups, generated scripts, generated configuration files, Docker artifacts, Git metadata, or provisioning history.
+The bundle does not contain the virtual environment, database data, logs, backups, generated configuration files, Docker artifacts, Git metadata, or provisioning history.
 
 Those machine-specific outputs are recreated on the target machine.
 
@@ -1085,7 +524,7 @@ The import operation:
 3. verifies every bundled file using its size and SHA-256 checksum;
 4. extracts Odoo, addons, the sanitized project INI, and the wheelhouse;
 5. recreates `ROOT/venv` strictly from the bundled wheelhouse;
-6. regenerates configuration files and helper scripts.
+6. regenerates workspace configuration files.
 
 `ROOT` must be empty. If `--root` is omitted, the current working directory is used and must be empty. The imported manifest is saved as `ROOT/.odt-env/imported-bundle-manifest.json`.
 
@@ -1104,19 +543,215 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 
 ---
 
+## CLI commands
+
+Commands perform workspace operations directly through the installed `odoo-devops-tools` CLI. Use `odoo-compose` for Docker workspaces and `odoo-compose-venv` for native workspaces. The `init` command creates the project INI when missing; other commands use the existing `ROOT/odoo-project.ini`; pass `--root ROOT` to select a different workspace. Each command has its own help: `odoo-compose <command> --help` (or `odoo-compose-venv <command> --help`). For commands that forward Odoo options, use `-- --help` to request the underlying tool's help instead.
+
+### `init`
+
+Create a Docker or native workspace using the default project template. `init` supports the existing provisioning options, including `--sync-all`, `--create-venv` (native) and `--set`:
+
+```bash
+odoo-compose init ./odoo19 --sync-addons
+odoo-compose-venv init ./odoo19 --sync-all --create-venv --set odoo:version=19.0
+```
+
+Existing project INI files are preserved. Run `odoo-compose init --help` or `odoo-compose-venv init --help` for all options.
+
+### `run`, `shell`, `update` and `test`
+
+Run Odoo, open an interactive shell or update installed addons directly from the workspace. Additional arguments are forwarded to Odoo or `click-odoo-update` as appropriate:
+
+```bash
+# Docker
+odoo-compose run -i base --stop-after-init
+odoo-compose shell
+odoo-compose update --all
+odoo-compose test -i sale --test-tags /sale
+
+# Native
+odoo-compose-venv run -i base --stop-after-init
+odoo-compose-venv shell
+odoo-compose-venv update --all
+odoo-compose-venv test -i sale --test-tags /sale
+```
+
+`update --all` invokes `click-odoo-update --update-all`. The `test` command runs Odoo with `--test-enable --stop-after-init` in both workflows. Docker commands execute one-off containers; native commands use the existing workspace virtualenv and generated `odoo-server.conf`. The installed CLI must be available; generated wrappers are not required. Set `ODOO_DOCKER_SUDO=1` on Linux if Docker needs `sudo`.
+
+### `backup-db` and `restore-db`
+
+Create a PostgreSQL custom-format dump, or restore it to `[config].db_name` (Docker defaults to `odoo`):
+
+```bash
+odoo-compose backup-db
+odoo-compose backup-db ./odoo-backups/pre-upgrade.dump
+odoo-compose restore-db ./odoo-backups/pre-upgrade.dump
+odoo-compose restore-db --force --copy ./odoo-backups/pre-upgrade.dump
+odoo-compose restore-db --move ./odoo-backups/pre-upgrade.dump
+
+# Native (odoo-compose-venv only): optional PostgreSQL client override
+export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+odoo-compose-venv backup-db
+odoo-compose-venv restore-db ./odoo-backups/pre-upgrade.dump
+```
+
+Use `odoo-compose-venv` instead for native development. The default dump name is `ROOT/odoo-backups/<database>_<timestamp>.dump`. An existing target database is never overwritten without `--force`. By default, `restore-db` uses **copy** semantics: Odoo database identity is regenerated and selected enterprise metadata is reset. Choose `--move` to preserve the original identity. Stop the Odoo service before restoring its active database.
+
+For native database commands, `[config].db_name` comes from `odoo-project.ini`; if absent, provisioning generates a workspace-specific name and saves it there. PostgreSQL connection settings come from `[config]` or standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.); `.pgpass` is also supported.
+
+### `backup-filestore` and `restore-filestore`
+
+Backup the selected database filestore to a `.tar.gz` archive, or restore it:
+
+```bash
+odoo-compose backup-filestore
+odoo-compose backup-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
+```
+
+Use `odoo-compose-venv` for the native workflow. The default archive name is `ROOT/odoo-backups/<database>_<timestamp>_filestore.tar.gz`. An existing target filestore is protected unless `--force` is given. For native workspaces, the path is read from `[config].data_dir` or defaults to `ROOT/odoo-data`. For Docker, the filestore is accessed through the one-off Odoo container. Stop Odoo before restoring an active filestore.
+
+### `restic`, `backup-filestore-restic` and `restore-filestore-restic`
+
+Restic enables incremental filestore snapshots and deduplication. Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD` first. In Docker, the CLI runs Restic in a one-off container and bind-mounts an absolute local host repository; remote Restic repositories are also supported. For native use, `RESTIC_BIN` can select the installed Restic executable (see the example below).
+
+```bash
+export RESTIC_REPOSITORY=/srv/restic/odoo
+export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
+
+odoo-compose restic init
+odoo-compose backup-filestore-restic
+odoo-compose restic snapshots
+odoo-compose restic check
+odoo-compose restore-filestore-restic --force latest
+odoo-compose restore-filestore-restic --force SNAPSHOT_ID
+
+# Native (odoo-compose-venv only): optional Restic executable override
+export RESTIC_BIN=/opt/restic/restic
+odoo-compose-venv backup-filestore-restic
+odoo-compose-venv restic snapshots
+```
+
+Replace `odoo-compose` with `odoo-compose-venv` for native operations. Snapshots are tagged `odoo`, `filestore` and `db:<database>`; set `RESTIC_BACKUP_ID` for an extra `backup-id:<value>` tag. `RESTIC_HOST` overrides the default host name used for snapshot grouping. To restore a different database's snapshot, set `RESTIC_SOURCE_DB_NAME`. Restore protects existing filestores unless `--force` is used. For `latest`, snapshot lookup also filters by host and original filestore path. A Restic restore should be run while Odoo is stopped.
+
+### `neutralize`
+
+Neutralize a production database restored into a development or test workspace:
+
+```bash
+# Docker workflow
+odoo-compose neutralize
+
+# Native workflow
+odoo-compose-venv neutralize
+```
+
+Both commands use the current `ROOT/odoo-project.ini` and run without regenerating workspace artifacts. To run from outside the workspace, add `--root /path/to/workspace`.
+
+For Odoo 16.0 and newer, neutralization uses Odoo's built-in mechanism and the `neutralize.sql` scripts supplied by installed modules. This disables or redirects supported production-side effects such as scheduled actions, outgoing email, and external integrations.
+
+For Odoo 13.0 through 15.0, where Odoo's built-in neutralization is unavailable, the command performs a minimal compatibility neutralization of scheduled actions and configured outgoing/incoming mail servers. The Docker workflow uses the Odoo ORM; the native workflow uses PostgreSQL commands.
+
+#### Workspace SQL and INI interpolation
+
+After standard neutralization, the command executes optional SQL files from `ROOT/neutralize/`:
+
+```text
+neutralize/
+├── 01-delete-fetchmail-servers.sql
+├── 02-disable-outgoing-mail-servers.sql
+└── 03-set-ir-config-params.sql
+```
+
+Only `*.sql` files directly inside this directory are executed, in lexicographic filename order. SQL execution stops on the first error; subdirectories are not traversed. If the directory is missing, only the standard Odoo/legacy neutralization runs.
+
+Custom SQL supports `${section:option}` references to the current `ROOT/odoo-project.ini`, including nested `[vars]` references. Each reference becomes a **quoted PostgreSQL text literal**, so **do not add SQL quotes around it**. For example:
+
+`odoo-project.ini`:
+
+```ini
+[vars]
+base_url = https://staging.example.com
+```
+
+`neutralize/03-set-ir-config-params.sql`:
+
+```sql
+INSERT INTO ir_config_parameter (key, value)
+VALUES ('web.base.url', ${vars:base_url})
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+```
+
+As in INI files, `\${section:option}` inserts a literal `${section:option}`; paired backslashes before `${...}` yield literal backslashes, while `$` and `$$` remain unchanged. An unknown reference causes an error before the affected SQL file is sent to PostgreSQL.
+
+During normal execution, resolved SQL is streamed directly to `psql` without being saved to disk. Original SQL files are never modified. Ready-to-adapt examples are available under `examples/neutralize/`.
+
+#### SQL preview (`--dry-run`)
+
+To inspect interpolated workspace SQL **without connecting to Docker, Odoo, or PostgreSQL**, use:
+
+```bash
+odoo-compose neutralize --dry-run
+odoo-compose neutralize --dry-run ./preview-sql
+odoo-compose-venv neutralize --dry-run
+odoo-compose-venv neutralize --dry-run ./preview-sql
+```
+
+Without an explicit output directory, preview files are written to `ROOT/.odt-env/neutralize-preview/`. The preview includes **only** custom `ROOT/neutralize/*.sql` files, not Odoo's built-in neutralization. No SQL is executed.
+
+> **Security note**
+> Preview files may contain interpolated passwords or tokens. Protect or delete them after inspection. On Unix-like systems, newly created preview SQL files have permissions `0600`.
+
+#### Restore and neutralize
+
+Neutralization is a separate step after database and filestore restore. For example:
+
+**Docker workflow:**
+
+```bash
+docker compose stop odoo
+odoo-compose restore-db --copy ./odoo-backups/production.dump
+odoo-compose restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose neutralize
+docker compose up -d odoo
+```
+
+**Native workflow:**
+
+```bash
+odoo-compose-venv restore-db --copy ./odoo-backups/production.dump
+odoo-compose-venv restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose-venv neutralize
+```
+
+---
+
 ## Command-line reference
 
 ### Syntax
 
 ```text
-odoo-compose [INI] [OPTIONS]
-odoo-compose-venv [INI] [OPTIONS]
+{odoo-compose|odoo-compose-venv} [INI] [OPTIONS]
+{odoo-compose|odoo-compose-venv} init [ROOT] [OPTIONS]
+{odoo-compose|odoo-compose-venv} run [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose-venv} shell [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose-venv} update [--root ROOT] [--all] [ODOO_ARGS...]
+{odoo-compose|odoo-compose-venv} test [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose-venv} neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
+{odoo-compose|odoo-compose-venv} backup-db [--root ROOT] [OUTPUT]
+{odoo-compose|odoo-compose-venv} restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
+{odoo-compose|odoo-compose-venv} backup-filestore [--root ROOT] [OUTPUT]
+{odoo-compose|odoo-compose-venv} restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
+{odoo-compose|odoo-compose-venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
+{odoo-compose|odoo-compose-venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
+{odoo-compose|odoo-compose-venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
 ```
 
 Use **`odoo-compose`** for Docker operations and **`odoo-compose-venv`**
 for native Odoo. Both commands share project configuration, repository syncing,
 and workspace root, but generate only their own artifacts. `odoo-compose-venv`
-generates native configuration and helper scripts.
+generates native configuration.
 
 If no arguments are specified, `odoo-compose` and `odoo-compose-venv` treats the current working directory as ROOT and, when `ROOT/odoo-project.ini` exists,
 regenerates the workspace artifacts without syncing repositories or recreating the virtual environment.
@@ -1186,12 +821,10 @@ The merged project file is saved as `ROOT/odoo-project.ini`, replacing any exist
 ### Paths and outputs
 
 - `--root ROOT` — workspace root directory. Default: the directory containing a local INI file, or the current working directory for a remote INI or omitted INI. In include mode, the default is the directory of the first local source, or the current working directory when the first source is remote.
-- `--init [ROOT]` — create `ROOT/odoo-project.ini` from the bundled default template if it does not already exist. `ROOT` is optional; when supplied, it is a shorthand for selecting the workspace root directly, for example `odoo-compose --init ./odoo19`. When the optional value is omitted, `--root ROOT` remains supported for backward compatibility. Do not supply both `--init ROOT` and `--root ROOT`; the command exits with an error instead of choosing one implicitly. This option is valid only when `INI` is omitted and no `-i/--include` is provided. Existing project files are not overwritten.
 - `--include INI`, `-i INI` — include an additional project INI layer; can be repeated. Later layers override earlier layers.
 - `--extra-var KEY=VALUE`, `-e KEY=VALUE` — override or inject a value in the optional `[vars]` section; can be repeated.
 - `--set SECTION:KEY=VALUE`, `-S SECTION:KEY=VALUE` — set or override a supported project option; can be repeated. Missing supported sections/options are created automatically. Structured sections (`[virtualenv]`, `[odoo]`, `[addons.<name>]`, `[docker]`, and `[docker.share.<name>]`) accept only documented keys; `[config]` remains open to standard Odoo configuration options except `addons_path`.
 - `--no-configs` — do not generate config files (venv target).
-- `--no-scripts` — do not generate helper scripts under `ROOT/odoo-scripts/` (venv target).
 - `--no-data-dir` — do not create the Odoo data directory.
 - `--no-provisioning-log` — do not write provisioning metadata under `ROOT/.odt-env/`.
 - `--show-last-run` — print metadata from `ROOT/.odt-env/last-provisioning.json` and exit without provisioning.
@@ -1228,7 +861,7 @@ Maintenance:
 
 ### Docker generation
 
-- `odoo-compose` runs the Docker workflow. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database and filestore backup/restore helpers, including optional restic filestore helpers, are generated for the current platform under `ROOT/docker/local/scripts/` (`.sh` on Unix-like systems, `.bat` on Windows).
+- `odoo-compose` runs the Docker workflow. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database/filestore backup and restore operations are available as [CLI commands](#cli-commands).
 - `--create-docker-deploy` — `odoo-compose` only: generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
 ### Other options
@@ -1257,7 +890,7 @@ The following sections are supported:
 
 ### General rules
 
-- The project file can have any filename when passed explicitly. When `INI` is omitted, `odoo-compose` uses the existing `ROOT/odoo-project.ini`; if it is missing, use `--init` to create it explicitly from the bundled default template. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
+- The project file can have any filename when passed explicitly. When `INI` is omitted, `odoo-compose` uses the existing `ROOT/odoo-project.ini`; if it is missing, use `init` to create it explicitly from the bundled default template. Remote INI sources and merged include layers are materialized as `ROOT/odoo-project.ini`.
 - INI interpolation is supported, so values such as `${odoo:version}` can be reused across sections.
 - Use `\${section:key}` for a literal `${section:key}`.
 - Multiple INI layers can be composed with `-i/--include`. Later layers override earlier layers; multi-line values are replaced as whole option values, not appended.
