@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add shell completion for Bash, Zsh, Fish and PowerShell.
+
 ### Changed
 
 - Migrate all generated scripts to CLI commands.

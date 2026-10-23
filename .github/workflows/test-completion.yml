@@ -1,0 +1,100 @@
+name: Test Shell Completion
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unix:
+    name: Bash, Zsh, Fish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI and shells
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh fish
+          python -m pip install --no-deps -e .
+      - name: Verify Bash completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cli in odoo-compose odoo-compose-venv; do
+            "$cli" completion bash > "$RUNNER_TEMP/$cli.bash"
+            bash -n "$RUNNER_TEMP/$cli.bash"
+            source "$RUNNER_TEMP/$cli.bash"
+            fn="_${cli//-/_}_completion"
+            declare -F "$fn" > /dev/null
+
+            COMP_WORDS=("$cli" res)
+            COMP_CWORD=1
+            "$fn"
+            [[ " ${COMPREPLY[*]} " == *' restore-db '* ]]
+
+            COMP_WORDS=("$cli" init --sy)
+            COMP_CWORD=2
+            "$fn"
+            [[ " ${COMPREPLY[*]} " == *' --sync-all '* ]]
+
+            COMP_WORDS=("$cli" completion po)
+            COMP_CWORD=2
+            "$fn"
+            [[ " ${COMPREPLY[*]} " == *' powershell '* ]]
+
+            mkdir -p "$RUNNER_TEMP/odoo-backups"
+            touch "$RUNNER_TEMP/odoo-backups/latest.dump"
+            (
+              cd "$RUNNER_TEMP"
+              COMP_WORDS=("$cli" restore-db odoo-backups/l)
+              COMP_CWORD=2
+              "$fn"
+              [[ " ${COMPREPLY[*]} " == *' odoo-backups/latest.dump '* ]]
+            )
+
+            if [[ "$cli" == odoo-compose ]]; then
+              grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
+              ! grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
+            else
+              grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
+              ! grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
+            fi
+          done
+      - name: Verify Zsh and Fish completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cli in odoo-compose odoo-compose-venv; do
+            "$cli" completion zsh > "$RUNNER_TEMP/$cli.zsh"
+            "$cli" completion fish > "$RUNNER_TEMP/$cli.fish"
+            zsh -n "$RUNNER_TEMP/$cli.zsh"
+            fish -n "$RUNNER_TEMP/$cli.fish"
+            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli init --sy'" | grep -F 'sync-all'
+          done
+
+  windows:
+    name: PowerShell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI
+        run: python -m pip install --no-deps -e .
+      - name: Verify PowerShell completion
+        shell: pwsh
+        run: |
+          foreach ($cli in @('odoo-compose', 'odoo-compose-venv')) {
+            & $cli completion powershell | Out-String | Invoke-Expression
+            $inputLine = "$cli ini"
+            $matches = [System.Management.Automation.CommandCompletion]::CompleteInput(
+              $inputLine, $inputLine.Length, $null
+            ).CompletionMatches.CompletionText
+            if ('init' -notin $matches) { throw "Missing init completion for $cli" }
+          }
