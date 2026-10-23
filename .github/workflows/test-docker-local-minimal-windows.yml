@@ -40,7 +40,7 @@ jobs:
           repo = https://example.invalid/addon.git
           branch = 19.0
           "@ | Set-Content -LiteralPath $ini -Encoding UTF8
-            $output = (& uv run odoo-compose --root $workspace --no-provisioning-log 2>&1 | Out-String)
+            $output = (& uv run odoo-compose setup --root $workspace --no-provisioning-log 2>&1 | Out-String)
             if ($LASTEXITCODE -eq 0) { throw "Unsafe addon name was accepted: $name" }
             if (-not $output.Contains('Invalid addon section name')) {
               throw "Unexpected rejection for addon '$name': $output"
@@ -56,7 +56,7 @@ jobs:
             $image = $invalidImages[$index]
             $workspace = Join-Path $env:RUNNER_TEMP "ci-unsafe-image-$index"
             New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-            $output = (& uv run odoo-compose init --root $workspace --no-provisioning-log `
+            $output = (& uv run odoo-compose setup --root $workspace --no-provisioning-log `
               --set "docker:base_image=$image" 2>&1 | Out-String)
             if ($LASTEXITCODE -eq 0) { throw "Unsafe Docker base_image was accepted: $image" }
             if (-not $output.Contains("Invalid option 'base_image' in section [docker]")) {
@@ -83,7 +83,7 @@ jobs:
             $option = $invalidOptions[$index]
             $key = ($option -split '[:=]')[1]
             $workspace = Join-Path $env:RUNNER_TEMP "invalid-resources-$index"
-            $output = (& uv run odoo-compose init --root $workspace --no-provisioning-log `
+            $output = (& uv run odoo-compose setup --root $workspace --no-provisioning-log `
               --set $option 2>&1 | Out-String)
             if ($LASTEXITCODE -eq 0) { throw "Invalid resource limit accepted: $option" }
             if (-not $output.Contains("Invalid option '$key' in section [docker]")) {
@@ -98,7 +98,7 @@ jobs:
           $invalidPolicies = @('', 'yes', 'false', 'on-fail', 'always; echo BAD')
           for ($index = 0; $index -lt $invalidPolicies.Count; $index++) {
             $workspace = Join-Path $env:RUNNER_TEMP "invalid-restart-$index"
-            $output = (& uv run odoo-compose init --root $workspace --no-provisioning-log `
+            $output = (& uv run odoo-compose setup --root $workspace --no-provisioning-log `
               --set "docker:restart=$($invalidPolicies[$index])" 2>&1 | Out-String)
             if ($LASTEXITCODE -eq 0) { throw "Invalid restart policy was accepted." }
             if (-not $output.Contains("Invalid option 'restart' in section [docker]")) {
@@ -113,7 +113,7 @@ jobs:
       - name: Initialize project and generate default local Docker artifacts
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose init `
+          uv run odoo-compose setup `
             --set odoo:version=18.0 `
             --set docker:postgres_version=18 `
             --set config:db_name=odoo_test `
@@ -129,7 +129,7 @@ jobs:
             New-Item -ItemType Directory -Force -Path $workspace | Out-Null
             Push-Location $workspace
             try {
-              $output = (& uv run odoo-compose init --set "config:db_name=$invalidName" 2>&1 | Out-String)
+              $output = (& uv run odoo-compose setup --set "config:db_name=$invalidName" 2>&1 | Out-String)
               if ($LASTEXITCODE -eq 0) {
                 throw "Unsafe db_name was accepted: $invalidName"
               }
@@ -239,7 +239,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path odoo-workspace-legacy\neutralize | Out-Null
           Push-Location odoo-workspace-legacy
           try {
-            uv run odoo-compose init --set odoo:version=15.0
+            uv run odoo-compose setup --set odoo:version=15.0
             Set-Content -LiteralPath neutralize\10-version.sql -Value 'SELECT ${odoo:version};' -Encoding ASCII
             uv run odoo-compose neutralize --dry-run
             if ($LASTEXITCODE -ne 0) { throw 'Legacy SQL preview failed.' }
@@ -257,7 +257,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path odoo-workspace-mailpit | Out-Null
           Push-Location odoo-workspace-mailpit
           try {
-            uv run odoo-compose init `
+            uv run odoo-compose setup `
               --set odoo:version=18.0 `
               --set docker:mailpit_enabled=true `
               --set docker:mailpit_webui_port=18025 `
@@ -274,7 +274,7 @@ jobs:
               --set config:smtp_user=test-user `
               --set config:smtp_password=test-password
 
-            uv run odoo-compose --create-docker-deploy
+            uv run odoo-compose setup --create-docker-deploy
           }
           finally {
             Pop-Location
@@ -525,7 +525,7 @@ jobs:
       - name: Test database restore force protection
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --set config:db_name=odoo_restore
+          uv run odoo-compose setup --set config:db_name=odoo_restore
           if ($LASTEXITCODE -ne 0) { throw "Failed to configure restore target database." }
           $env:ODT_MOCK_EXISTING_DB = "odoo_restore"
           $env:ODT_MOCK_DB_EXISTS = "1"
@@ -739,7 +739,7 @@ jobs:
       - name: Test restic filestore restore force protection
         working-directory: ./odoo-workspace
         run: |
-          uv run odoo-compose --set config:db_name=odoo_restic_restore
+          uv run odoo-compose setup --set config:db_name=odoo_restic_restore
           if ($LASTEXITCODE -ne 0) { throw "Failed to configure restic restore target database." }
           $env:RESTIC_SOURCE_DB_NAME = "odoo"
           $env:RESTIC_REPOSITORY = "mock:repository"

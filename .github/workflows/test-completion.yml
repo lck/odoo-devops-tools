@@ -37,7 +37,7 @@ jobs:
             "$fn"
             [[ " ${COMPREPLY[*]} " == *' restore-db '* ]]
 
-            COMP_WORDS=("$cli" init --sy)
+            COMP_WORDS=("$cli" setup --sy)
             COMP_CWORD=2
             "$fn"
             [[ " ${COMPREPLY[*]} " == *' --sync-all '* ]]
@@ -74,7 +74,7 @@ jobs:
             "$cli" completion fish > "$RUNNER_TEMP/$cli.fish"
             zsh -n "$RUNNER_TEMP/$cli.zsh"
             fish -n "$RUNNER_TEMP/$cli.fish"
-            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli init --sy'" | grep -F 'sync-all'
+            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli setup --sy'" | grep -F 'sync-all'
           done
 
   windows:
@@ -92,9 +92,9 @@ jobs:
         run: |
           foreach ($cli in @('odoo-compose', 'odoo-compose-venv')) {
             & $cli completion powershell | Out-String | Invoke-Expression
-            $inputLine = "$cli ini"
+            $inputLine = "$cli set"
             $matches = [System.Management.Automation.CommandCompletion]::CompleteInput(
               $inputLine, $inputLine.Length, $null
             ).CompletionMatches.CompletionText
-            if ('init' -notin $matches) { throw "Missing init completion for $cli" }
+            if ('setup' -notin $matches) { throw "Missing setup completion for $cli" }
           }

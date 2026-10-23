@@ -5450,7 +5450,7 @@ def _prepare_included_project_ini(
 
 
 _CLI_COMMANDS = (
-    ("init", "Initialize a workspace (provisioning options supported)"),
+    ("setup", "Create or update an Odoo workspace"),
     ("completion", "Generate shell completion script (bash, zsh, fish, powershell)"),
     ("run", "Run Odoo"),
     ("shell", "Open an Odoo shell"),
@@ -5467,116 +5467,54 @@ _CLI_COMMANDS = (
 )
 
 
-def build_parser(prog: str = "odoo-compose", target: str = "docker", *, init_command: bool = False) -> argparse.ArgumentParser:
+def build_parser(prog: str = "odoo-compose", target: str = "docker", *, setup_command: bool = False) -> argparse.ArgumentParser:
+    """Build the top-level command list or the full workspace setup parser."""
+    if not setup_command:
+        parser = argparse.ArgumentParser(
+            prog=prog,
+            description=f"{prog} {__version__} — build reproducible Odoo workspaces",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=("Commands:\n" + "\n".join(
+                f"  {name:<27} {description}" for name, description in _CLI_COMMANDS
+            ) + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n"),
+        )
+        parser.add_argument("--version", action="version", version=f"{prog} {__version__}")
+        return parser
+
     if target == "docker":
-        epilog = """Generate Docker Compose artifacts for Odoo and PostgreSQL.
+        epilog = """Create or update an Odoo Docker workspace.
 
 Examples:
-
-  Creating a Docker workspace:
-    odoo-compose init ./odoo19 --sync-addons
-
-  Generating a deploy Docker build context:
-    odoo-compose /path/to/odoo-project.ini --sync-addons --create-docker-deploy
-
-  Previewing workspace neutralization SQL:
-    odoo-compose neutralize --dry-run
-
-  Neutralizing the workspace database:
-    odoo-compose neutralize
-
-  Inspecting provisioning history:
-    odoo-compose /path/to/odoo-project.ini --show-last-run
+  odoo-compose setup ./odoo19 --sync-addons
+  odoo-compose setup --sync-all --create-docker-deploy
+  odoo-compose setup ./odoo-project.ini --show-last-run
 """
     else:
-        epilog = """Generate native Odoo workspace configuration.
-A virtual environment is created only when explicitly requested.
+        epilog = """Create or update a native Odoo workspace.
+The virtual environment is recreated only when explicitly requested.
 
 Examples:
-
-  Creating a venv workspace:
-    odoo-compose-venv init ./odoo18-workspace --sync-all --create-venv --set odoo:version=18.0
-
-  Using multiple project files:
-    odoo-compose-venv -i base-project.ini -i odoo-addons.ini --sync-all --create-venv
-
-  Restoring a venv from an offline wheelhouse:
-    odoo-compose-venv /path/to/odoo-project.ini --create-venv-from-wheelhouse
-
-  Creating a portable workspace bundle:
-    odoo-compose-venv --root ./odoo18-workspace --create-bundle
-
-  Restoring a workspace from a bundle:
-    odoo-compose-venv --create-from-bundle ./odoo18-workspace.odt.zip --root ./restored-workspace
-
-  Previewing workspace neutralization SQL:
-    odoo-compose-venv neutralize --dry-run
+  odoo-compose-venv setup ./odoo19 --sync-all --create-venv
+  odoo-compose-venv setup -i base.ini -i addons.ini --sync-all --create-venv
+  odoo-compose-venv setup --create-from-bundle ./workspace.odt.zip --root ./restored
 """
-
-    if init_command:
-        epilog = (
-            "Initialize a workspace using the bundled default project template.\n"
-            "Accepts standard provisioning options.\n\n"
-            "Examples:\n"
-            f"  {prog} ./odoo19 --sync-addons\n"
-            f"  {prog} --root ./odoo19 --set odoo:version=19.0\n"
-        )
-
-    if not init_command:
-        epilog += "\nCommands:\n" + "\n".join(
-            f"  {name:<27} {description}" for name, description in _CLI_COMMANDS
-        ) + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n"
 
     parser = argparse.ArgumentParser(
         prog=prog,
-        description=f"{prog} {__version__} — build reproducible Odoo workspaces",
+        description=f"{prog} {__version__} — create or update an Odoo workspace",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog,
     )
-
     parser.add_argument(
-        "--version",
-        action="version",
-        version=f"{prog} {__version__}",
-        help="Show the program version and exit.",
+        "source", nargs="?", metavar="ROOT|INI",
+        help=("Workspace directory (created if needed), an existing local INI file, "
+              "a git+REPO_URL//PATH.ini?ref=REF source, or a remote INI URL. "
+              "An existing file or a path ending in .ini is treated as an INI source."),
     )
-
-    if init_command:
-        parser.add_argument(
-            "init_root",
-            nargs="?",
-            metavar="ROOT",
-            help="Optional workspace directory (alternative to --root ROOT).",
-        )
-        parser.set_defaults(ini=None)
-    else:
-        parser.add_argument(
-            "ini",
-            metavar="INI",
-            nargs="?",
-            help=(
-                "Optional local path to odoo-project.ini, Git-backed remote INI "
-                "git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF, or URL to a raw INI file. "
-                "If omitted and no -i/--include is provided, ROOT/odoo-project.ini is used."
-            ),
-        )
-
-    if not init_command:
-        parser.add_argument(
-            "-i",
-            "--include",
-            dest="include_inis",
-            action="append",
-            default=[],
-            metavar="INI",
-            help=(
-                "Include an additional project layer. Can be passed multiple times; "
-                "layers are processed in CLI order and later layers override earlier layers."
-            ),
-        )
-    else:
-        parser.set_defaults(include_inis=[])
-
+    parser.add_argument(
+        "-i", "--include", dest="include_inis", action="append", default=[], metavar="INI",
+        help="Include an additional project INI layer; repeat for multiple layers.",
+    )
     parser.add_argument(
         "--root",
         metavar="ROOT",
@@ -6700,7 +6638,7 @@ def _run_completion_cli(target: str, args: list[str], prog: str) -> int:
     opts = parser.parse_args(args)
     parsers = {
         "": build_parser(prog, target),
-        "init": build_parser(f"{prog} init", target, init_command=True),
+        "setup": build_parser(f"{prog} setup", target, setup_command=True),
         "completion": parser,
         **{name: _build_odoo_parser(name, prog) for name in ("run", "shell", "update", "test")},
         "neutralize": _build_neutralize_parser(prog),
@@ -6727,24 +6665,38 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         raise SystemExit(_run_backup_restore_cli(target, sys.argv[1], sys.argv[2:], prog))
     _logger.info("%s %s", prog, __version__)
 
-    # The init subcommand uses the same provisioning path as ordinary INI runs.
-    init_command = sys.argv[1:2] == ["init"]
-    parser = build_parser(
-        prog=f"{prog} init" if init_command else prog,
-        target=target,
-        init_command=init_command,
-    )
-    args = parser.parse_args(sys.argv[2:] if init_command else sys.argv[1:])
-    init_project_root_raw = (args.init_root or "").strip() if init_command else ""
+    # All workspace provisioning is explicitly dispatched through `setup`.
+    # Plain invocations only print CLI help, and never touch the workspace.
+    if sys.argv[1:2] != ["setup"]:
+        parser = build_parser(prog=prog, target=target)
+        if len(sys.argv) == 1:
+            parser.print_help()
+            return
+        parser.parse_args(sys.argv[1:])
+        parser.print_help()
+        return
 
-    if init_project_root_raw and args.root:
-        parser.error(
-            "workspace ROOT was specified both as init ROOT and --root; "
-            "use only one of them."
-        )
+    parser = build_parser(prog=f"{prog} setup", target=target, setup_command=True)
+    args = parser.parse_args(sys.argv[2:])
 
-    if bool(getattr(args, 'show_last_run', False)) and init_command:
-        parser.error("init cannot be used together with --show-last-run.")
+    # `setup ROOT` creates or reuses ROOT/odoo-project.ini, while an INI file,
+    # Git-backed INI, or URL remains an explicit project definition source.
+    source = (args.source or "").strip()
+    setup_root_raw = ""
+    args.ini = None
+    if source:
+        candidate = Path(source).expanduser()
+        if (source.startswith("git+") or "://" in source or
+                (candidate.is_file() or (not candidate.is_dir() and candidate.suffix.lower() == ".ini"))):
+            args.ini = source
+        else:
+            setup_root_raw = source
+
+    if setup_root_raw and args.root:
+        parser.error("workspace ROOT was specified both as setup ROOT and --root; use only one of them.")
+    if setup_root_raw:
+        args.root = setup_root_raw
+
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
         parser.error("--create-from-bundle cannot be used together with --show-last-run.")
     if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
@@ -6880,13 +6832,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     source_snapshot_ready = False
 
     if implicit_ini:
-        if init_project_root_raw:
-            root_override = _validate_root_override(
-                parser,
-                init_project_root_raw,
-                option_name="init ROOT",
-            )
-        elif args.root:
+        if args.root:
             root_override = _validate_root_override(parser, args.root)
         else:
             try:
@@ -6911,27 +6857,13 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         source_ini_layers = [_path_for_report(ini_path)]
 
         try:
-            created_default_ini = False
-            if init_command:
-                created_default_ini = not ini_path.exists()
-                _write_default_project_ini_template(ini_path)
-                if created_default_ini:
-                    project_ini_status = f"created and used ROOT/{_DEFAULT_PROJECT_INI_NAME}"
-                else:
-                    project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
-                    _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
-            elif not ini_path.is_file():
-                suggested_cmd = [prog, "init"]
-                if args.root:
-                    suggested_cmd.append(str(root_override))
-                parser.error(
-                    f"Default project file not found: {ini_path}\n"
-                    "Create it manually, pass an explicit INI file, or run:\n"
-                    f"  {_format_cmd(suggested_cmd)}"
-                )
-
-            if project_ini_status is None:
+            created_default_ini = not ini_path.exists()
+            _write_default_project_ini_template(ini_path)
+            if created_default_ini:
+                project_ini_status = f"created and used ROOT/{_DEFAULT_PROJECT_INI_NAME}"
+            else:
                 project_ini_status = f"used existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
+                _logger.info("Project INI already exists, leaving it in place: %s", ini_path)
 
             if vars_overrides or ini_overrides:
                 _save_workspace_ini_overrides(
