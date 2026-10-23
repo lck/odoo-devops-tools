@@ -25,10 +25,10 @@ import sys
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field, replace
-from decimal import Decimal
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -38,75 +38,15 @@ from . import __version__
 _logger = logging.getLogger("odoo-compose")
 
 
-class _IniInterpolation(configparser.ExtendedInterpolation):
-    """Interpolate ${section:option}; literal dollars need no escaping.
-    """
-
-    def before_set(self, parser, section, option, value):
-        # Literal '$' and '$$' are permitted in every INI value.
-        return value
-
-    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
-        rawval = parser.get(section, option, raw=True, fallback=rest)
-        if depth > configparser.MAX_INTERPOLATION_DEPTH:
-            raise configparser.InterpolationDepthError(option, section, rawval)
-
-        while rest:
-            pos = rest.find("${")
-            if pos < 0:
-                accum.append(rest)
-                return
-
-            prefix = rest[:pos]
-            slash_count = len(prefix) - len(prefix.rstrip("\\"))
-            accum.append(prefix[:len(prefix) - slash_count] + "\\" * (slash_count // 2))
-            match = self._KEYCRE.match(rest, pos)
-
-            if slash_count % 2:
-                # An odd number of backslashes makes the reference literal.
-                if match:
-                    accum.append(match.group(0))
-                    rest = rest[match.end():]
-                else:
-                    accum.append("${")
-                    rest = rest[pos + 2:]
-                continue
-
-            if match is None:
-                raise configparser.InterpolationSyntaxError(
-                    option, section, "bad interpolation variable reference %r" % rest[pos:]
-                )
-
-            path = match.group(1).split(":")
-            rest = rest[match.end():]
-            sect = section
-            opt = option
-            try:
-                if len(path) == 1:
-                    opt = parser.optionxform(path[0])
-                    value = map[opt]
-                elif len(path) == 2:
-                    sect = path[0]
-                    opt = parser.optionxform(path[1])
-                    value = parser.get(sect, opt, raw=True)
-                else:
-                    raise configparser.InterpolationSyntaxError(
-                        option, section, "More than one ':' found: %r" % match.group(0)
-                    )
-            except (KeyError, configparser.NoSectionError, configparser.NoOptionError):
-                raise configparser.InterpolationMissingOptionError(
-                    option, section, rawval, ":".join(path)
-                ) from None
-
-            if value is not None:
-                if "${" in value:
-                    self._interpolate_some(
-                        parser, opt, accum, value, sect,
-                        dict(parser.items(sect, raw=True)), depth + 1,
-                    )
-                else:
-                    accum.append(value)
-
+_COMPLETION_SHELLS = ("bash", "zsh", "fish", "powershell")
+_COMPLETION_PATH_OPTIONS = {
+    "--root": "directory",
+    "--create-from-bundle": "file",
+    "--create-bundle": "file",
+    "--dry-run": "directory",
+    "-i": "file",
+    "--include": "file",
+}
 
 _GIT_INI_PREFIX = "git+"
 _URL_INI_TIMEOUT_SECONDS = 30
@@ -138,7 +78,6 @@ _DEFAULT_PROJECT_INI_TEMPLATE = r"""
 [odoo]
 version = 19.0
 """
-
 
 _DEFAULT_REQUIREMENTS = [
     "pip",
@@ -386,6 +325,76 @@ class Layout:
 # -----------------------------
 # Helpers: validation & parsing
 # -----------------------------
+
+class _IniInterpolation(configparser.ExtendedInterpolation):
+    """Interpolate ${section:option}; literal dollars need no escaping.
+    """
+
+    def before_set(self, parser, section, option, value):
+        # Literal '$' and '$$' are permitted in every INI value.
+        return value
+
+    def _interpolate_some(self, parser, option, accum, rest, section, map, depth):
+        rawval = parser.get(section, option, raw=True, fallback=rest)
+        if depth > configparser.MAX_INTERPOLATION_DEPTH:
+            raise configparser.InterpolationDepthError(option, section, rawval)
+
+        while rest:
+            pos = rest.find("${")
+            if pos < 0:
+                accum.append(rest)
+                return
+
+            prefix = rest[:pos]
+            slash_count = len(prefix) - len(prefix.rstrip("\\"))
+            accum.append(prefix[:len(prefix) - slash_count] + "\\" * (slash_count // 2))
+            match = self._KEYCRE.match(rest, pos)
+
+            if slash_count % 2:
+                # An odd number of backslashes makes the reference literal.
+                if match:
+                    accum.append(match.group(0))
+                    rest = rest[match.end():]
+                else:
+                    accum.append("${")
+                    rest = rest[pos + 2:]
+                continue
+
+            if match is None:
+                raise configparser.InterpolationSyntaxError(
+                    option, section, "bad interpolation variable reference %r" % rest[pos:]
+                )
+
+            path = match.group(1).split(":")
+            rest = rest[match.end():]
+            sect = section
+            opt = option
+            try:
+                if len(path) == 1:
+                    opt = parser.optionxform(path[0])
+                    value = map[opt]
+                elif len(path) == 2:
+                    sect = path[0]
+                    opt = parser.optionxform(path[1])
+                    value = parser.get(sect, opt, raw=True)
+                else:
+                    raise configparser.InterpolationSyntaxError(
+                        option, section, "More than one ':' found: %r" % match.group(0)
+                    )
+            except (KeyError, configparser.NoSectionError, configparser.NoOptionError):
+                raise configparser.InterpolationMissingOptionError(
+                    option, section, rawval, ":".join(path)
+                ) from None
+
+            if value is not None:
+                if "${" in value:
+                    self._interpolate_some(
+                        parser, opt, accum, value, sect,
+                        dict(parser.items(sect, raw=True)), depth + 1,
+                    )
+                else:
+                    accum.append(value)
+
 
 def _format_cmd(cmd: list[str]) -> str:
     return shlex.join(str(part) for part in cmd)
@@ -5438,6 +5447,26 @@ def _prepare_included_project_ini(
         return output_path
 
 
+
+
+_CLI_COMMANDS = (
+    ("init", "Initialize a workspace (provisioning options supported)"),
+    ("completion", "Generate shell completion script (bash, zsh, fish, powershell)"),
+    ("run", "Run Odoo"),
+    ("shell", "Open an Odoo shell"),
+    ("update", "Update installed Odoo modules"),
+    ("test", "Run Odoo tests"),
+    ("neutralize", "Neutralize the workspace database"),
+    ("backup-db", "Back up the database"),
+    ("restore-db", "Restore the database"),
+    ("backup-filestore", "Back up the filestore"),
+    ("restore-filestore", "Restore the filestore"),
+    ("restic", "Run a Restic command"),
+    ("backup-filestore-restic", "Back up the filestore using Restic"),
+    ("restore-filestore-restic", "Restore a Restic filestore snapshot"),
+)
+
+
 def build_parser(prog: str = "odoo-compose", target: str = "docker", *, init_command: bool = False) -> argparse.ArgumentParser:
     if target == "docker":
         epilog = """Generate Docker Compose artifacts for Odoo and PostgreSQL.
@@ -5493,24 +5522,9 @@ Examples:
             f"  {prog} --root ./odoo19 --set odoo:version=19.0\n"
         )
 
-    commands = (
-        ("init", "Initialize a workspace (provisioning options supported)"),
-        ("run", "Run Odoo"),
-        ("shell", "Open an Odoo shell"),
-        ("update", "Update installed Odoo modules"),
-        ("test", "Run Odoo tests"),
-        ("neutralize", "Neutralize the workspace database"),
-        ("backup-db", "Back up the database"),
-        ("restore-db", "Restore the database"),
-        ("backup-filestore", "Back up the filestore"),
-        ("restore-filestore", "Restore the filestore"),
-        ("restic", "Run a Restic command"),
-        ("backup-filestore-restic", "Back up the filestore using Restic"),
-        ("restore-filestore-restic", "Restore a Restic filestore snapshot"),
-    )
     if not init_command:
         epilog += "\nCommands:\n" + "\n".join(
-            f"  {name:<27} {description}" for name, description in commands
+            f"  {name:<27} {description}" for name, description in _CLI_COMMANDS
         ) + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n"
 
     parser = argparse.ArgumentParser(
@@ -5869,8 +5883,7 @@ def _run_neutralize_command(
         raise _NeutralizeSqlError(f"neutralization command failed (exit {result.returncode})")
 
 
-def _run_neutralize_cli(target: str, args: list[str], prog: str) -> int:
-    """Neutralize an existing workspace directly from the installed CLI."""
+def _build_neutralize_parser(prog: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=f"{prog} neutralize",
         description="Neutralize an existing workspace database or preview interpolated workspace SQL.",
@@ -5880,6 +5893,12 @@ def _run_neutralize_cli(target: str, args: list[str], prog: str) -> int:
         "--dry-run", nargs="?", const="", default=None, metavar="OUTPUT_DIR",
         help="Only save interpolated neutralize/*.sql to OUTPUT_DIR; default: .odt-env/neutralize-preview.",
     )
+    return parser
+
+
+def _run_neutralize_cli(target: str, args: list[str], prog: str) -> int:
+    """Neutralize an existing workspace directly from the installed CLI."""
+    parser = _build_neutralize_parser(prog)
     opts = parser.parse_args(args)
     root = Path(opts.root).expanduser().resolve()
     if not root.is_dir():
@@ -6130,8 +6149,7 @@ def _workspace_temp_backup(output: Path, command: list[str], root: Path, env: Op
         tmp_path.unlink(missing_ok=True)
 
 
-def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str) -> int:
-    """Execute backup/restore tasks directly from the installed CLI (no generated scripts)."""
+def _build_backup_restore_parser(action: str, prog: str) -> argparse.ArgumentParser:
     descriptions = {
         "backup-db": "Create a PostgreSQL custom-format database backup.",
         "restore-db": "Restore a PostgreSQL dump into the workspace database.",
@@ -6159,6 +6177,12 @@ def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str
         parser.add_argument("snapshot", nargs="?", default="latest", metavar="SNAPSHOT", help="Restic snapshot ID (default: latest).")
     elif action in ("restic", "backup-filestore-restic"):
         parser.add_argument("restic_args", nargs=argparse.REMAINDER, metavar="RESTIC_ARGS", help="Arguments forwarded to Restic.")
+    return parser
+
+
+def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str) -> int:
+    """Execute backup/restore tasks directly from the installed CLI (no generated scripts)."""
+    parser = _build_backup_restore_parser(action, prog)
     if action in ("restic", "backup-filestore-restic"):
         opts, extra = parser.parse_known_args(args)
         opts.restic_args = extra + opts.restic_args
@@ -6337,8 +6361,7 @@ def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str
         return 1
 
 
-def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
-    """Run an Odoo operation directly, preserving its terminal and exit status."""
+def _build_odoo_parser(action: str, prog: str) -> argparse.ArgumentParser:
     descriptions = {
         "run": "Run Odoo in the selected workspace.",
         "shell": "Open an interactive Odoo shell in the selected workspace.",
@@ -6347,12 +6370,17 @@ def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
     }
     parser = argparse.ArgumentParser(
         prog=f"{prog} {action}", description=descriptions[action],
-        epilog="Additional options are forwarded to Odoo or click-odoo-update. "
-               "Use '-- --help' to request help from the underlying executable.",
+        epilog="Additional options are forwarded to Odoo or click-odoo-update.",
     )
     parser.add_argument("--root", default=".", metavar="ROOT", help="Workspace root (default: current directory).")
     if action == "update":
         parser.add_argument("--all", action="store_true", help="Update all installed modules (maps to --update-all).")
+    return parser
+
+
+def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
+    """Run an Odoo operation directly, preserving its terminal and exit status."""
+    parser = _build_odoo_parser(action, prog)
     opts, passthrough = parser.parse_known_args(args)
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
@@ -6414,6 +6442,274 @@ def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
         return 130
 
 
+def _completion_options(parser: argparse.ArgumentParser) -> list[str]:
+    return list(dict.fromkeys(option for action in parser._actions for option in action.option_strings))
+
+
+def _completion_ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _completion_bash(name: str, commands: list[str], options: dict[str, list[str]]) -> str:
+    fn = "_" + name.replace("-", "_") + "_completion"
+    output = [
+        f"# Bash completion for {name}",
+        f"{fn}() {{",
+        '    local cur="${COMP_WORDS[COMP_CWORD]}"',
+        '    local prev="" cmd="" opts="" candidates=""',
+        '    (( COMP_CWORD > 0 )) && prev="${COMP_WORDS[COMP_CWORD-1]}"',
+        '    COMPREPLY=()',
+        '    if (( COMP_CWORD == 1 )); then',
+        '        if [[ "$cur" == -* ]]; then',
+        f'            candidates={shlex.quote(" ".join(options[""]))}',
+        '        else',
+        f'            candidates={shlex.quote(" ".join(commands))}',
+        '        fi',
+        '        mapfile -t COMPREPLY < <(compgen -W "$candidates" -- "$cur")',
+        '        if [[ "$cur" != -* ]]; then',
+        '            mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -f -- "$cur")',
+        '            compopt -o filenames 2>/dev/null || true',
+        '        fi',
+        '        return',
+        '    fi',
+        '    if [[ "${COMP_WORDS[1]}" == completion && $COMP_CWORD -eq 2 ]]; then',
+        '        mapfile -t COMPREPLY < <(compgen -W "' + " ".join(_COMPLETION_SHELLS) + '" -- "$cur")',
+        '        return',
+        '    fi',
+        '    cmd="${COMP_WORDS[1]}"',
+        '    case "$cmd" in',
+    ]
+    for cmd, opts in options.items():
+        if cmd == "":
+            continue
+        output.extend([f"        {shlex.quote(cmd)}) opts={shlex.quote(' '.join(opts))} ;;"])
+    output.extend([
+        f"        *) opts={shlex.quote(' '.join(options['']))} ;;",
+        '    esac',
+        '    case "$prev" in',
+        '        --root) mapfile -t COMPREPLY < <(compgen -d -- "$cur"); compopt -o filenames 2>/dev/null || true; return ;;',
+        '        --create-bundle|--dry-run)',
+        '            if [[ "$cur" != -* ]]; then',
+        '                mapfile -t COMPREPLY < <(compgen -f -- "$cur")',
+        '                compopt -o filenames 2>/dev/null || true; return',
+        '            fi ;;',
+        '        --create-from-bundle|-i|--include)',
+        '            mapfile -t COMPREPLY < <(compgen -f -- "$cur")',
+        '            compopt -o filenames 2>/dev/null || true; return ;;',
+        '        -e|--extra-var|-S|--set) return ;;',
+        '    esac',
+        '    if [[ "$cur" == --root=* ]]; then',
+        '        local item',
+        '        mapfile -t COMPREPLY < <(compgen -d -- "${cur#--root=}")',
+        '        for item in "${!COMPREPLY[@]}"; do COMPREPLY[item]="--root=${COMPREPLY[item]}"; done',
+        '        compopt -o filenames 2>/dev/null || true; return',
+        '    fi',
+        '    if [[ "$cur" == -* ]]; then',
+        '        mapfile -t COMPREPLY < <(compgen -W "$opts" -- "$cur")',
+        '    else',
+        '        mapfile -t COMPREPLY < <(compgen -f -- "$cur")',
+        '        compopt -o filenames 2>/dev/null || true',
+        '    fi',
+        '}',
+        f'complete -F {fn} {name}',
+        '',
+    ])
+    return "\n".join(output)
+
+
+def _completion_zsh(name: str, commands: list[str], options: dict[str, list[str]]) -> str:
+    fn = "_" + name.replace("-", "_") + "_completion"
+    output = [
+        f"#compdef {name}",
+        f"{fn}() {{",
+        '    local -a candidates',
+        '    if (( CURRENT == 2 )); then',
+        '        if [[ "$PREFIX" == -* ]]; then',
+        '            candidates=(' + ' '.join(shlex.quote(x) for x in options['']) + ')',
+        '        else',
+        '            candidates=(' + ' '.join(shlex.quote(x) for x in commands) + ')',
+        '        fi',
+        '        compadd -- "${candidates[@]}"',
+        '        [[ "$PREFIX" != -* ]] && _files',
+        '        return',
+        '    fi',
+        '    if [[ "${words[2]}" == completion && CURRENT -eq 3 ]]; then',
+        '        candidates=(' + ' '.join(_COMPLETION_SHELLS) + ')',
+        '        compadd -- "${candidates[@]}"',
+        '        return',
+        '    fi',
+        '    case "${words[2]}" in',
+    ]
+    for cmd, opts in options.items():
+        if cmd:
+            output.append(f"        {shlex.quote(cmd)}) candidates=({' '.join(shlex.quote(x) for x in opts)}) ;;")
+    output.extend([
+        '        *) candidates=(' + ' '.join(shlex.quote(x) for x in options['']) + ') ;;',
+        '    esac',
+        '    case "${words[CURRENT-1]}" in',
+        '        --root) _files -/; return ;;',
+        '        --create-bundle|--dry-run) [[ "$PREFIX" != -* ]] && _files && return ;;',
+        '        --create-from-bundle|-i|--include) _files; return ;;',
+        '        -e|--extra-var|-S|--set) return ;;',
+        '    esac',
+        '    if [[ "$PREFIX" == -* ]]; then',
+        '        compadd -- "${candidates[@]}"',
+        '    else',
+        '        _files',
+        '    fi',
+        '}',
+        f'compdef {fn} {name}',
+        '',
+    ])
+    return "\n".join(output)
+
+
+def _completion_fish(name: str, commands: list[str], options: dict[str, list[str]]) -> str:
+    fn = "__" + name.replace("-", "_") + "_completion_command"
+    output = [
+        f"# Fish completion for {name}",
+        f"function {fn}",
+        '    set -l tokens (commandline -opc)',
+        '    if test (count $tokens) -lt 2',
+        '        test (count $argv) -eq 0',
+        '        return $status',
+        '    end',
+        '    test (count $argv) -gt 0; and test "$tokens[2]" = "$argv[1]"',
+        'end',
+    ]
+    output.append(f"complete -c {name} -n '{fn}' -f -a {shlex.quote(' '.join(commands))} -d 'CLI command'")
+    for cmd, opts in options.items():
+        cond = fn if not cmd else f"{fn} {cmd}"
+        for opt in opts:
+            # Action descriptions are provided by --help; avoid duplicating them here.
+            if opt.startswith('--'):
+                flag = '-l ' + opt[2:]
+            elif len(opt) == 2:
+                flag = '-s ' + opt[1:]
+            else:
+                continue
+            kind = _COMPLETION_PATH_OPTIONS.get(opt)
+            if kind == "directory":
+                extra = " -a '(__fish_complete_directories)'" if opt == '--dry-run' else " -r -a '(__fish_complete_directories)'"
+            elif kind == "file":
+                extra = ' -F' if opt == '--create-bundle' else ' -r -F'
+            elif opt in ('--set', '-S', '--extra-var', '-e'):
+                extra = ' -r -f'
+            else:
+                extra = ''
+            output.append(f"complete -c {name} -n '{cond}' {flag}{extra}")
+    output.append(f"complete -c {name} -n '{fn} completion' -f -a '" + " ".join(_COMPLETION_SHELLS) + "' -d 'Target shell'")
+    output.append('')
+    return '\n'.join(output)
+
+
+def _completion_powershell(name: str, commands: list[str], options: dict[str, list[str]]) -> str:
+    result = [
+        f'# PowerShell completion for {name}',
+        f'Register-ArgumentCompleter -Native -CommandName {_completion_ps_quote(name)} -ScriptBlock {{',
+        '    param($wordToComplete, $commandAst, $cursorPosition)',
+        '    $optionSets = @{',
+    ]
+    for cmd, opts in options.items():
+        result.append('        '+_completion_ps_quote(cmd)+' = @('+', '.join(_completion_ps_quote(x) for x in opts)+')')
+    result += [
+        '    }',
+        '    $commands = @('+', '.join(_completion_ps_quote(x) for x in commands)+')',
+        '    $shells = @('+', '.join(_completion_ps_quote(x) for x in _COMPLETION_SHELLS)+')',
+        '    $parts = @($commandAst.CommandElements | ForEach-Object { $_.Extent.Text })',
+        '    $before = $parts',
+        '    if ($wordToComplete.Length -gt 0 -and $parts.Count -gt 0) {',
+        '        $before = @($parts | Select-Object -SkipLast 1)',
+        '    }',
+        '    $action = if ($before.Count -ge 2) { $before[1] } else { "" }',
+        '    $previous = if ($before.Count -ge 2) { $before[-1] } else { "" }',
+        '    $candidates = @()',
+        '    $pathType = ""',
+        '    if ($before.Count -lt 2) {',
+        '        $candidates = if ($wordToComplete.StartsWith("-")) { $optionSets[""] } else { $commands }',
+        '        if (-not $wordToComplete.StartsWith("-")) { $pathType = "file" }',
+        '    } elseif ($action -eq "completion" -and $before.Count -eq 2) {',
+        '        $candidates = $shells',
+        '    } elseif ($previous -eq "--root") {',
+        '        $pathType = "directory"',
+        '    } elseif ($previous -in @("--create-bundle", "--dry-run") -and -not $wordToComplete.StartsWith("-")) {',
+        '        $pathType = "file"',
+        '    } elseif ($previous -in @("--create-from-bundle", "-i", "--include")) {',
+        '        $pathType = "file"',
+        '    } elseif ($previous -in @("-S", "--set", "-e", "--extra-var")) {',
+        '        return',
+        '    } elseif ($wordToComplete.StartsWith("-")) {',
+        '        $candidates = if ($optionSets.ContainsKey($action)) { $optionSets[$action] } else { $optionSets[""] }',
+        '    } else {',
+        '        $pathType = "file"',
+        '    }',
+        '    foreach ($candidate in $candidates) {',
+        '        if ($candidate.StartsWith($wordToComplete, [StringComparison]::OrdinalIgnoreCase)) {',
+        '            [System.Management.Automation.CompletionResult]::new($candidate, $candidate, "ParameterValue", $candidate)',
+        '        }',
+        '    }',
+        '    if ($pathType) {',
+        '        $directory = "."',
+        '        $leaf = $wordToComplete',
+        '        if ($wordToComplete) {',
+        '            $parent = Split-Path -Path $wordToComplete -Parent',
+        '            if ($parent) { $directory = $parent }',
+        '            $leaf = Split-Path -Path $wordToComplete -Leaf',
+        '        }',
+        '        Get-ChildItem -LiteralPath $directory -ErrorAction SilentlyContinue | Where-Object {',
+        '            $_.Name.StartsWith($leaf, [StringComparison]::OrdinalIgnoreCase) -and',
+        '            ($pathType -ne "directory" -or $_.PSIsContainer)',
+        '        } | ForEach-Object {',
+        '            $path = if ($directory -eq ".") { $_.Name } else { Join-Path $directory $_.Name }',
+        '            $completion = if ($path -match "\\s") { "\'" + $path.Replace("\'", "\'\'") + "\'" } else { $path }',
+        '            [System.Management.Automation.CompletionResult]::new($completion, $path, "ProviderItem", $path)',
+        '        }',
+        '    }',
+        '}',
+        '',
+    ]
+    return '\n'.join(result)
+
+
+def _generate_completion(
+    shell: str,
+    program: str,
+    command_descriptions: Iterable[tuple[str, str]],
+    parsers: dict[str, argparse.ArgumentParser],
+) -> str:
+    """Return a script containing only available commands and argparse options."""
+    if shell not in _COMPLETION_SHELLS:
+        raise ValueError(f"Unsupported shell: {shell}")
+    commands = [name for name, _ in command_descriptions]
+    options = {name: _completion_options(parser) for name, parser in parsers.items()}
+    if shell == 'bash':
+        return _completion_bash(program, commands, options)
+    if shell == 'zsh':
+        return _completion_zsh(program, commands, options)
+    if shell == 'fish':
+        return _completion_fish(program, commands, options)
+    return _completion_powershell(program, commands, options)
+
+
+def _run_completion_cli(target: str, args: list[str], prog: str) -> int:
+    """Print shell completion code without reading or provisioning a workspace."""
+    parser = argparse.ArgumentParser(
+        prog=f"{prog} completion", description="Generate shell completion for this CLI."
+    )
+    parser.add_argument("shell", choices=_COMPLETION_SHELLS)
+    opts = parser.parse_args(args)
+    parsers = {
+        "": build_parser(prog, target),
+        "init": build_parser(f"{prog} init", target, init_command=True),
+        "completion": parser,
+        **{name: _build_odoo_parser(name, prog) for name in ("run", "shell", "update", "test")},
+        "neutralize": _build_neutralize_parser(prog),
+        **{name: _build_backup_restore_parser(name, prog) for name in _BACKUP_RESTORE_SCRIPT_NAMES},
+    }
+    print(_generate_completion(opts.shell, prog, _CLI_COMMANDS, parsers), end="")
+    return 0
+
+
 def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     # Standard logging to stdout only.
     logging.basicConfig(
@@ -6421,6 +6717,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if sys.argv[1:2] == ["completion"]:
+        raise SystemExit(_run_completion_cli(target, sys.argv[2:], prog))
     if sys.argv[1:2] and sys.argv[1] in ("run", "shell", "update", "test"):
         raise SystemExit(_run_odoo_cli(target, sys.argv[1], sys.argv[2:], prog))
     if sys.argv[1:2] == ["neutralize"]:

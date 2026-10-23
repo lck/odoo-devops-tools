@@ -86,8 +86,6 @@ odoo-compose --help
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
-Both CLIs also support [commands](#cli-commands) for database backup, restore, filestore/Restic operations and neutralization.
-
 ## 1. Docker workflow
 
 Create a new workspace:
@@ -543,9 +541,49 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 
 ---
 
-## CLI commands
+## Commands
 
-Commands perform workspace operations directly through the installed `odoo-devops-tools` CLI. Use `odoo-compose` for Docker workspaces and `odoo-compose-venv` for native workspaces. The `init` command creates the project INI when missing; other commands use the existing `ROOT/odoo-project.ini`; pass `--root ROOT` to select a different workspace. Each command has its own help: `odoo-compose <command> --help` (or `odoo-compose-venv <command> --help`). For commands that forward Odoo options, use `-- --help` to request the underlying tool's help instead.
+Commands perform workspace operations directly through the installed `odoo-devops-tools` CLI. Use `odoo-compose` for Docker workspaces and `odoo-compose-venv` for native workspaces. The `init` command creates the project INI when missing; other commands use the existing `ROOT/odoo-project.ini`; pass `--root ROOT` to select a different workspace. Each command has its own help: `odoo-compose <command> --help` (or `odoo-compose-venv <command> --help`).
+
+### Shell completion
+
+Both `odoo-compose` and `odoo-compose-venv` support `TAB` completion for
+commands, their CLI options and filesystem paths. Generate a completion
+script for your shell (no additional Python dependencies are needed):
+
+**Bash** (`~/.bashrc`):
+
+```bash
+eval "$(odoo-compose completion bash)"
+eval "$(odoo-compose-venv completion bash)"
+```
+
+**Zsh** (`~/.zshrc`, after enabling the Zsh completion system):
+
+```zsh
+autoload -Uz compinit && compinit
+eval "$(odoo-compose completion zsh)"
+eval "$(odoo-compose-venv completion zsh)"
+```
+
+**Fish** (`~/.config/fish/config.fish`):
+
+```fish
+odoo-compose completion fish | source
+odoo-compose-venv completion fish | source
+```
+
+**PowerShell** (add to your `$PROFILE`):
+
+```powershell
+odoo-compose completion powershell | Out-String | Invoke-Expression
+odoo-compose-venv completion powershell | Out-String | Invoke-Expression
+```
+
+Add the lines for your shell to its startup file and open a new terminal, or
+run them in the current session to enable completion immediately. For example,
+`odoo-compose init --sy<TAB>` completes `--sync-odoo`, `--sync-addons` or
+`--sync-all`.
 
 ### `init`
 
@@ -746,6 +784,7 @@ odoo-compose-venv neutralize
 {odoo-compose|odoo-compose-venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
 {odoo-compose|odoo-compose-venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
 {odoo-compose|odoo-compose-venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
+{odoo-compose|odoo-compose-venv} completion {bash|zsh|fish|powershell}
 ```
 
 Use **`odoo-compose`** for Docker operations and **`odoo-compose-venv`**
@@ -861,7 +900,7 @@ Maintenance:
 
 ### Docker generation
 
-- `odoo-compose` runs the Docker workflow. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database/filestore backup and restore operations are available as [CLI commands](#cli-commands).
+- `odoo-compose` runs the Docker workflow. It regenerates `ROOT/docker/local/` and `ROOT/compose.yaml`; addon sources are bind-mounted from the workspace into the Odoo container. With `[docker].odoo_source = workspace`, the resolved Odoo source is also bind-mounted at `/opt/odoo` and used as the runtime Odoo source. `[docker.share.<name>]` sections add read-write host-directory bind mounts without creating missing source paths. Set `[docker].mailpit_enabled = true` to add a persistent Mailpit service for local SMTP and POP3 testing. Database/filestore backup and restore operations are available as [commands](#commands).
 - `--create-docker-deploy` — `odoo-compose` only: generate a self-contained deployment build context under `ROOT/docker/deploy/`. Addon modules are staged into the context; with `[docker].odoo_source = workspace`, the resolved Odoo source is staged as well.
 
 ### Other options
