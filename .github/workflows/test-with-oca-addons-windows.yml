@@ -51,7 +51,7 @@ jobs:
           "[odoo]`nversion = 19.0`n`n[config]`n# preserve this comment`n" |
             Set-Content -LiteralPath $ini -Encoding UTF8
 
-          uv run odoo-compose-venv --root $root --no-provisioning-log
+          uv run odoo-compose-venv setup --root $root --no-provisioning-log
           if ($LASTEXITCODE -ne 0) { throw "Initial venv generation failed." }
           $before = Get-Content -LiteralPath $ini -Raw
           $match = [regex]::Match($before, '(?m)^db_name\s*=\s*([^\s]+)\s*$')
@@ -64,7 +64,7 @@ jobs:
           $config = Get-Content -LiteralPath (Join-Path $root 'odoo-configs\odoo-server.conf') -Raw
           if (-not $config.Contains("db_name = $dbName")) { throw "Odoo config has wrong db_name." }
 
-          uv run odoo-compose-venv --root $root --no-provisioning-log
+          uv run odoo-compose-venv setup --root $root --no-provisioning-log
           if ($LASTEXITCODE -ne 0) { throw "Second venv generation failed." }
           if ((Get-Content -LiteralPath $ini -Raw) -cne $before) {
             throw "db_name or INI formatting changed on the second run."
@@ -83,7 +83,7 @@ jobs:
           db_name = ci_custom
           data_dir = $data
           "@ | Set-Content -LiteralPath (Join-Path $root 'odoo-project.ini') -Encoding UTF8
-          uv run odoo-compose-venv --root $root --no-provisioning-log
+          uv run odoo-compose-venv setup --root $root --no-provisioning-log
           if ($LASTEXITCODE -ne 0) { throw 'Native helper generation failed.' }
           $config = Get-Content -LiteralPath (Join-Path $root 'odoo-configs\odoo-server.conf') -Raw
           if (-not $config.Contains("data_dir = $data")) { throw 'Generated Odoo data_dir is incorrect.' }
@@ -136,7 +136,7 @@ jobs:
 
       - name: Provision Odoo workspace
         run: |
-          uv run odoo-compose-venv .\odoo-project.ini `
+          uv run odoo-compose-venv setup .\odoo-project.ini `
             --sync-all `
             --create-venv `
             --root odoo-workspace
@@ -240,7 +240,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Database backup failed." }
           uv run odoo-compose-venv backup-filestore .\odoo-backups\native-filestore.tar.gz
           if ($LASTEXITCODE -ne 0) { throw "Filestore backup failed." }
-          uv run odoo-compose-venv ..\odoo-project.ini --root . --set config:db_name=odoo_native_restore
+          uv run odoo-compose-venv setup ..\odoo-project.ini --root . --set config:db_name=odoo_native_restore
           if ($LASTEXITCODE -ne 0) { throw "Failed to regenerate native helpers." }
           uv run odoo-compose-venv restore-db .\odoo-backups\native.dump
           if ($LASTEXITCODE -ne 0) { throw "Copy restore failed." }

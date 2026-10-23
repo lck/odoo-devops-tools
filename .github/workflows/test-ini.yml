@@ -35,13 +35,13 @@ jobs:
           # Exercise the real CLIs and allow their normal generated artifacts.
           # No --create-venv, --sync-* or Docker commands are executed.
           ini() {
-            odoo-compose-venv "$@" > "$tmp/cli.log" 2>&1 || {
+            odoo-compose-venv setup "$@" > "$tmp/cli.log" 2>&1 || {
               cat "$tmp/cli.log"
               return 1
             }
           }
           ini_docker() {
-            odoo-compose "$@" > "$tmp/cli.log" 2>&1 || {
+            odoo-compose setup "$@" > "$tmp/cli.log" 2>&1 || {
               cat "$tmp/cli.log"
               return 1
             }
@@ -91,48 +91,50 @@ jobs:
           INI
           }
 
-          echo '--- Implicit INI and init ---'
+          echo '--- Workspace setup and implicit INI ---'
           mkdir -p "$tmp/empty" "$tmp/shortcut"
-          reject --root "$tmp/empty"
-          missing "$tmp/empty/odoo-project.ini" 'missing implicit INI not created'
-          ini init --root "$tmp/empty"
-          exists "$tmp/empty/odoo-project.ini" 'init creates workspace INI'
+          odoo-compose-venv > "$tmp/root-help.txt"
+          contains "$tmp/root-help.txt" 'Commands:' 'bare CLI prints help'
+          missing "$tmp/empty/odoo-project.ini" 'bare CLI leaves workspace unchanged'
+          ini --root "$tmp/empty"
+          exists "$tmp/empty/odoo-project.ini" 'setup creates workspace INI'
           exists "$tmp/empty/odoo-configs/odoo-server.conf" 'native config generated without building venv'
           test ! -d "$tmp/empty/odoo-scripts" || { echo 'Unexpected native helper directory'; exit 1; }
           ok 'native provisioning does not create an unused helper directory'
           missing "$tmp/empty/odoo-scripts/run.sh" 'native operations require no generated run helper'
           missing "$tmp/empty/venv" 'no virtualenv provisioned'
           cp "$tmp/empty/odoo-project.ini" "$tmp/init.original"
-          ini init --root "$tmp/empty"
-          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'repeated init preserves existing INI'
+          ini --root "$tmp/empty"
+          same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'repeated setup preserves existing INI'
           ini --root "$tmp/empty"
           same "$tmp/init.original" "$tmp/empty/odoo-project.ini" 'no overrides: workspace INI unchanged'
-          ini init "$tmp/shortcut"
-          exists "$tmp/shortcut/odoo-project.ini" 'init ROOT shorthand'
+          ini "$tmp/shortcut"
+          exists "$tmp/shortcut/odoo-project.ini" 'setup ROOT shorthand'
           reject --init "$tmp/shortcut" --root "$tmp/shortcut"
-          ini init --root "$tmp/empty" --set docker:restart=no -e test_num=96
-          contains "$tmp/empty/odoo-project.ini" 'restart = no' 'init + --set adds Docker section'
-          contains "$tmp/empty/odoo-project.ini" 'test_num = 96' 'init + -e adds vars section'
+          ini --root "$tmp/empty" --set docker:restart=no -e test_num=96
+          contains "$tmp/empty/odoo-project.ini" 'restart = no' 'setup + --set adds Docker section'
+          contains "$tmp/empty/odoo-project.ini" 'test_num = 96' 'setup + -e adds vars section'
 
-          echo '--- init subcommand (native and Docker) ---'
+          echo '--- setup subcommand (native and Docker) ---'
           mkdir -p "$tmp/native-init" "$tmp/docker-init" "$tmp/native-root-flag"
-          ini init "$tmp/native-init" --set odoo:version=18.0
-          exists "$tmp/native-init/odoo-project.ini" 'native init ROOT creates project INI'
-          contains "$tmp/native-init/odoo-project.ini" 'version = 18.0' 'native init accepts --set'
+          ini "$tmp/native-init" --set odoo:version=18.0
+          exists "$tmp/native-init/odoo-project.ini" 'native setup ROOT creates project INI'
+          contains "$tmp/native-init/odoo-project.ini" 'version = 18.0' 'native setup accepts --set'
           cp "$tmp/native-init/odoo-project.ini" "$tmp/native-init.original"
-          ini init "$tmp/native-init"
-          same "$tmp/native-init.original" "$tmp/native-init/odoo-project.ini" 'native init preserves project INI'
-          ini init --root "$tmp/native-root-flag"
-          exists "$tmp/native-root-flag/odoo-project.ini" 'native init --root works'
-          ini_docker init "$tmp/docker-init" --set docker:restart=no
-          exists "$tmp/docker-init/odoo-project.ini" 'Docker init ROOT creates project INI'
-          contains "$tmp/docker-init/odoo-project.ini" 'restart = no' 'Docker init accepts --set'
-          reject init "$tmp/native-init" --root "$tmp/native-init"
-          reject init "$tmp/native-init" -i "$tmp/empty/odoo-project.ini"
+          ini "$tmp/native-init"
+          same "$tmp/native-init.original" "$tmp/native-init/odoo-project.ini" 'native setup preserves project INI'
+          ini --root "$tmp/native-root-flag"
+          exists "$tmp/native-root-flag/odoo-project.ini" 'native setup --root works'
+          ini_docker "$tmp/docker-init" --set docker:restart=no
+          exists "$tmp/docker-init/odoo-project.ini" 'Docker setup ROOT creates project INI'
+          contains "$tmp/docker-init/odoo-project.ini" 'restart = no' 'Docker setup accepts --set'
+          reject "$tmp/native-init" --root "$tmp/native-init"
+          ini "$tmp/native-layered" -i "$tmp/empty/odoo-project.ini"
+          exists "$tmp/native-layered/odoo-project.ini" 'setup ROOT supports INI includes'
           reject --init --root "$tmp/native-init"
           reject --init-project "$tmp/native-init"
-          odoo-compose-venv init --help | grep -Fq 'usage: odoo-compose-venv init'
-          odoo-compose init --help | grep -Fq 'usage: odoo-compose init'
+          odoo-compose-venv setup --help | grep -Fq 'usage: odoo-compose-venv setup'
+          odoo-compose setup --help | grep -Fq 'usage: odoo-compose setup'
 
           echo '--- Implicit --set / -S / -e / --extra-var ---'
           mkdir -p "$tmp/implicit"
@@ -633,8 +635,8 @@ jobs:
             done
           done
           for cli in odoo-compose odoo-compose-venv; do
-            "$cli" init --help > "$tmp/subcommand-help.txt" 2>&1
-            contains "$tmp/subcommand-help.txt" "usage: $cli init" "$cli init has its own --help"
+            "$cli" setup --help > "$tmp/subcommand-help.txt" 2>&1
+            contains "$tmp/subcommand-help.txt" "usage: $cli setup" "$cli setup has its own --help"
             "$cli" test --root "$tmp/nonexistent-help-workspace" --help > "$tmp/subcommand-help.txt" 2>&1
             contains "$tmp/subcommand-help.txt" "usage: $cli test" "$cli test has its own --help"
           done
