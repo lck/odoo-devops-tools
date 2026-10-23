@@ -6306,13 +6306,16 @@ def _build_odoo_parser(action: str, prog: str) -> argparse.ArgumentParser:
         "update": "Update installed Odoo modules using click-odoo-update.",
         "test": "Run Odoo tests (--test-enable --stop-after-init).",
     }
+    epilog = "Additional options are forwarded to Odoo."
+    if action == "update":
+        epilog = "Additional options are forwarded to click-odoo-update."
     parser = argparse.ArgumentParser(
         prog=f"{prog} {action}", description=descriptions[action],
-        epilog="Additional options are forwarded to Odoo or click-odoo-update.",
+        epilog=epilog,
     )
     parser.add_argument("--root", default=".", metavar="ROOT", help="Workspace root (default: current directory).")
     if action == "update":
-        parser.add_argument("--all", action="store_true", help="Update all installed modules (maps to --update-all).")
+        parser.add_argument("--all", action="store_true", help="Update all installed modules.")
     return parser
 
 

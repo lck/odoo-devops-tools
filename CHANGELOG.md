@@ -9,7 +9,7 @@
 ### Changed
 
 - Migrate all generated scripts to CLI commands.
-- Replace `init` and implicit provisioning with `setup` for workspace creation and updates.
+- Replace `--init` and implicit provisioning with `setup` for workspace creation and updates.
 
 ### Removed
 

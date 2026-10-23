@@ -75,45 +75,50 @@ Verify the installation:
 odoo-compose --help
 ```
 
-### Shell completion
+### Shell autocompletion
 
-Both `odoo-compose` and `odoo-compose-venv` support `TAB` completion for
-commands, their CLI options and filesystem paths. Generate a completion
-script for your shell (no additional Python dependencies are needed):
+Both `odoo-compose` and `odoo-compose-venv` support `TAB` completion for commands,
+options, and filesystem paths. No additional Python dependencies are required.
 
-**Bash** (`~/.bashrc`):
+To enable shell autocompletion, run the commands for your shell:
+
+**Bash**
 
 ```bash
-eval "$(odoo-compose completion bash)"
-eval "$(odoo-compose-venv completion bash)"
+echo 'eval "$(odoo-compose completion bash)"' >> ~/.bashrc
+echo 'eval "$(odoo-compose-venv completion bash)"' >> ~/.bashrc
 ```
 
-**Zsh** (`~/.zshrc`, after enabling the Zsh completion system):
+**Zsh**
 
 ```zsh
-autoload -Uz compinit && compinit
-eval "$(odoo-compose completion zsh)"
-eval "$(odoo-compose-venv completion zsh)"
+echo 'eval "$(odoo-compose completion zsh)"' >> ~/.zshrc
+echo 'eval "$(odoo-compose-venv completion zsh)"' >> ~/.zshrc
 ```
 
-**Fish** (`~/.config/fish/config.fish`):
+Zsh's completion system (`compinit`) must be enabled before these lines run.
+
+**Fish**
 
 ```fish
-odoo-compose completion fish | source
-odoo-compose-venv completion fish | source
+mkdir -p ~/.config/fish/completions
+odoo-compose completion fish > ~/.config/fish/completions/odoo-compose.fish
+odoo-compose-venv completion fish > ~/.config/fish/completions/odoo-compose-venv.fish
 ```
 
-**PowerShell** (add to your `$PROFILE`):
+**PowerShell**
 
 ```powershell
-odoo-compose completion powershell | Out-String | Invoke-Expression
-odoo-compose-venv completion powershell | Out-String | Invoke-Expression
+if (!(Test-Path -Path $PROFILE)) {
+    New-Item -ItemType File -Path $PROFILE -Force | Out-Null
+}
+Add-Content -Path $PROFILE -Value 'odoo-compose completion powershell | Out-String | Invoke-Expression'
+Add-Content -Path $PROFILE -Value 'odoo-compose-venv completion powershell | Out-String | Invoke-Expression'
 ```
 
-Add the lines for your shell to its startup file and open a new terminal, or
-run them in the current session to enable completion immediately. For example,
-`odoo-compose setup --sy<TAB>` completes `--sync-odoo`, `--sync-addons` or
-`--sync-all`.
+Restart your shell or reload its configuration to activate completion. For example,
+`odoo-compose setup --sy<TAB>` suggests matching options such as `--sync-odoo`,
+`--sync-addons`, and `--sync-all`.
 
 ---
 
@@ -637,13 +642,13 @@ Running either CLI without a command displays help; workspace changes are perfor
 
 Create or update an Odoo workspace. When no project file exists, `setup` creates the default `ROOT/odoo-project.ini`; otherwise it reuses the existing configuration. Synchronizing repositories, building a virtual environment, creating bundles, and generating Docker artifacts are optional.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} setup [ROOT|INI] [OPTIONS]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>ROOT|INI</code></dt>
@@ -654,16 +659,20 @@ Create or update an Odoo workspace. When no project file exists, `setup` creates
 Alternatively, load the workspace definition from a local INI file, Git repository, or URL:
 
 ```bash
+# Docker workflow:
 odoo-compose setup /path/to/odoo-project.ini
-odoo-compose setup 'git+https://github.com/lck/odoo-devops-tools.git//examples/odoo-project.ini?ref=main'
 odoo-compose setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
 odoo-compose setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
-odoo-compose setup 'https://raw.githubusercontent.com/lck/odoo-devops-tools/main/examples/odoo-project.ini'
+
+# Native workflow:
+odoo-compose-venv setup /path/to/odoo-project.ini
+odoo-compose-venv setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
+odoo-compose-venv setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 ```
 
 Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 **Paths and configuration**
 
@@ -706,6 +715,9 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dt><code>--sync-all</code></dt>
 <dd><p>Sync both Odoo and addons.</p></dd>
 
+> **Note:**
+> Repository sync aborts if a target Git repository has uncommitted changes. Commit, stash or discard changes before syncing.
+
 </dl>
 
 **Virtualenv and bundles** (`odoo-compose-venv` only where indicated)
@@ -739,46 +751,29 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
-# Regenerate artifacts in an existing workspace
-odoo-compose setup
-odoo-compose-venv setup
+# Docker workflow:
+odoo-compose setup ./odoo19
+odoo-compose setup ./odoo18 --set odoo:version=18.0
 
-# Sync repository sources
-odoo-compose setup --sync-all
-odoo-compose-venv setup --sync-all --create-venv
-
-# Compose layered INI files
-odoo-compose setup base-odoo-project.ini -i local-overrides.ini -i extra-addons.ini
-
-# Generate a Docker deploy context
-odoo-compose setup --sync-addons --create-docker-deploy
-
-# Build a portable workspace bundle
-odoo-compose-venv setup --sync-all --create-venv --create-bundle
+# Native workflow:
+odoo-compose-venv setup ./odoo19 --sync-all --create-venv
+odoo-compose-venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
 ```
-
-<h4 class="cli-reference">Notes</h4>
-
-`setup` without additional arguments uses the current directory as `ROOT` and regenerates the workflow artifacts. If the default INI is missing, it is created; otherwise it is reused. Running `odoo-compose` or `odoo-compose-venv` without a command only displays help. `odoo-compose` produces `ROOT/docker/local/` and `ROOT/compose.yaml`; addons (and, with `[docker].odoo_source = workspace`, Odoo source) are bind-mounted. Configured `[docker.share.<name>]` shares are mounted without creating missing host paths. Setting `[docker].mailpit_enabled = true` adds local SMTP/POP3 testing services.
-
-When including INI layers, the layers are merged from left to right and validated after merging. The effective merged configuration is saved to `ROOT/odoo-project.ini`, replacing an existing file. With no explicit INI or includes, `ROOT/odoo-project.ini` is used by convention—similar to Docker Compose's `compose.yaml`. For an existing workspace, `odoo-compose setup --root ./existing-workspace` is equivalent to `odoo-compose setup ./existing-workspace/odoo-project.ini`.
-
-> **Repository safety:** Repository sync aborts if a target Git repository has uncommitted changes. Commit, stash or discard changes before syncing. Portable wheelhouses are platform- and architecture-dependent; see [Creating portable workspace bundles](#4-creating-portable-workspace-bundles).
 
 ### `run`
 
 Run Odoo directly from the selected workspace. Docker uses a one-off container; Venv uses the existing virtualenv and generated `odoo-server.conf`.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} run [--root ROOT] [ODOO_ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>ODOO_ARGS...</code></dt>
@@ -786,7 +781,7 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -794,10 +789,13 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose run -i base --stop-after-init
+
+# Native workflow:
 odoo-compose-venv run -i base --stop-after-init
 ```
 
@@ -805,13 +803,13 @@ odoo-compose-venv run -i base --stop-after-init
 
 Open an interactive Odoo shell. Like `run`, this uses a one-off container for Docker or the existing virtualenv for native workspaces.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} shell [--root ROOT] [ODOO_ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>ODOO_ARGS...</code></dt>
@@ -819,7 +817,7 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -827,10 +825,13 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose shell
+
+# Native workflow:
 odoo-compose-venv shell
 ```
 
@@ -838,13 +839,13 @@ odoo-compose-venv shell
 
 Update installed Odoo addons through `click-odoo-update`.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} update [--root ROOT] [--all] [ODOO_ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>ODOO_ARGS...</code></dt>
@@ -852,7 +853,7 @@ Update installed Odoo addons through `click-odoo-update`.
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -863,10 +864,13 @@ Update installed Odoo addons through `click-odoo-update`.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose update --all
+
+# Native workflow:
 odoo-compose-venv update --all
 ```
 
@@ -874,13 +878,13 @@ odoo-compose-venv update --all
 
 Run Odoo with `--test-enable --stop-after-init` in either workflow.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} test [--root ROOT] [ODOO_ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>ODOO_ARGS...</code></dt>
@@ -888,7 +892,7 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -896,10 +900,13 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose test -i sale --test-tags /sale
+
+# Native workflow:
 odoo-compose-venv test -i sale --test-tags /sale
 ```
 
@@ -909,13 +916,13 @@ odoo-compose-venv test -i sale --test-tags /sale
 
 Create a PostgreSQL custom-format database dump.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} backup-db [--root ROOT] [OUTPUT]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>OUTPUT</code></dt>
@@ -923,7 +930,7 @@ Create a PostgreSQL custom-format database dump.
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -931,14 +938,15 @@ Create a PostgreSQL custom-format database dump.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose backup-db
-odoo-compose backup-db ./odoo-backups/pre-upgrade.dump
 
 # Native only: select a specific version of the PostgreSQL client tools
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+
 odoo-compose-venv backup-db
 ```
 
@@ -950,13 +958,13 @@ For Docker, the database name defaults to `odoo` when not specified.
 
 Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults to `odoo`). Stop Odoo before restoring its active database.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>BACKUP.dump</code></dt>
@@ -964,7 +972,7 @@ Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -981,16 +989,20 @@ Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose restore-db ./odoo-backups/pre-upgrade.dump
 odoo-compose restore-db --force --copy ./odoo-backups/pre-upgrade.dump
 odoo-compose restore-db --move ./odoo-backups/pre-upgrade.dump
 
 # Native only: optionally override PostgreSQL client location
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+
 odoo-compose-venv restore-db ./odoo-backups/pre-upgrade.dump
+odoo-compose-venv restore-db --force --copy ./odoo-backups/pre-upgrade.dump
+odoo-compose-venv restore-db --move ./odoo-backups/pre-upgrade.dump
 ```
 
 An existing target database is never replaced without `--force`. For native connection and client configuration, see [`backup-db`](#backup-db).
@@ -999,13 +1011,13 @@ An existing target database is never replaced without `--force`. For native conn
 
 Archive the selected database's filestore as a `.tar.gz` file.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} backup-filestore [--root ROOT] [OUTPUT]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>OUTPUT</code></dt>
@@ -1013,7 +1025,7 @@ Archive the selected database's filestore as a `.tar.gz` file.
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1021,11 +1033,13 @@ Archive the selected database's filestore as a `.tar.gz` file.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose backup-filestore
-odoo-compose backup-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+
+# Native workflow:
 odoo-compose-venv backup-filestore
 ```
 
@@ -1035,13 +1049,13 @@ For native workspaces, the filestore path comes from `[config].data_dir` or defa
 
 Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo before restoring an active filestore.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>FILESTORE.tar.gz</code></dt>
@@ -1049,7 +1063,7 @@ Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo be
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1060,12 +1074,16 @@ Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo be
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
 odoo-compose restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
+
+# Native workflow:
 odoo-compose-venv restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose-venv restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
 ```
 
 For native workspaces, the filestore path comes from `[config].data_dir` or defaults to `ROOT/odoo-data`. Docker accesses the filestore through a one-off Odoo container.
@@ -1074,13 +1092,13 @@ For native workspaces, the filestore path comes from `[config].data_dir` or defa
 
 Run Restic against the configured repository. Restic supports incremental filestore snapshots and deduplication.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>RESTIC_COMMAND</code></dt>
@@ -1091,7 +1109,7 @@ Run Restic against the configured repository. Restic supports incremental filest
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1099,19 +1117,23 @@ Run Restic against the configured repository. Restic supports incremental filest
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
 export RESTIC_REPOSITORY=/srv/restic/odoo
 export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
 
+# Docker workflow:
 odoo-compose restic init
 odoo-compose restic snapshots
 odoo-compose restic check
 
 # Native only: select a Restic executable instead of using PATH
 export RESTIC_BIN=/opt/restic/restic
+
+odoo-compose-venv restic init
 odoo-compose-venv restic snapshots
+odoo-compose-venv restic check
 ```
 
 **Configuration:** Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD`. Docker invokes Restic in a one-off container and bind-mounts an absolute local host repository; remote Restic repositories are also supported. For native workspaces, Restic is found through `PATH` by default; `RESTIC_BIN` sets the executable path at command runtime and applies only to `odoo-compose-venv`.
@@ -1120,13 +1142,13 @@ odoo-compose-venv restic snapshots
 
 Back up the selected database's filestore as a Restic snapshot.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>RESTIC_ARGS...</code></dt>
@@ -1134,7 +1156,7 @@ Back up the selected database's filestore as a Restic snapshot.
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1142,13 +1164,15 @@ Back up the selected database's filestore as a Restic snapshot.
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose backup-filestore-restic
 
 # Native only: optional Restic executable override
 export RESTIC_BIN=/opt/restic/restic
+
 odoo-compose-venv backup-filestore-restic
 ```
 
@@ -1158,13 +1182,13 @@ Set the repository and password as described under [`restic`](#restic). Snapshot
 
 Restore the selected database's filestore from a Restic snapshot. Stop Odoo before restoring an active filestore.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>SNAPSHOT</code></dt>
@@ -1172,7 +1196,7 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 
 </dl>
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1183,11 +1207,13 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose restore-filestore-restic --force latest
-odoo-compose restore-filestore-restic --force SNAPSHOT_ID
+
+# Native workflow:
 odoo-compose-venv restore-filestore-restic --force latest
 ```
 
@@ -1197,13 +1223,13 @@ Set `RESTIC_SOURCE_DB_NAME` to restore a snapshot belonging to another database.
 
 Neutralize a restored production database for development or testing, then execute optional workspace SQL. Both workflows read `ROOT/odoo-project.ini` and do not regenerate workspace artifacts.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
 ```
 
-<h4 class="cli-reference">Options</h4>
+**Options**
 
 <dl class="cli-reference">
 <dt><code>--root</code> <i>ROOT</i></dt>
@@ -1214,13 +1240,16 @@ Neutralize a restored production database for development or testing, then execu
 
 </dl>
 
-<h4 class="cli-reference">Examples</h4>
+**Examples**
 
 ```bash
+# Docker workflow:
 odoo-compose neutralize
-odoo-compose-venv neutralize
 odoo-compose neutralize --dry-run
 odoo-compose neutralize --dry-run ./preview-sql
+
+# Native workflow:
+odoo-compose-venv neutralize
 odoo-compose-venv neutralize --dry-run
 odoo-compose-venv neutralize --dry-run ./preview-sql
 ```
@@ -1263,25 +1292,23 @@ Without an explicit directory, preview files are written to `ROOT/.odt-env/neutr
 
 > **Security note:** Preview files may contain interpolated passwords or tokens. Protect or delete them after inspection. On Unix-like systems, newly created preview SQL files have permissions `0600`.
 
-#### Restore and neutralize
+#### Restore, update and neutralize
 
 Neutralization is a separate step after restoring the database and filestore:
 
-**Docker workflow:**
-
 ```bash
+# Docker workflow:
 docker compose stop odoo
 odoo-compose restore-db --copy ./odoo-backups/production.dump
 odoo-compose restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose update --all
 odoo-compose neutralize
 docker compose up -d odoo
-```
 
-**Native workflow:**
-
-```bash
+# Native workflow:
 odoo-compose-venv restore-db --copy ./odoo-backups/production.dump
 odoo-compose-venv restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose-venv update --all
 odoo-compose-venv neutralize
 ```
 
@@ -1289,26 +1316,19 @@ odoo-compose-venv neutralize
 
 Generate shell-completion definitions for either CLI. See [Shell completion](#shell-completion) under Installation for activation instructions.
 
-<h4 class="cli-reference">Usage</h4>
+**Usage**
 
 ```text
 {odoo-compose|odoo-compose-venv} completion {bash|zsh|fish|powershell}
 ```
 
-<h4 class="cli-reference">Arguments</h4>
+**Arguments**
 
 <dl class="cli-reference">
 <dt><code>bash</code>, <code>zsh</code>, <code>fish</code>, <code>powershell</code></dt>
 <dd><p>Shell format to generate.</p></dd>
 
 </dl>
-
-<h4 class="cli-reference">Examples</h4>
-
-```bash
-odoo-compose completion bash
-odoo-compose-venv completion zsh
-```
 
 ---
 
