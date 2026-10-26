@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.25.1 (2026-10-26)
+
+### Fixed
+
+- Fix Odoo startup failures in Docker caused by Windows CRLF line endings in `odoo-bin`.
+
 ## 1.25.0 (2026-10-25)
 
 ### Added

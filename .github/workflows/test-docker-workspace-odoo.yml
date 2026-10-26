@@ -65,7 +65,7 @@ jobs:
             odoo-workspace/docker/local/Dockerfile
           grep -q '^ENV PYTHONPATH=/opt/odoo$' \
             odoo-workspace/docker/local/Dockerfile
-          grep -q 'exec /opt/odoo/odoo-bin' \
+          grep -Fq 'exec python3 /opt/odoo/odoo-bin "$@"' \
             odoo-workspace/docker/local/Dockerfile
           grep -q '/usr/lib/python3/dist-packages/odoo' \
             odoo-workspace/docker/local/Dockerfile
@@ -93,6 +93,30 @@ jobs:
 
           docker compose run --rm --no-deps --entrypoint python3 odoo -c \
             'import odoo.addons, odoo.release; assert odoo.release.__file__.startswith("/opt/odoo/"); assert not any(path.startswith("/usr/lib/python3/dist-packages/odoo") for path in odoo.addons.__path__); print(odoo.release.__file__); print(list(odoo.addons.__path__))'
+
+      - name: Verify workspace Odoo starts with CRLF line endings
+        working-directory: ./odoo-workspace
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          path = Path("odoo/odoo-bin")
+          original = path.read_bytes()
+          normalized = original.replace(b"\r\n", b"\n")
+          assert normalized.startswith(b"#!/usr/bin/env python3\n"), "Unexpected odoo-bin shebang"
+
+          try:
+              path.write_bytes(normalized.replace(b"\n", b"\r\n"))
+              # Exercise the generated launcher, not Python invoked directly.
+              subprocess.run(
+                  ["docker", "compose", "run", "--rm", "--no-deps",
+                   "--entrypoint", "/usr/local/bin/odoo", "odoo", "--version"],
+                  check=True,
+              )
+          finally:
+              path.write_bytes(original)
+          PY
 
       - name: Initialize Odoo 19 database
         working-directory: ./odoo-workspace
@@ -126,6 +150,8 @@ jobs:
           grep -q 'rm -f /usr/bin/odoo' \
             odoo-workspace/docker/deploy/Dockerfile
           grep -q '^ENV PYTHONPATH=/opt/odoo$' \
+            odoo-workspace/docker/deploy/Dockerfile
+          grep -Fq 'exec python3 /opt/odoo/odoo-bin "$@"' \
             odoo-workspace/docker/deploy/Dockerfile
           grep -q '^addons_path = /opt/odoo/addons,/opt/odoo/odoo/addons,/mnt/extra-addons$' \
             odoo-workspace/docker/deploy/configs/odoo.conf

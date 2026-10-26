@@ -3291,7 +3291,7 @@ COPY --chown=odoo:odoo odoo/ {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/
         workspace_runtime_step = f"""
 ENV PYTHONPATH={_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}
 
-RUN printf '%s\\n' '#!/bin/sh' 'exec {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/odoo-bin "$@"' > /usr/local/bin/odoo \\
+RUN printf '%s\\n' '#!/bin/sh' 'exec python3 {_DOCKER_ODOO_CONTAINER_ROOT.as_posix()}/odoo-bin "$@"' > /usr/local/bin/odoo \\
  && chmod 0755 /usr/local/bin/odoo
 """
 
