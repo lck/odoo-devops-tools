@@ -37,6 +37,16 @@ jobs:
             "$fn"
             [[ " ${COMPREPLY[*]} " == *' restore-db '* ]]
 
+            COMP_WORDS=("$cli" u)
+            COMP_CWORD=1
+            "$fn"
+            [[ " ${COMPREPLY[*]} " == *' up '* ]]
+
+            COMP_WORDS=("$cli" up --ro)
+            COMP_CWORD=2
+            "$fn"
+            [[ " ${COMPREPLY[*]} " == *' --root '* ]]
+
             COMP_WORDS=("$cli" setup --sy)
             COMP_CWORD=2
             "$fn"
@@ -58,9 +68,17 @@ jobs:
             )
 
             if [[ "$cli" == odoo-compose ]]; then
+              COMP_WORDS=("$cli" up --b)
+              COMP_CWORD=2
+              "$fn"
+              [[ " ${COMPREPLY[*]} " == *' --build '* ]]
               grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
               ! grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
             else
+              COMP_WORDS=("$cli" up --b)
+              COMP_CWORD=2
+              "$fn"
+              [[ " ${COMPREPLY[*]} " != *' --build '* ]]
               grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
               ! grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
             fi

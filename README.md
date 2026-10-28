@@ -146,11 +146,11 @@ This creates `./odoo19/odoo-project.ini` with this initial content:
 version = 19.0
 ```
 
-Then start the Docker Compose environment:
+Then prepare and start the Docker Compose environment:
 
 ```bash
 cd ./odoo19
-docker compose up -d --build --wait
+odoo-compose up --build
 ```
 
 Optionally initialize the Odoo database from the command line instead of through the web interface:
@@ -166,7 +166,7 @@ Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localh
 > 
 > ```bash
 > odoo-compose setup --set docker:restart=no
-> docker compose up -d --build --wait
+> odoo-compose up --build
 > ```
 
 ### 1.1. Adding extra addons
@@ -189,7 +189,7 @@ Sync the addon repositories and regenerate the Docker environment:
 
 ```bash
 odoo-compose setup --sync-addons
-docker compose up -d --build --wait
+odoo-compose up --build
 ```
 
 The repositories are cloned into `ROOT/odoo-addons/` and bind-mounted into the Odoo container. Python dependencies from their `requirements.txt` files are included when rebuilding the Docker image.
@@ -228,7 +228,7 @@ Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
 odoo-compose setup --sync-all
-docker compose up -d --build --wait
+odoo-compose up --build
 ```
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
@@ -239,14 +239,14 @@ Enable Mailpit in the local Docker workflow when you need to inspect or test ema
 
 ```bash
 odoo-compose setup --set docker:mailpit_enabled=true
-docker compose up -d --build --wait
+odoo-compose up
 ```
 
 Mailpit is available at http://localhost:8025 by default. When running multiple workspaces, override the host web UI port, for example:
 
 ```bash
 odoo-compose setup --set docker:mailpit_enabled=true --set docker:mailpit_webui_port=8026
-docker compose up -d --build --wait
+odoo-compose up
 ```
 
 The generated local Odoo configuration sends outgoing email to `mailpit:1025`. When Mailpit is enabled, local Docker SMTP connection settings (`smtp_server`, `smtp_port`, `smtp_ssl`, `smtp_user`, and `smtp_password`) are intentionally overridden; the deploy configuration keeps the values from `[config]` unchanged.
@@ -288,11 +288,10 @@ mailpit_mem_limit = 256m
 
 Each option is independent and optional. If an option is missing or empty, `odoo-compose` omits that limit from the Compose service; no CPU or memory limit is imposed by the generator. CPU values must be positive decimal numbers (such as `0.5` or `2.0`). Memory limits must be positive amounts (such as `256m`, `2g`, or `4g`); zero and negative values are rejected. A memory limit is a hard container limit: exceeding it may cause an out-of-memory termination, so size it for your workload.
 
-Regenerate the Docker configuration after editing the INI, then start the services:
+Apply the updated resource limits and start the services. `up` regenerates the Compose configuration automatically, so no separate `setup` or image rebuild is necessary:
 
 ```bash
-odoo-compose setup
-docker compose up -d --build --wait
+odoo-compose up
 ```
 
 ### 1.6. Creating a Docker deploy build context
@@ -360,14 +359,22 @@ db_user = odoo
 db_password = odoo
 ```
 
-Then start Odoo with the CLI:
+Then start Odoo in the background:
+
+```bash
+cd ./odoo19
+odoo-compose-venv up
+odoo-compose-venv status
+```
+
+Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
+
+Use `odoo-compose-venv run` instead to run in the foreground:
 
 ```bash
 cd ./odoo19
 odoo-compose-venv run
 ```
-
-Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
 
 ### 2.1. Adding extra addons
 
@@ -586,6 +593,32 @@ This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building
 
 ---
 
+## Runtime lifecycle
+
+Use the same lifecycle commands with either CLI after provisioning the workspace with `setup`:
+
+```bash
+# Docker: generate Docker config and start the Compose stack
+odoo-compose up --build
+odoo-compose status
+odoo-compose down
+
+# Native: generate config and start Odoo in the background
+odoo-compose-venv up
+odoo-compose-venv status
+odoo-compose-venv down
+```
+
+`odoo-compose up` regenerates local workspace artifacts and then runs the equivalent of `docker compose up -d --wait`.
+
+`odoo-compose up --build` additionally builds the images (`docker compose up -d --build --wait`).
+
+Container orchestration remains with Docker Compose, and its CLI can still be used directly for advanced or service-specific operations.
+
+`up` requires an existing `odoo-project.ini`. It regenerates local configuration without fetching Git repositories or recreating virtualenvs.
+
+---
+
 ## Commands
 
 `odoo-compose` operates on Docker workspaces; `odoo-compose-venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
@@ -597,6 +630,15 @@ Running either CLI without a command displays help; workspace changes are perfor
 <dl class="cli-reference">
 <dt><a href="#setup"><code>setup</code></a></dt>
 <dd><p>Create or update a workspace, optionally synchronizing sources and generating artifacts.</p></dd>
+
+<dt><a href="#up"><code>up</code></a></dt>
+<dd><p>Regenerate workspace artifacts and start Odoo in the background.</p></dd>
+
+<dt><a href="#down"><code>down</code></a></dt>
+<dd><p>Stop the runtime without deleting data.</p></dd>
+
+<dt><a href="#status"><code>status</code></a></dt>
+<dd><p>Show the current runtime state.</p></dd>
 
 <dt><a href="#run"><code>run</code></a></dt>
 <dd><p>Run Odoo with additional arguments.</p></dd>
@@ -762,6 +804,78 @@ odoo-compose setup ./odoo18 --set odoo:version=18.0
 odoo-compose-venv setup ./odoo19 --sync-all --create-venv
 odoo-compose-venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
 ```
+
+### `up`
+
+Prepare and start the selected workspace. Requires an existing `odoo-project.ini`. Docker regenerates the local Docker build context, Odoo config and `compose.yaml`, then starts services with Docker Compose; it waits for health checks. Native regenerates its configuration and starts Odoo in the background using the existing virtualenv. Neither variant automatically synchronizes repositories or rebuilds the native virtualenv.
+
+**Usage**
+
+```text
+{odoo-compose|odoo-compose-venv} up [--root ROOT]
+odoo-compose up [--root ROOT] [--build] [--recreate]
+```
+
+**Options**
+
+<dl class="cli-reference">
+<dt><code>--root</code> <i>ROOT</i></dt>
+<dd><p>Select an existing workspace (default: current directory).</p></dd>
+
+<dt><code>--build</code></dt>
+<dd><p>Build Docker images before starting the services (Docker only).</p></dd>
+
+<dt><code>--recreate</code></dt>
+<dd><p>Force recreation of the Odoo container, without forcing recreation of the database container (Docker only).</p></dd>
+</dl>
+
+**Notes**
+
+Docker `up` remembers the last applied generated Odoo configuration and recreates the Odoo container when it changes, including after a separate `setup`.
+Running `up` without `--build` does not guarantee that changed Python dependencies or Dockerfile instructions are built into the image.
+Native `up` uses `ROOT/.odt-env/odoo-process.json` for process identity and writes runtime output to `ROOT/odoo-logs/odoo-up.log`; it restarts the tracked process if the generated config changes.
+
+### `down`
+
+Stop the selected workspace, preserving data. Docker delegates to `docker compose down` **without** `--volumes`; native gracefully stops only the verified Odoo process created by `odoo-compose-venv up`.
+
+**Usage**
+
+```text
+{odoo-compose|odoo-compose-venv} down [--root ROOT]
+```
+
+**Options**
+
+<dl class="cli-reference">
+<dt><code>--root</code> <i>ROOT</i></dt>
+<dd><p>Select an existing workspace (default: current directory).</p></dd>
+</dl>
+
+**Notes**
+
+Native `down` never terminates arbitrary processes found by name or port. It does not stop PostgreSQL or a separately managed systemd service. Docker `down` removes Compose-managed containers and networks, but retains named volumes.
+
+### `status`
+
+Show runtime status without provisioning or changing the workspace. Docker displays the Docker Compose service table; native reports the tracked Odoo PID and whether the process is still running.
+
+**Usage**
+
+```text
+{odoo-compose|odoo-compose-venv} status [--root ROOT]
+```
+
+**Options**
+
+<dl class="cli-reference">
+<dt><code>--root</code> <i>ROOT</i></dt>
+<dd><p>Select an existing workspace (default: current directory).</p></dd>
+</dl>
+
+**Notes**
+
+Native `status` verifies the recorded process identity to avoid confusing a reused PID with Odoo. It does not probe the Odoo HTTP endpoint or report application health.
 
 ### `run`
 
@@ -1311,6 +1425,8 @@ odoo-compose-venv restore-filestore ./odoo-backups/production-filestore.tar.gz
 odoo-compose-venv update --all
 odoo-compose-venv neutralize
 ```
+
+The Docker example uses `docker compose stop odoo` and `docker compose up -d odoo` intentionally: only the Odoo service is stopped and restarted, while PostgreSQL remains available for the restore operations.
 
 ### `completion`
 

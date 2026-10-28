@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -18,11 +20,13 @@ import platform
 import re
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -189,6 +193,30 @@ _INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS = {
     "source",
     "target",
 }
+
+_NATIVE_RUNTIME_STATE = "odoo-process.json"
+_NATIVE_RUNTIME_LOCK = "odoo-process.lock"
+_NATIVE_RUNTIME_LOG = "odoo-up.log"
+
+_CLI_COMMANDS = (
+    ("setup", "Create or update an Odoo workspace"),
+    ("up", "Prepare and start the Odoo workspace"),
+    ("down", "Stop the Odoo workspace (keep data)"),
+    ("status", "Show the Odoo runtime status"),
+    ("completion", "Generate shell completion script (bash, zsh, fish, powershell)"),
+    ("run", "Run Odoo"),
+    ("shell", "Open an Odoo shell"),
+    ("update", "Update installed Odoo modules"),
+    ("test", "Run Odoo tests"),
+    ("neutralize", "Neutralize the workspace database"),
+    ("backup-db", "Back up the database"),
+    ("restore-db", "Restore the database"),
+    ("backup-filestore", "Back up the filestore"),
+    ("restore-filestore", "Restore the filestore"),
+    ("restic", "Run a Restic command"),
+    ("backup-filestore-restic", "Back up the filestore using Restic"),
+    ("restore-filestore-restic", "Restore a Restic filestore snapshot"),
+)
 
 
 # -----------------------------
@@ -5447,26 +5475,6 @@ def _prepare_included_project_ini(
         return output_path
 
 
-
-
-_CLI_COMMANDS = (
-    ("setup", "Create or update an Odoo workspace"),
-    ("completion", "Generate shell completion script (bash, zsh, fish, powershell)"),
-    ("run", "Run Odoo"),
-    ("shell", "Open an Odoo shell"),
-    ("update", "Update installed Odoo modules"),
-    ("test", "Run Odoo tests"),
-    ("neutralize", "Neutralize the workspace database"),
-    ("backup-db", "Back up the database"),
-    ("restore-db", "Restore the database"),
-    ("backup-filestore", "Back up the filestore"),
-    ("restore-filestore", "Restore the filestore"),
-    ("restic", "Run a Restic command"),
-    ("backup-filestore-restic", "Back up the filestore using Restic"),
-    ("restore-filestore-restic", "Restore a Restic filestore snapshot"),
-)
-
-
 def build_parser(prog: str = "odoo-compose", target: str = "docker", *, setup_command: bool = False) -> argparse.ArgumentParser:
     """Build the top-level command list or the full workspace setup parser."""
     if not setup_command:
@@ -6383,6 +6391,317 @@ def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
         return 130
 
 
+# -----------------------------
+# Workspace lifecycle: Docker Compose and native virtualenv
+# -----------------------------
+
+def _build_lifecycle_parser(action: str, prog: str, target: str) -> argparse.ArgumentParser:
+    descriptions = {
+        "up": "Regenerate the workspace configuration and start Odoo in the background.",
+        "down": "Stop the running workspace without deleting databases or filestores.",
+        "status": "Show the current workspace runtime status without changing anything.",
+    }
+    parser = argparse.ArgumentParser(prog=f"{prog} {action}", description=descriptions[action])
+    parser.add_argument("--root", default=".", metavar="ROOT", help="Existing workspace root (default: current directory).")
+    if action == "up" and target == "docker":
+        parser.add_argument("--build", action="store_true", help="Build the Docker image before starting services.")
+        parser.add_argument("--recreate", action="store_true", help="Force recreation of the Odoo container only.")
+    return parser
+
+
+def _native_runtime_paths(root: Path) -> tuple[Path, Path, Path]:
+    return (root / ".odt-env" / _NATIVE_RUNTIME_STATE,
+            root / ".odt-env" / _NATIVE_RUNTIME_LOCK,
+            root / "odoo-logs" / _NATIVE_RUNTIME_LOG)
+
+
+@contextlib.contextmanager
+def _native_runtime_lock(root: Path):
+    """Serialize up/down across CLI invocations; never leave a stale lock owner."""
+    _, lock_path, _ = _native_runtime_paths(root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise _WorkspaceOperationError("another native lifecycle operation is in progress") from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise _WorkspaceOperationError("another native lifecycle operation is in progress") from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _native_windows_process_identity(pid: int) -> Optional[str]:
+    """Read the creation time of a live Windows process to guard against PID reuse."""
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        status = wintypes.DWORD()
+        creation, exit_time, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(status)) or status.value != 259:
+            return None  # STILL_ACTIVE
+        if not kernel32.GetProcessTimes(handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                                        ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            return None
+        return f"windows:{(creation.dwHighDateTime << 32) | creation.dwLowDateTime}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _native_process_identity(pid: int) -> Optional[str]:
+    """Return a stable per-process creation token; refuse unverified PID reuse."""
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            fields = raw[raw.rfind(")") + 2:].split()
+            if fields[0] in ("Z", "X"):
+                return None
+            try:
+                boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+            except OSError:
+                boot_id = "unknown"
+            return f"linux:{boot_id}:{fields[19]}"  # field 22: starttime in clock ticks
+        except (OSError, IndexError, ValueError):
+            return None
+    if os.name == "nt":
+        return _native_windows_process_identity(pid)
+    # macOS and other POSIX systems: start timestamp from ps.
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    created = result.stdout.strip()
+    return f"posix:{created}" if result.returncode == 0 and created else None
+
+
+def _native_read_process(root: Path) -> Optional[dict[str, Any]]:
+    state_path, _, _ = _native_runtime_paths(root)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError) as exc:
+        raise _WorkspaceOperationError(f"cannot read native process state: {state_path}") from exc
+    if not isinstance(state, dict) or not isinstance(state.get("pid"), int) or not isinstance(state.get("identity"), str):
+        raise _WorkspaceOperationError(f"invalid native process state: {state_path}")
+    # Compare filesystem identity instead of path spelling: Windows 8.3 aliases
+    # and symlinks may represent the same workspace under different names.
+    saved_root = state.get("root")
+    try:
+        same_workspace = isinstance(saved_root, str) and Path(saved_root).samefile(root)
+    except (OSError, ValueError):
+        same_workspace = False
+    if not same_workspace:
+        raise _WorkspaceOperationError("native process state belongs to a different workspace")
+    return state
+
+
+def _native_process_running(state: dict[str, Any]) -> bool:
+    return _native_process_identity(state["pid"]) == state["identity"]
+
+
+def _native_wait_stopped(state: dict[str, Any], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _native_process_running(state):
+            return True
+        time.sleep(0.2)
+    return not _native_process_running(state)
+
+
+def _native_stop_process(state: dict[str, Any]) -> None:
+    """Only terminate our verified Odoo process/process group, never arbitrary PID matches."""
+    if not _native_process_running(state):
+        return
+    pid = state["pid"]
+    if os.name == "nt":
+        # A new process group permits a graceful CTRL_BREAK when a console exists.
+        try:
+            os.kill(pid, signal.CTRL_BREAK_EVENT)
+        except OSError:
+            # A non-interactive Windows session may have no console to signal.
+            subprocess.run(["taskkill", "/PID", str(pid), "/T"],
+                           check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        # up starts a dedicated session; refuse to signal any unrelated group.
+        if os.getpgid(pid) != pid:
+            raise _WorkspaceOperationError("Odoo is no longer the leader of its recorded process group")
+        os.killpg(pid, signal.SIGTERM)
+    if _native_wait_stopped(state, 10):
+        return
+    if not _native_process_running(state):
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        if os.getpgid(pid) != pid:
+            raise _WorkspaceOperationError("Odoo process group changed while stopping")
+        os.killpg(pid, signal.SIGKILL)
+    if not _native_wait_stopped(state, 5):
+        raise _WorkspaceOperationError(f"Odoo process {pid} did not stop")
+
+
+def _native_start_process(root: Path, cfg: ProjectConfig, conf: Path) -> dict[str, Any]:
+    layout = Layout.from_root(root)
+    python = root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
+    if not python.is_file() or not odoo_bin.is_file():
+        raise _WorkspaceOperationError("native Odoo Python or odoo-bin not found; run setup first")
+    if not conf.is_file():
+        raise _WorkspaceOperationError("generated native Odoo config is missing")
+    state_path, _, log_path = _native_runtime_paths(root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [str(python), str(odoo_bin), "-c", str(conf)]
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    with log_path.open("ab") as log_file:
+        proc = subprocess.Popen(command, cwd=root, stdin=subprocess.DEVNULL,
+                                stdout=log_file, stderr=subprocess.STDOUT, close_fds=True,
+                                creationflags=flags, start_new_session=(os.name != "nt"))
+    # A process may exit immediately (bad interpreter, invalid config, etc.).
+    time.sleep(0.3)
+    identity = _native_process_identity(proc.pid)
+    if proc.poll() is not None or identity is None:
+        raise _WorkspaceOperationError(f"Odoo exited during startup; check {log_path}")
+    state = {"pid": proc.pid, "identity": identity, "root": str(root),
+             "config_sha256": _sha256_file(conf)}
+    try:
+        _write_json_atomic(state_path, state)
+    except Exception:
+        # Never leave a detached process unmanaged if recording it fails.
+        _native_stop_process(state)
+        raise
+    print(f"Odoo started (PID {proc.pid}); logs: {log_path}")
+    return state
+
+
+def _run_lifecycle_cli(target: str, action: str, args: list[str], prog: str) -> int:
+    parser = _build_lifecycle_parser(action, prog, target)
+    opts = parser.parse_args(args)
+    root = Path(opts.root).expanduser().resolve()
+    if not root.is_dir():
+        parser.error(f"workspace ROOT does not exist: {root}")
+    ini = root / _DEFAULT_PROJECT_INI_NAME
+    if not ini.is_file():
+        parser.error(f"workspace project file not found: {ini}; run setup first")
+    try:
+        if target == "docker":
+            compose = _workspace_docker_command() + ["compose"]
+            if action == "up":
+                conf = _docker_odoo_conf_path(Layout.from_root(root).docker_local_dir)
+                runtime_path = root / ".odt-env" / "docker-odoo-runtime.json"
+                try:
+                    previous = json.loads(runtime_path.read_text(encoding="utf-8"))
+                    if not isinstance(previous, dict):
+                        previous = {}
+                except (OSError, ValueError):
+                    previous = {}
+                # Provision existing sources only; never clone repos, install packages or create a new project.
+                sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
+                             target="docker", no_provisioning_log=True)
+                new_hash = _sha256_file(conf)
+                preexisting = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                             text=True, capture_output=True, check=False)
+                if preexisting.returncode:
+                    raise _WorkspaceOperationError("could not query Docker Compose Odoo container")
+                up = compose + ["up", "-d", "--wait"]
+                if opts.build:
+                    up.append("--build")
+                _workspace_command(up, root)
+                current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                         text=True, capture_output=True, check=False)
+                if current.returncode or not current.stdout.strip():
+                    raise _WorkspaceOperationError("could not find running Docker Compose Odoo container")
+                container_id = current.stdout.strip()
+                if (preexisting.stdout.strip() == container_id and
+                        (opts.recreate or previous.get("config_sha256") != new_hash or
+                         previous.get("container_id") != container_id)):
+                    # A bind-mounted odoo.conf change is invisible to Compose config hashing.
+                    # Recreate only Odoo; do not restart PostgreSQL or delete its data.
+                    _workspace_command(compose + ["up", "-d", "--wait", "--no-deps",
+                                                  "--force-recreate", "odoo"], root)
+                    current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                             text=True, capture_output=True, check=False)
+                    if current.returncode or not current.stdout.strip():
+                        raise _WorkspaceOperationError("could not query recreated Odoo container")
+                    container_id = current.stdout.strip()
+                _write_json_atomic(runtime_path, {"container_id": container_id, "config_sha256": new_hash})
+                return 0
+            if action == "down":
+                _workspace_command(compose + ["down"], root)
+                (root / ".odt-env" / "docker-odoo-runtime.json").unlink(missing_ok=True)
+                return 0
+            _workspace_command(compose + ["ps", "-a"], root)
+            return 0
+
+        state_path, _, log_path = _native_runtime_paths(root)
+        if action == "status":
+            state = _native_read_process(root)
+            if state and _native_process_running(state):
+                print(f"Odoo: running (PID {state['pid']})\nLogs: {log_path}")
+            else:
+                print("Odoo: stopped" + (" (stale process state)" if state else ""))
+            return 0
+        with _native_runtime_lock(root):
+            state = _native_read_process(root)
+            running = bool(state and _native_process_running(state))
+            if action == "down":
+                if running:
+                    _native_stop_process(state)
+                    print("Odoo: stopped")
+                else:
+                    print("Odoo: already stopped")
+                state_path.unlink(missing_ok=True)
+                return 0
+            conf = Layout.from_root(root).conf_path
+            # Native up requires a provisioned environment. Never recreate the venv.
+            if not (root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")).is_file():
+                raise _WorkspaceOperationError("native virtualenv not found; run setup --create-venv first")
+            sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
+                         target="venv", no_provisioning_log=True)
+            if running and state.get("config_sha256") == _sha256_file(conf):
+                print(f"Odoo: already running (PID {state['pid']})")
+                return 0
+            cfg = load_project_config(ini, log_resolved=False, log_overrides=False)
+            if running:
+                _native_stop_process(state)
+                state_path.unlink(missing_ok=True)
+            elif state:
+                state_path.unlink(missing_ok=True)  # never signal a reused PID
+            _native_start_process(root, cfg, conf)
+            return 0
+    except (OSError, ValueError, configparser.Error, _WorkspaceOperationError) as exc:
+        _logger.error("Could not %s workspace: %s", action, exc)
+        return 1
+
+
 def _completion_options(parser: argparse.ArgumentParser) -> list[str]:
     return list(dict.fromkeys(option for action in parser._actions for option in action.option_strings))
 
@@ -6642,6 +6961,7 @@ def _run_completion_cli(target: str, args: list[str], prog: str) -> int:
     parsers = {
         "": build_parser(prog, target),
         "setup": build_parser(f"{prog} setup", target, setup_command=True),
+        **{name: _build_lifecycle_parser(name, prog, target) for name in ("up", "down", "status")},
         "completion": parser,
         **{name: _build_odoo_parser(name, prog) for name in ("run", "shell", "update", "test")},
         "neutralize": _build_neutralize_parser(prog),
@@ -6658,6 +6978,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    if sys.argv[1:2] and sys.argv[1] in ("up", "down", "status"):
+        raise SystemExit(_run_lifecycle_cli(target, sys.argv[1], sys.argv[2:], prog))
     if sys.argv[1:2] == ["completion"]:
         raise SystemExit(_run_completion_cli(target, sys.argv[2:], prog))
     if sys.argv[1:2] and sys.argv[1] in ("run", "shell", "update", "test"):

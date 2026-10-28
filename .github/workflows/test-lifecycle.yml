@@ -1,0 +1,151 @@
+name: Test Workspace Lifecycle
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  native:
+    name: Native up/down/status (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI
+        run: python -m pip install --no-deps -e .
+      - name: Exercise native lifecycle and stale-PID protection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ('odt-native-lifecycle-' + [guid]::NewGuid().ToString('N'))
+          $odoo = Join-Path $root 'odoo'
+          $stateFile = Join-Path $root '.odt-env/odoo-process.json'
+          $ini = Join-Path $root 'odoo-project.ini'
+          New-Item -ItemType Directory -Force $odoo | Out-Null
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          [IO.File]::WriteAllText($ini, "[odoo]`nversion = 19.0`npath = odoo`n[config]`ndb_name = lifecycle_test`n", $utf8)
+          # Minimal Odoo stand-in; the test orchestration is PowerShell, not Python.
+          [IO.File]::WriteAllText((Join-Path $odoo 'odoo-bin'), "import time`nprint('Odoo started', flush=True)`nwhile True: time.sleep(0.5)`n", $utf8)
+          python -m venv (Join-Path $root 'venv')
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot create test venv' }
+
+          function Invoke-Cli {
+            param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CommandArgs)
+            $output = & odoo-compose-venv @CommandArgs --root $root 2>&1 | Out-String
+            Write-Host "odoo-compose-venv $($CommandArgs -join ' ') -> $LASTEXITCODE`n$output"
+            if ($LASTEXITCODE -ne 0) { throw "CLI failed: $($CommandArgs -join ' ')" }
+            return $output
+          }
+          function Assert-Output([string]$Output, [string]$Pattern) {
+            if ($Output -notmatch $Pattern) { throw "Expected '$Pattern' in: $Output" }
+          }
+          try {
+            Assert-Output (Invoke-Cli status) 'stopped'
+            Assert-Output (Invoke-Cli up) 'started'
+            $first = Get-Content -Raw $stateFile | ConvertFrom-Json
+            Assert-Output (Invoke-Cli status) 'running'
+            Assert-Output (Invoke-Cli up) 'already running'
+
+            if ($IsWindows) {
+              # An 8.3 pathname must refer to the same workspace as its long path.
+              $shortRoot = (& cmd.exe /d /c ('for %I in ("{0}") do @echo %~sI' -f $root) | Out-String).Trim()
+              if ((Test-Path $shortRoot) -and ($shortRoot -ne $root)) {
+                $shortStatus = & odoo-compose-venv status --root $shortRoot 2>&1 | Out-String
+                if ($LASTEXITCODE -ne 0) { throw "8.3 workspace alias failed: $shortStatus" }
+                Assert-Output $shortStatus 'running'
+              }
+            }
+
+            # Changing INI must restart Odoo, even when PID numbers are reused.
+            [IO.File]::WriteAllText($ini, "[odoo]`nversion = 19.0`npath = odoo`n[config]`ndb_name = lifecycle_test`nlog_level = debug`n", $utf8)
+            Assert-Output (Invoke-Cli up) 'started'
+            $second = Get-Content -Raw $stateFile | ConvertFrom-Json
+            if ($first.identity -eq $second.identity) { throw 'Process identity was not refreshed' }
+            Assert-Output (Invoke-Cli down) 'stopped'
+            Assert-Output (Invoke-Cli status) 'stopped'
+            Assert-Output (Invoke-Cli down) 'already stopped'
+
+            # A fake process record must never signal our own test runner PID.
+            @{ pid = $PID; identity = 'wrong'; root = $root } |
+              ConvertTo-Json -Compress | Set-Content -Path $stateFile -Encoding utf8
+            Assert-Output (Invoke-Cli status) 'stale'
+            Assert-Output (Invoke-Cli down) 'already stopped'
+            Write-Host 'Native lifecycle checks passed'
+          }
+          finally {
+            & odoo-compose-venv down --root $root 2>&1 | Out-Host
+            $log = Join-Path $root 'odoo-logs/odoo-up.log'
+            if (Test-Path $log) { Get-Content $log -Tail 40 | Out-Host }
+          }
+
+  docker:
+    name: Docker Compose lifecycle delegation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI
+        run: python -m pip install --no-deps -e .
+      - name: Exercise regeneration, selective recreate, build and down
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(mktemp -d)"
+          trap 'rm -rf "$base"' EXIT
+          root="$base/ws"
+          mkdir -p "$root" "$base/bin"
+          ini="$root/odoo-project.ini"
+          printf '[odoo]\nversion = 19.0\n' > "$ini"
+          export FAKE_DOCKER_LOG="$base/commands.log"
+          cat > "$base/bin/docker" <<'SH'
+          #!/usr/bin/env bash
+          printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+          case "$*" in
+            'compose ps -q odoo')
+              if [[ -f "${FAKE_DOCKER_LOG}.started" ]]; then
+                echo test-odoo-container
+              fi
+              ;;
+            'compose up '*)
+              touch "${FAKE_DOCKER_LOG}.started"
+              ;;
+            'compose down')
+              rm -f "${FAKE_DOCKER_LOG}.started"
+              ;;
+          esac
+          SH
+          chmod +x "$base/bin/docker"
+          export PATH="$base/bin:$PATH"
+
+          cli() { odoo-compose "$@" --root "$root"; }
+          has() { grep -Fq -- "$1" "$FAKE_DOCKER_LOG"; }
+          not_has() { ! has "$1"; }
+
+          cli status
+          has 'compose ps -a'
+          cli up
+          has 'compose up -d --wait'
+          test -f "$root/compose.yaml"
+          test -f "$root/docker/local/configs/odoo.conf"
+          cli up
+          not_has '--force-recreate'
+
+          printf '[odoo]\nversion = 19.0\n[config]\ndev_mode = all\n' > "$ini"
+          cli setup
+          cli up
+          has '--no-deps --force-recreate odoo'
+          cli up --build --recreate
+          has 'compose up -d --wait --build'
+          test "$(grep -Fc -- '--force-recreate odoo' "$FAKE_DOCKER_LOG")" -eq 2
+          cli down
+          has 'compose down'
+          not_has '--volumes'
+          echo 'Docker lifecycle checks passed'

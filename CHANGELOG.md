@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add `up`, `down`, and `status` lifecycle commands.
+
 ## 1.25.1 (2026-10-26)
 
 ### Fixed
