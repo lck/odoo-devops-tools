@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.25.3 (2026-10-31)
 
 ### Added
 
