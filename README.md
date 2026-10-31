@@ -117,8 +117,8 @@ Add-Content -Path $PROFILE -Value 'odoo-compose-venv completion powershell | Out
 ```
 
 Restart your shell or reload its configuration to activate completion. For example,
-`odoo-compose setup --sy<TAB>` suggests matching options such as `--sync-odoo`,
-`--sync-addons`, and `--sync-all`.
+`odoo-compose setup --sy<TAB>` suggests matching options such as `--sync`,
+`--sync-odoo`, `--sync-addons`, and `--sync-all`.
 
 ---
 
@@ -188,7 +188,7 @@ branch = ${odoo:version}
 Sync the addon repositories and regenerate the Docker environment:
 
 ```bash
-odoo-compose setup --sync-addons
+odoo-compose setup --sync
 odoo-compose up --build
 ```
 
@@ -227,7 +227,7 @@ odoo_source = workspace
 Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
-odoo-compose setup --sync-all
+odoo-compose setup --sync
 odoo-compose up --build
 ```
 
@@ -301,13 +301,13 @@ Use `--create-docker-deploy` to generate a self-contained Docker build context f
 Addon modules are staged into the build context so the resulting image does not depend on bind-mounted workspace sources:
 
 ```bash
-odoo-compose setup --sync-addons --create-docker-deploy
+odoo-compose setup --sync --create-docker-deploy
 ```
 
 When `[docker].odoo_source = workspace`, sync the Odoo source as well:
 
 ```bash
-odoo-compose setup --sync-all --create-docker-deploy
+odoo-compose setup --sync --create-docker-deploy
 ```
 
 This additionally creates:
@@ -336,7 +336,7 @@ In this workflow, Odoo runs directly on the host using a generated Python virtua
 Create the workspace with the Odoo source and virtual environment:
 
 ```bash
-odoo-compose-venv setup ./odoo19 --sync-all --create-venv \
+odoo-compose-venv setup ./odoo19 --sync --create-venv \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
   --set config:db_user=odoo \
@@ -395,7 +395,7 @@ branch = ${odoo:version}
 Sync the addon repositories and recreate the Python environment to include their dependencies:
 
 ```bash
-odoo-compose-venv setup --sync-all --create-venv
+odoo-compose-venv setup --sync --create-venv
 ```
 
 The repositories are cloned into `ROOT/odoo-addons/` and automatically added to the generated `addons_path`. Python dependencies from their `requirements.txt` files are included in the virtual environment.
@@ -439,7 +439,7 @@ python_version = 3.11
 After changing the project file, run `odoo-compose` again from the workspace root:
 
 ```bash
-odoo-compose-venv setup --sync-all --create-venv
+odoo-compose-venv setup --sync --create-venv
 ```
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
@@ -529,7 +529,7 @@ Those machine-specific outputs are recreated on the target machine.
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
 ```bash
-odoo-compose-venv setup --sync-all --create-venv --create-bundle
+odoo-compose-venv setup --sync --create-venv --create-bundle
 ```
 
 When no output path is supplied, the bundle is written to:
@@ -541,7 +541,7 @@ ROOT/dist/ROOT-NAME.odt.zip
 You can also select an explicit output file:
 
 ```bash
-odoo-compose-venv setup --sync-all --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+odoo-compose-venv setup --sync --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
 #### 4.1.1. Including uncommitted changes
@@ -551,7 +551,7 @@ By default, bundle creation stops when a bundled Git repository has uncommitted 
 To intentionally include those changes in the bundle, use:
 
 ```bash
-odoo-compose-venv setup --sync-all --create-venv --create-bundle --allow-dirty-bundle
+odoo-compose-venv setup --sync --create-venv --create-bundle --allow-dirty-bundle
 ```
 
 ### 4.2. Create the workspace on the target machine
@@ -748,6 +748,9 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 **Repository synchronization**
 
 <dl class="cli-reference">
+<dt><code>--sync</code></dt>
+<dd><p>Automatically synchronize only the Git sources used by the selected workflow. In Docker, Odoo is synced only with <code>[docker].odoo_source = workspace</code>; in Venv, Git-managed Odoo is synced. Both workflows sync configured Git addons.</p></dd>
+
 <dt><code>--sync-odoo</code></dt>
 <dd><p>Sync Git-managed Odoo sources; reuse <code>[odoo].path</code> without Git sync when a local path is configured.</p></dd>
 
@@ -755,10 +758,10 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dd><p>Sync Git-managed addons into <code>ROOT/odoo-addons/</code>.</p></dd>
 
 <dt><code>--sync-all</code></dt>
-<dd><p>Sync both Odoo and addons.</p></dd>
+<dd><p>Explicitly select both Odoo and addon sources, regardless of the selected workflow. Unlike <code>--sync</code>, this can fetch Odoo sources even when Docker runs Odoo from the base image.</p></dd>
 
 > **Note:**
-> Repository sync aborts if a target Git repository has uncommitted changes. Commit, stash or discard changes before syncing.
+> Repository sync aborts if a target Git repository has uncommitted changes. Commit, stash or discard changes before syncing. The four sync switches are mutually exclusive; without any of them, <code>setup</code> only regenerates artifacts and does not fetch repositories.
 
 </dl>
 
@@ -801,7 +804,7 @@ odoo-compose setup ./odoo19
 odoo-compose setup ./odoo18 --set odoo:version=18.0
 
 # Native workflow:
-odoo-compose-venv setup ./odoo19 --sync-all --create-venv
+odoo-compose-venv setup ./odoo19 --sync --create-venv
 odoo-compose-venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
 ```
 

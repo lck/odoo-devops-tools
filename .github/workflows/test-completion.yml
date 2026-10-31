@@ -50,6 +50,7 @@ jobs:
             COMP_WORDS=("$cli" setup --sy)
             COMP_CWORD=2
             "$fn"
+            [[ " ${COMPREPLY[*]} " == *' --sync '* ]]
             [[ " ${COMPREPLY[*]} " == *' --sync-all '* ]]
 
             COMP_WORDS=("$cli" completion po)
@@ -93,6 +94,7 @@ jobs:
             zsh -n "$RUNNER_TEMP/$cli.zsh"
             fish -n "$RUNNER_TEMP/$cli.fish"
             fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli setup --sy'" | grep -F 'sync-all'
+            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli setup --sy'" | grep -E '^--sync([[:space:]]|$)'
           done
 
   windows:
