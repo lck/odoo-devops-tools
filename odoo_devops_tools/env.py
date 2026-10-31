@@ -5493,8 +5493,8 @@ def build_parser(prog: str = "odoo-compose", target: str = "docker", *, setup_co
         epilog = """Create or update an Odoo Docker workspace.
 
 Examples:
-  odoo-compose setup ./odoo19 --sync-addons
-  odoo-compose setup --sync-all --create-docker-deploy
+  odoo-compose setup ./odoo19 --sync
+  odoo-compose setup --sync --create-docker-deploy
   odoo-compose setup ./odoo-project.ini --show-last-run
 """
     else:
@@ -5502,8 +5502,8 @@ Examples:
 The virtual environment is recreated only when explicitly requested.
 
 Examples:
-  odoo-compose-venv setup ./odoo19 --sync-all --create-venv
-  odoo-compose-venv setup -i base.ini -i addons.ini --sync-all --create-venv
+  odoo-compose-venv setup ./odoo19 --sync --create-venv
+  odoo-compose-venv setup -i base.ini -i addons.ini --sync --create-venv
   odoo-compose-venv setup --create-from-bundle ./workspace.odt.zip --root ./restored
 """
 
@@ -5561,6 +5561,11 @@ Examples:
     )
 
     sync_group = parser.add_mutually_exclusive_group()
+    sync_group.add_argument(
+        "--sync", action="store_true",
+        help=("Sync Git sources used by this workflow: Odoo for native venv or Docker "
+              "odoo_source=workspace, plus configured Git addons"),
+    )
     sync_group.add_argument("--sync-odoo", dest="odoo", action="store_true", help="Sync only Odoo repository")
     sync_group.add_argument("--sync-addons", dest="addons", action="store_true", help="Sync only addon repositories")
     sync_group.add_argument("--sync-all", dest="all", action="store_true", help="Sync Odoo + addons")
@@ -7077,8 +7082,8 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             conflicting_options.append("INI")
         if getattr(args, 'include_inis', None):
             conflicting_options.append("--include")
-        if args.all or args.odoo or args.addons:
-            conflicting_options.append("--sync-*")
+        if args.sync or args.all or args.odoo or args.addons:
+            conflicting_options.append("--sync*")
         if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
             conflicting_options.append("--create-venv*")
         if clear_pip_wheel_cache:
@@ -7348,7 +7353,27 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                     f"explicit local INI source was used; no existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                 )
 
-    if args.all:
+    if args.sync:
+        # Select only the Git sources required by the effective workspace.
+        # Use the merged/resolved INI so --include, --set and -e affect selection.
+        try:
+            sync_cfg = load_project_config(
+                ini_path, vars_overrides=vars_overrides, ini_overrides=ini_overrides,
+                log_resolved=False, log_overrides=False,
+            )
+        except Exception as e:
+            _logger.error('%s', e)
+            raise SystemExit(1)
+        sync_odoo = (
+            not sync_cfg.odoo.is_local
+            and (target == "venv" or _docker_uses_workspace_odoo(sync_cfg))
+        )
+        sync_addons = any(not addon.is_local for addon in sync_cfg.addons.values())
+        _logger.info(
+            "Auto sync (--sync): Odoo Git=%s, addon Git=%s",
+            sync_odoo, sync_addons,
+        )
+    elif args.all:
         sync_odoo, sync_addons = True, True
     elif args.odoo:
         sync_odoo, sync_addons = True, False

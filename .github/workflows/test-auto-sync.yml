@@ -1,0 +1,147 @@
+name: Test Automatic Source Sync
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  automatic-sync:
+    name: setup --sync selects configured Git sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install CLI
+        run: python -m pip install --no-deps -e .
+      - name: Exercise sync modes using local Git repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export GIT_AUTHOR_NAME=CI GIT_AUTHOR_EMAIL=ci@example.test GIT_COMMITTER_NAME=CI GIT_COMMITTER_EMAIL=ci@example.test
+          mkdir -p "$tmp/fixtures/odoo" "$tmp/fixtures/addon" "$tmp/fixtures/local-odoo" "$tmp/fixtures/local-addon"
+          for name in odoo addon; do
+            dir="$tmp/fixtures/$name"
+            git -C "$dir" init -q -b main
+            echo "$name" > "$dir/marker.txt"
+            if [[ "$name" == odoo ]]; then
+              printf '#!/usr/bin/env python3\n' > "$dir/odoo-bin"
+              touch "$dir/requirements.txt"
+            fi
+            git -C "$dir" add .
+            git -C "$dir" commit -qm 'Fixture'
+          done
+          cat > "$tmp/template.ini" <<EOF
+          [odoo]
+          version = 19.0
+          repo = $tmp/fixtures/odoo
+          branch = main
+
+          [addons.one]
+          repo = $tmp/fixtures/addon
+          branch = main
+          EOF
+          make_ws() { mkdir -p "$tmp/$1"; cp "$tmp/template.ini" "$tmp/$1/odoo-project.ini"; }
+          run() { echo "RUN $*"; "$@" > "$tmp/cli.log" 2>&1 || { cat "$tmp/cli.log"; return 1; }; }
+          make_ws docker-image
+          run odoo-compose setup --root "$tmp/docker-image" --sync
+          test -f "$tmp/docker-image/odoo-addons/one/marker.txt"
+          test ! -e "$tmp/docker-image/odoo/.git"
+          echo 'PASS Docker image: only addons'
+          make_ws docker-workspace
+          run odoo-compose setup --root "$tmp/docker-workspace" --sync --set docker:odoo_source=workspace
+          test -f "$tmp/docker-workspace/odoo/odoo-bin"
+          test -f "$tmp/docker-workspace/odoo-addons/one/marker.txt"
+          grep -q 'odoo_source = workspace' "$tmp/docker-workspace/odoo-project.ini"
+          echo 'PASS Docker workspace + set: Odoo and addons'
+          # Variable overrides are resolved before automatic source selection.
+          make_ws docker-vars
+          cat >> "$tmp/docker-vars/odoo-project.ini" <<'EOF'
+          [vars]
+          odoo_mode = image
+          [docker]
+          odoo_source = ${vars:odoo_mode}
+          EOF
+          run odoo-compose setup --root "$tmp/docker-vars" --sync -e odoo_mode=workspace
+          test -f "$tmp/docker-vars/odoo/odoo-bin"
+          test -f "$tmp/docker-vars/odoo-addons/one/marker.txt"
+          echo 'PASS variable override selects Docker workspace Odoo'
+          make_ws native
+          run odoo-compose-venv setup --root "$tmp/native" --sync
+          test -f "$tmp/native/odoo/odoo-bin"
+          test -f "$tmp/native/odoo-addons/one/marker.txt"
+          test ! -e "$tmp/native/venv"
+          echo 'PASS Venv: Odoo and addons, no venv provisioning'
+          make_ws native-local
+          # Reuse local Odoo instead of Git: override the section's Git fields by replacing template.
+          cat > "$tmp/native-local/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          path = $tmp/fixtures/local-odoo
+
+          [addons.one]
+          repo = $tmp/fixtures/addon
+          branch = main
+          EOF
+          run odoo-compose-venv setup --root "$tmp/native-local" --sync
+          test ! -d "$tmp/native-local/odoo/.git"
+          test -f "$tmp/native-local/odoo-addons/one/marker.txt"
+          echo 'PASS Venv local Odoo: only addons'
+          mkdir -p "$tmp/local-only"
+          cat > "$tmp/local-only/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          path = $tmp/fixtures/local-odoo
+
+          [addons.one]
+          path = $tmp/fixtures/local-addon
+          EOF
+          run odoo-compose-venv setup --root "$tmp/local-only" --sync
+          test ! -d "$tmp/local-only/odoo-addons/one/.git"
+          echo 'PASS all local'
+          mkdir -p "$tmp/no-repos"
+          printf '[odoo]\nversion = 19.0\n' > "$tmp/no-repos/odoo-project.ini"
+          run odoo-compose setup --root "$tmp/no-repos" --sync
+          test ! -d "$tmp/no-repos/odoo/.git"
+          echo 'PASS Docker image no addons: no Git sync'
+          mkdir -p "$tmp/with-includes"
+          printf '[odoo]\nversion = 19.0\n' > "$tmp/base.ini"
+          cat > "$tmp/addons.ini" <<EOF
+          [addons.one]
+          repo = $tmp/fixtures/addon
+          branch = main
+          EOF
+          run odoo-compose setup "$tmp/base.ini" -i "$tmp/addons.ini" --root "$tmp/with-includes" --sync
+          test -f "$tmp/with-includes/odoo-addons/one/marker.txt"
+          test ! -d "$tmp/with-includes/odoo/.git"
+          echo 'PASS INI include selection'
+          # Git-managed Odoo with no addons: native sync selects only Odoo.
+          mkdir -p "$tmp/odoo-only"
+          cat > "$tmp/odoo-only/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          repo = $tmp/fixtures/odoo
+          branch = main
+          EOF
+          run odoo-compose-venv setup --root "$tmp/odoo-only" --sync
+          test -f "$tmp/odoo-only/odoo/odoo-bin"
+          test ! -d "$tmp/odoo-only/odoo-addons/one/.git"
+          echo 'PASS native Odoo-only Git sync'
+          # --sync-all retains its explicit meaning even in Docker image mode.
+          make_ws explicit-all
+          run odoo-compose setup --root "$tmp/explicit-all" --sync-all
+          test -f "$tmp/explicit-all/odoo/odoo-bin"
+          test -f "$tmp/explicit-all/odoo-addons/one/marker.txt"
+          echo 'PASS explicit --sync-all unchanged'
+          if odoo-compose setup --root "$tmp/native" --sync --sync-addons > "$tmp/conflict.log" 2>&1; then
+            echo 'unexpected success for mutually exclusive flags'; exit 1
+          fi
+          if odoo-compose-venv setup --sync --create-from-bundle bogus.zip > "$tmp/conflict.log" 2>&1; then
+            echo 'unexpected success for bundle import and --sync'; exit 1
+          fi
+          echo 'PASS mutually exclusive flags'
