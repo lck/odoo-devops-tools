@@ -145,3 +145,110 @@ jobs:
             echo 'unexpected success for bundle import and --sync'; exit 1
           fi
           echo 'PASS mutually exclusive flags'
+      - name: Preserve unpublished Git commits during sync
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          export GIT_AUTHOR_NAME=CI GIT_AUTHOR_EMAIL=ci@example.test GIT_COMMITTER_NAME=CI GIT_COMMITTER_EMAIL=ci@example.test
+
+          # Exercise both Git modes for both Odoo and addons. file:// is
+          # intentional: git ignores --depth for a plain local path.
+          for source in odoo addon; do
+            for shallow in true false; do
+              name="$source-$shallow"
+              root="$tmp/$name"
+              mkdir -p "$root/upstream" "$root/workspace"
+              git -C "$root/upstream" init -q -b main
+              echo initial > "$root/upstream/marker.txt"
+              if [[ "$source" == odoo ]]; then
+                printf '#!/usr/bin/env python3\n' > "$root/upstream/odoo-bin"
+                touch "$root/upstream/requirements.txt"
+              fi
+              git -C "$root/upstream" add .
+              git -C "$root/upstream" commit -qm initial
+              git clone -q --bare "$root/upstream" "$root/origin.git"
+
+              if [[ "$source" == odoo ]]; then
+                cat > "$root/workspace/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          repo = file://$root/origin.git
+          branch = main
+          shallow = $shallow
+          [docker]
+          odoo_source = workspace
+          EOF
+                checkout="$root/workspace/odoo"
+              else
+                cat > "$root/workspace/odoo-project.ini" <<EOF
+          [odoo]
+          version = 19.0
+          [addons.safe]
+          repo = file://$root/origin.git
+          branch = main
+          shallow = $shallow
+          EOF
+                checkout="$root/workspace/odoo-addons/safe"
+              fi
+
+              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              if [[ "$shallow" == true ]]; then
+                test "$(git -C "$checkout" rev-parse --is-shallow-repository)" = true
+              fi
+
+              # A clean worktree can still contain a commit not pushed to origin.
+              echo unpublished > "$checkout/unpublished.txt"
+              git -C "$checkout" add .
+              git -C "$checkout" commit -qm 'local unpublished commit'
+              local_tip="$(git -C "$checkout" rev-parse HEAD)"
+              test -z "$(git -C "$checkout" status --porcelain)"
+              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+                echo "ERROR: sync overwrote an unpublished commit ($name)"; exit 1
+              fi
+              grep -q 'Refusing to reset local Git branch' "$root/rejected.log" || { cat "$root/rejected.log"; exit 1; }
+              test "$(git -C "$checkout" rev-parse main)" = "$local_tip"
+              test -f "$checkout/unpublished.txt"
+              test -z "$(git -C "$checkout" status --porcelain)"
+
+              # The target branch must also be protected when another branch is checked out.
+              git -C "$checkout" switch -q -c another-branch
+              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+                echo "ERROR: sync overwrote an inactive branch ($name)"; exit 1
+              fi
+              test "$(git -C "$checkout" rev-parse main)" = "$local_tip"
+              git -C "$checkout" switch -q main
+
+              # Once pushed, the local commit is safe; a subsequent remote
+              # fast-forward must still work, including for shallow clones.
+              git -C "$checkout" push -q origin main
+              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              test "$(git -C "$checkout" rev-parse HEAD)" = "$local_tip"
+              git clone -q "$root/origin.git" "$root/publisher"
+              echo remote-update >> "$root/publisher/marker.txt"
+              git -C "$root/publisher" add .
+              git -C "$root/publisher" commit -qm 'remote fast-forward'
+              git -C "$root/publisher" push -q origin main
+              remote_tip="$(git -C "$root/publisher" rev-parse HEAD)"
+              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              test "$(git -C "$checkout" rev-parse HEAD)" = "$remote_tip"
+
+              # A concurrent remote update must not clobber a new local commit.
+              echo second-local > "$checkout/local-again.txt"
+              git -C "$checkout" add .
+              git -C "$checkout" commit -qm 'new unpublished commit'
+              divergent_tip="$(git -C "$checkout" rev-parse HEAD)"
+              echo second-remote >> "$root/publisher/marker.txt"
+              git -C "$root/publisher" add .
+              git -C "$root/publisher" commit -qm 'concurrent remote update'
+              git -C "$root/publisher" push -q origin main
+              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+                echo "ERROR: sync overwrote divergent local commits ($name)"; exit 1
+              fi
+              grep -q 'Refusing to reset local Git branch' "$root/rejected.log" || { cat "$root/rejected.log"; exit 1; }
+              test "$(git -C "$checkout" rev-parse HEAD)" = "$divergent_tip"
+              test -f "$checkout/local-again.txt"
+              echo "PASS $name: unpublished commits (including divergence) protected; fast-forward works"
+            done
+          done

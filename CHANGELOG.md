@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Prevent Git synchronization from overwriting local branches with unpublished commits.
+
 ## 1.25.3 (2026-10-31)
 
 ### Added

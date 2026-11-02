@@ -2342,6 +2342,61 @@ def ensure_repo(
     _run(cmd)
 
 
+def _assert_branch_can_fast_forward(repo_dir: Path, branch: str) -> None:
+    """Do not replace a local branch containing commits absent from origin.
+
+    A clean working tree does not imply that all local commits were pushed.
+    Resetting the branch with ``checkout -B`` would otherwise discard its tip.
+    Check the named branch (not HEAD, which might be another branch).
+    """
+    local_ref = f"refs/heads/{branch}"
+    remote_ref = f"refs/remotes/origin/{branch}"
+    present = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", local_ref],
+        cwd=str(repo_dir), capture_output=True, text=True,
+    )
+    if present.returncode == 1:
+        return  # No existing local branch to overwrite.
+    if present.returncode != 0:
+        raise Exception(f"Failed to inspect local Git branch {branch!r} in {repo_dir}: {present.stderr}")
+
+    def is_fast_forward() -> bool:
+        check = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", local_ref, remote_ref],
+            cwd=str(repo_dir), capture_output=True, text=True,
+        )
+        if check.returncode not in (0, 1):
+            raise Exception(f"Failed to compare Git branches in {repo_dir}: {check.stderr}")
+        return check.returncode == 0
+
+    if is_fast_forward():
+        return
+
+    # With a shallow checkout, the remote tip may have advanced beyond our
+    # shallow boundary. Fetch just enough ancestry to distinguish a normal
+    # fast-forward from unpublished local commits; fail closed if still unsure.
+    if _is_shallow_repo(repo_dir):
+        refspec = f"+refs/heads/{branch}:{remote_ref}"
+        for deepen_by in (1, 8, 32, 128, 512):
+            _run(["git", "fetch", "--deepen", str(deepen_by), "origin", refspec], cwd=repo_dir)
+            if is_fast_forward():
+                return
+            if not _is_shallow_repo(repo_dir):
+                break
+        if _is_shallow_repo(repo_dir):
+            _run(["git", "fetch", "--unshallow", "origin", refspec], cwd=repo_dir)
+            if is_fast_forward():
+                return
+
+    raise Exception(
+        f"Refusing to reset local Git branch {branch!r} in {repo_dir}: "
+        f"it contains commits that are not on origin/{branch} "
+        "(or the remote branch history diverged).\n"
+        "Your commits are preserved. Inspect `git log` and `git status`, "
+        "then push, rebase or resolve the divergence manually before syncing."
+    )
+
+
 def checkout_branch(
         dest: Path,
         branch: str,
@@ -2356,8 +2411,9 @@ def checkout_branch(
       This matches the previous behavior and is suitable for full clones (e.g. addons).
 
     - fetch_all=False: fetch ONLY `origin/<branch>` (optionally shallow via depth),
-      then force local branch `<branch>` to match `origin/<branch>`.
+      then fast-forward the local branch to `origin/<branch>`.
       This is intended for the Odoo repo where we want single-branch + shallow clones.
+    - Local commits absent from the remote are never silently discarded.
     - already_fetched=True: reuse the fetch performed by ensure_repo() instead
       of fetching the same branch again.
     """
@@ -2372,29 +2428,16 @@ def checkout_branch(
                 _ensure_full_origin_refspec(dest)
                 _unshallow_if_needed(dest)
             _run(["git", "fetch", "--all", "--tags", "--prune"], cwd=dest)
+    else:
+        # Narrow fetch: ensure origin/<branch> exists even if origin was cloned
+        # with --single-branch and has a restricted remote.origin.fetch refspec.
+        # ensure_repo() already fetched this ref when already_fetched=True.
+        if not already_fetched:
+            _fetch_branch(dest, branch=branch, depth=depth)
 
-        try:
-            _run(["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=dest)
-            _run(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=dest)
-            assert_clean_worktree(dest)
-            _run(["git", "pull", "--ff-only"], cwd=dest)
-            return
-        except:
-            pass
-
-        _run(["git", "checkout", branch], cwd=dest)
-        return
-
-    # Narrow fetch: ensure origin/<branch> exists even if origin was cloned
-    # with --single-branch and has a restricted remote.origin.fetch refspec.
-    # ensure_repo() already fetched this ref when already_fetched=True.
-    if not already_fetched:
-        _fetch_branch(dest, branch=branch, depth=depth)
-
-    _run(["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=dest)
+    _run(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}"], cwd=dest)
+    _assert_branch_can_fast_forward(dest, branch)
     _run(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=dest)
-    # Ensure the working tree exactly matches the remote branch (no pull, no extra refs).
-    _run(["git", "reset", "--hard", f"origin/{branch}"], cwd=dest)
     assert_clean_worktree(dest)
 
 

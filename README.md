@@ -761,7 +761,7 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dd><p>Explicitly select both Odoo and addon sources, regardless of the selected workflow. Unlike <code>--sync</code>, this can fetch Odoo sources even when Docker runs Odoo from the base image.</p></dd>
 
 > **Note:**
-> Repository sync aborts if a target Git repository has uncommitted changes. Commit, stash or discard changes before syncing. The four sync switches are mutually exclusive; without any of them, <code>setup</code> only regenerates artifacts and does not fetch repositories.
+> Repository sync aborts if a target Git repository has uncommitted changes **or a local branch contains commits absent from the remote branch**. Commit/stash uncommitted changes or push/reconcile unpublished commits before syncing. The four sync switches are mutually exclusive; without any of them, <code>setup</code> only regenerates artifacts and does not fetch repositories.
 
 </dl>
 
