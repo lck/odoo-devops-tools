@@ -6,7 +6,8 @@ on:
 
 jobs:
   odoo-minimal:
-    runs-on: ubuntu-latest
+    # PostgreSQL 16 client binaries and paths below require Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Git 2.54+ can background-maintain .git/shallow during branch switches.
     env:
