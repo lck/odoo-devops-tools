@@ -24,13 +24,8 @@ From this configuration, `odoo-compose` can generate a workspace such as:
 ```text
 ROOT/
 ├── docker/                 # generated Docker artifacts
-│   ├── local/              # Docker workflow artifacts
-│   │   └── configs/        # generated local Odoo config
-│   └── deploy/             # self-contained deploy build context
 ├── odoo/                   # Odoo source
 ├── odoo-addons/            # addon sources
-│   ├── oca-web/
-│   └── oca-helpdesk/
 ├── odoo-configs/           # generated Odoo configuration
 ├── odoo-data/              # Odoo data directory
 ├── odoo-logs/              # runtime logs
@@ -48,8 +43,7 @@ ROOT/
 * **Portable workflows** — create verified bundles with sources and Python wheels for reproducible or offline use.
 * **Python dependency management** — manage Python versions, virtual environments and requirements.
 * **Composable configuration** — combine INI layers, variables, and CLI overrides.
-
-`odoo-compose` focuses on creating and maintaining the Odoo workspace and its derived artifacts. Infrastructure provisioning and deployment orchestration remain outside its scope.
+* **Standalone, dependency-free Python script** — run `odoo_compose.py` with the Python standard library alone, or embed the single file in another project.
 
 ---
 
@@ -77,7 +71,7 @@ odoo-compose --help
 
 ### Shell autocompletion
 
-Both `odoo-compose` and `odoo-compose-venv` support `TAB` completion for commands,
+`odoo-compose` supports `TAB` completion for Docker and native `venv` subcommands,
 options, and filesystem paths. No additional Python dependencies are required.
 
 To enable shell autocompletion, run the commands for your shell:
@@ -86,14 +80,12 @@ To enable shell autocompletion, run the commands for your shell:
 
 ```bash
 echo 'eval "$(odoo-compose completion bash)"' >> ~/.bashrc
-echo 'eval "$(odoo-compose-venv completion bash)"' >> ~/.bashrc
 ```
 
 **Zsh**
 
 ```zsh
 echo 'eval "$(odoo-compose completion zsh)"' >> ~/.zshrc
-echo 'eval "$(odoo-compose-venv completion zsh)"' >> ~/.zshrc
 ```
 
 Zsh's completion system (`compinit`) must be enabled before these lines run.
@@ -103,7 +95,6 @@ Zsh's completion system (`compinit`) must be enabled before these lines run.
 ```fish
 mkdir -p ~/.config/fish/completions
 odoo-compose completion fish > ~/.config/fish/completions/odoo-compose.fish
-odoo-compose-venv completion fish > ~/.config/fish/completions/odoo-compose-venv.fish
 ```
 
 **PowerShell**
@@ -113,7 +104,6 @@ if (!(Test-Path -Path $PROFILE)) {
     New-Item -ItemType File -Path $PROFILE -Force | Out-Null
 }
 Add-Content -Path $PROFILE -Value 'odoo-compose completion powershell | Out-String | Invoke-Expression'
-Add-Content -Path $PROFILE -Value 'odoo-compose-venv completion powershell | Out-String | Invoke-Expression'
 ```
 
 Restart your shell or reload its configuration to activate completion. For example,
@@ -124,10 +114,10 @@ Restart your shell or reload its configuration to activate completion. For examp
 
 ## Usage
 
-`odoo-devops-tools` supports two development workflows, each with its own CLI command:
+`odoo-devops-tools` supports two development workflows:
 
 - **Docker workflow (`odoo-compose`)** — run Odoo and PostgreSQL with the generated Docker Compose environment.
-- **Native development with venv (`odoo-compose-venv`)** — run Odoo directly on the host using a generated Python virtual environment.
+- **Native development with venv (`odoo-compose venv`)** — run Odoo directly on the host using a generated Python virtual environment.
 
 Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
 
@@ -336,7 +326,7 @@ In this workflow, Odoo runs directly on the host using a generated Python virtua
 Create the workspace with the Odoo source and virtual environment:
 
 ```bash
-odoo-compose-venv setup ./odoo19 --sync --create-venv \
+odoo-compose venv setup ./odoo19 --sync --create-venv \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
   --set config:db_user=odoo \
@@ -363,17 +353,17 @@ Then start Odoo in the background:
 
 ```bash
 cd ./odoo19
-odoo-compose-venv up
-odoo-compose-venv status
+odoo-compose venv up
+odoo-compose venv status
 ```
 
 Odoo starts with the generated configuration from `./odoo-configs/odoo-server.conf` and is available at http://localhost:8069.
 
-Use `odoo-compose-venv run` instead to run in the foreground:
+Use `odoo-compose venv run` instead to run in the foreground:
 
 ```bash
 cd ./odoo19
-odoo-compose-venv run
+odoo-compose venv run
 ```
 
 ### 2.1. Adding extra addons
@@ -395,7 +385,7 @@ branch = ${odoo:version}
 Sync the addon repositories and recreate the Python environment to include their dependencies:
 
 ```bash
-odoo-compose-venv setup --sync --create-venv
+odoo-compose venv setup --sync --create-venv
 ```
 
 The repositories are cloned into `ROOT/odoo-addons/` and automatically added to the generated `addons_path`. Python dependencies from their `requirements.txt` files are included in the virtual environment.
@@ -403,13 +393,13 @@ The repositories are cloned into `ROOT/odoo-addons/` and automatically added to 
 Install the new modules:
 
 ```bash
-odoo-compose-venv run -i web_notify,helpdesk_mgmt
+odoo-compose venv run -i web_notify,helpdesk_mgmt
 ```
 
 For subsequent addon updates, use:
 
 ```bash
-odoo-compose-venv update
+odoo-compose venv update
 ```
 
 The `update` command uses `click-odoo-update` with the workspace Odoo configuration.
@@ -439,7 +429,7 @@ python_version = 3.11
 After changing the project file, run `odoo-compose` again from the workspace root:
 
 ```bash
-odoo-compose-venv setup --sync --create-venv
+odoo-compose venv setup --sync --create-venv
 ```
 
 This recreates the virtual environment at `ROOT/venv` using the system Python.
@@ -529,7 +519,7 @@ Those machine-specific outputs are recreated on the target machine.
 On an internet-connected build machine, sync the sources, build the wheelhouse, and create the bundle in one command:
 
 ```bash
-odoo-compose-venv setup --sync --create-venv --create-bundle
+odoo-compose venv setup --sync --create-venv --create-bundle
 ```
 
 When no output path is supplied, the bundle is written to:
@@ -541,7 +531,7 @@ ROOT/dist/ROOT-NAME.odt.zip
 You can also select an explicit output file:
 
 ```bash
-odoo-compose-venv setup --sync --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+odoo-compose venv setup --sync --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
 ```
 
 #### 4.1.1. Including uncommitted changes
@@ -551,7 +541,7 @@ By default, bundle creation stops when a bundled Git repository has uncommitted 
 To intentionally include those changes in the bundle, use:
 
 ```bash
-odoo-compose-venv setup --sync --create-venv --create-bundle --allow-dirty-bundle
+odoo-compose venv setup --sync --create-venv --create-bundle --allow-dirty-bundle
 ```
 
 ### 4.2. Create the workspace on the target machine
@@ -559,7 +549,7 @@ odoo-compose-venv setup --sync --create-venv --create-bundle --allow-dirty-bundl
 Copy the ZIP to the target machine and import it into an empty directory:
 
 ```bash
-odoo-compose-venv setup --create-from-bundle ./odoo18-production.odt.zip \
+odoo-compose venv setup --create-from-bundle ./odoo18-production.odt.zip \
   --root ./odoo18-prod \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
@@ -586,10 +576,38 @@ The import operation:
 The existing manual workflow remains available. After preparing a complete workspace on the build machine, copy the whole workspace and run this command from the copied root:
 
 ```bash
-odoo-compose-venv setup --create-venv-from-wheelhouse
+odoo-compose venv setup --create-venv-from-wheelhouse
 ```
 
 This recreates `ROOT/venv`, skips dependency compilation and wheelhouse building, and installs strictly from the existing `ROOT/wheelhouse/` and `all-requirements.lock.txt`.
+
+---
+
+## Standalone and embedded usage
+
+The core CLI is intentionally implemented in a **single Python file**, `odoo_devops_tools/odoo_compose.py`, using **only the Python standard library**. You can copy that file into another project and run it directly, without installing the `odoo-devops-tools` Python package or any third-party Python libraries.
+
+For example, copy `odoo_compose.py` into your project alongside `odoo-project.ini`:
+
+```text
+my-project/
+├── odoo_compose.py
+└── odoo-project.ini
+```
+
+Then run the Docker workflow from the project directory:
+
+```bash
+python odoo_compose.py setup --sync
+python odoo_compose.py up --build
+```
+
+For the native venv workflow, add `venv` before the command:
+
+```bash
+python odoo_compose.py venv setup --sync --create-venv
+python odoo_compose.py venv run
+```
 
 ---
 
@@ -604,9 +622,9 @@ odoo-compose status
 odoo-compose down
 
 # Native: generate config and start Odoo in the background
-odoo-compose-venv up
-odoo-compose-venv status
-odoo-compose-venv down
+odoo-compose venv up
+odoo-compose venv status
+odoo-compose venv down
 ```
 
 `odoo-compose up` regenerates local workspace artifacts and then runs the equivalent of `docker compose up -d --wait`.
@@ -621,9 +639,9 @@ Container orchestration remains with Docker Compose, and its CLI can still be us
 
 ## Commands
 
-`odoo-compose` operates on Docker workspaces; `odoo-compose-venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
+`odoo-compose` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
 
-Running either CLI without a command displays help; workspace changes are performed through `setup`. Use `odoo-compose <command> --help` or `odoo-compose-venv <command> --help` for command-specific help. The global `--version` option shows the installed CLI version. Use `--root ROOT` to select a workspace outside the current directory where supported.
+Running either CLI without a command displays help; workspace changes are performed through `setup`. Use `odoo-compose <command> --help` or `odoo-compose venv <command> --help` for command-specific help. The global `--version` option shows the installed CLI version. Use `--root ROOT` to select a workspace outside the current directory where supported.
 
 ### Overview
 
@@ -687,7 +705,7 @@ Create or update an Odoo workspace. When no project file exists, `setup` creates
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} setup [ROOT|INI] [OPTIONS]
+{odoo-compose|odoo-compose venv} setup [ROOT|INI] [OPTIONS]
 ```
 
 **Arguments**
@@ -707,9 +725,9 @@ odoo-compose setup 'git+git@github.com:company/repo.git//examples/odoo-project.i
 odoo-compose setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 
 # Native workflow:
-odoo-compose-venv setup /path/to/odoo-project.ini
-odoo-compose-venv setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
-odoo-compose-venv setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
+odoo-compose venv setup /path/to/odoo-project.ini
+odoo-compose venv setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
+odoo-compose venv setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 ```
 
 Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
@@ -765,7 +783,7 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
 </dl>
 
-**Virtualenv and bundles** (`odoo-compose-venv` only where indicated)
+**Virtualenv and bundles** (`odoo-compose venv` only where indicated)
 
 <dl class="cli-reference">
 <dt><code>--create-venv</code></dt>
@@ -804,8 +822,8 @@ odoo-compose setup ./odoo19
 odoo-compose setup ./odoo18 --set odoo:version=18.0
 
 # Native workflow:
-odoo-compose-venv setup ./odoo19 --sync --create-venv
-odoo-compose-venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
+odoo-compose venv setup ./odoo19 --sync --create-venv
+odoo-compose venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
 ```
 
 ### `up`
@@ -815,7 +833,7 @@ Prepare and start the selected workspace. Requires an existing `odoo-project.ini
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} up [--root ROOT]
+{odoo-compose|odoo-compose venv} up [--root ROOT]
 odoo-compose up [--root ROOT] [--build] [--recreate]
 ```
 
@@ -840,12 +858,12 @@ Native `up` uses `ROOT/.odt-env/odoo-process.json` for process identity and writ
 
 ### `down`
 
-Stop the selected workspace, preserving data. Docker delegates to `docker compose down` **without** `--volumes`; native gracefully stops only the verified Odoo process created by `odoo-compose-venv up`.
+Stop the selected workspace, preserving data. Docker delegates to `docker compose down` **without** `--volumes`; native gracefully stops only the verified Odoo process created by `odoo-compose venv up`.
 
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} down [--root ROOT]
+{odoo-compose|odoo-compose venv} down [--root ROOT]
 ```
 
 **Options**
@@ -866,7 +884,7 @@ Show runtime status without provisioning or changing the workspace. Docker displ
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} status [--root ROOT]
+{odoo-compose|odoo-compose venv} status [--root ROOT]
 ```
 
 **Options**
@@ -887,7 +905,7 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} run [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose venv} run [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -913,7 +931,7 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 odoo-compose run -i base --stop-after-init
 
 # Native workflow:
-odoo-compose-venv run -i base --stop-after-init
+odoo-compose venv run -i base --stop-after-init
 ```
 
 ### `shell`
@@ -923,7 +941,7 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} shell [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose venv} shell [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -949,7 +967,7 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 odoo-compose shell
 
 # Native workflow:
-odoo-compose-venv shell
+odoo-compose venv shell
 ```
 
 ### `update`
@@ -959,7 +977,7 @@ Update installed Odoo addons through `click-odoo-update`.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} update [--root ROOT] [--all] [ODOO_ARGS...]
+{odoo-compose|odoo-compose venv} update [--root ROOT] [--all] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -988,7 +1006,7 @@ Update installed Odoo addons through `click-odoo-update`.
 odoo-compose update --all
 
 # Native workflow:
-odoo-compose-venv update --all
+odoo-compose venv update --all
 ```
 
 ### `test`
@@ -998,7 +1016,7 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} test [--root ROOT] [ODOO_ARGS...]
+{odoo-compose|odoo-compose venv} test [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -1024,7 +1042,7 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 odoo-compose test -i sale --test-tags /sale
 
 # Native workflow:
-odoo-compose-venv test -i sale --test-tags /sale
+odoo-compose venv test -i sale --test-tags /sale
 ```
 
 > **Docker note:** Docker commands use one-off containers. Set `ODOO_DOCKER_SUDO=1` on Linux if Docker requires `sudo`.
@@ -1036,7 +1054,7 @@ Create a PostgreSQL custom-format database dump.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} backup-db [--root ROOT] [OUTPUT]
+{odoo-compose|odoo-compose venv} backup-db [--root ROOT] [OUTPUT]
 ```
 
 **Arguments**
@@ -1064,10 +1082,10 @@ odoo-compose backup-db
 # Native only: select a specific version of the PostgreSQL client tools
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
 
-odoo-compose-venv backup-db
+odoo-compose venv backup-db
 ```
 
-**Native PostgreSQL configuration:** The database name comes from `[config].db_name` in `odoo-project.ini`; if missing, provisioning generates a workspace-specific name and saves it there. Connection details come from `[config]` or the standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.), with `.pgpass` also supported. By default, client executables are found through `PATH`; `POSTGRES_BIN` selects their directory (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`) for `odoo-compose-venv` only, at command runtime.
+**Native PostgreSQL configuration:** The database name comes from `[config].db_name` in `odoo-project.ini`; if missing, provisioning generates a workspace-specific name and saves it there. Connection details come from `[config]` or the standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.), with `.pgpass` also supported. By default, client executables are found through `PATH`; `POSTGRES_BIN` selects their directory (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`) for `odoo-compose venv` only, at command runtime.
 
 For Docker, the database name defaults to `odoo` when not specified.
 
@@ -1078,7 +1096,7 @@ Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
+{odoo-compose|odoo-compose venv} restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
 ```
 
 **Arguments**
@@ -1117,9 +1135,9 @@ odoo-compose restore-db --move ./odoo-backups/pre-upgrade.dump
 # Native only: optionally override PostgreSQL client location
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
 
-odoo-compose-venv restore-db ./odoo-backups/pre-upgrade.dump
-odoo-compose-venv restore-db --force --copy ./odoo-backups/pre-upgrade.dump
-odoo-compose-venv restore-db --move ./odoo-backups/pre-upgrade.dump
+odoo-compose venv restore-db ./odoo-backups/pre-upgrade.dump
+odoo-compose venv restore-db --force --copy ./odoo-backups/pre-upgrade.dump
+odoo-compose venv restore-db --move ./odoo-backups/pre-upgrade.dump
 ```
 
 An existing target database is never replaced without `--force`. For native connection and client configuration, see [`backup-db`](#backup-db).
@@ -1131,7 +1149,7 @@ Archive the selected database's filestore as a `.tar.gz` file.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} backup-filestore [--root ROOT] [OUTPUT]
+{odoo-compose|odoo-compose venv} backup-filestore [--root ROOT] [OUTPUT]
 ```
 
 **Arguments**
@@ -1157,7 +1175,7 @@ Archive the selected database's filestore as a `.tar.gz` file.
 odoo-compose backup-filestore
 
 # Native workflow:
-odoo-compose-venv backup-filestore
+odoo-compose venv backup-filestore
 ```
 
 For native workspaces, the filestore path comes from `[config].data_dir` or defaults to `ROOT/odoo-data`. Docker accesses the filestore through a one-off Odoo container.
@@ -1169,7 +1187,7 @@ Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo be
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
+{odoo-compose|odoo-compose venv} restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
 ```
 
 **Arguments**
@@ -1199,8 +1217,8 @@ odoo-compose restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
 odoo-compose restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
 
 # Native workflow:
-odoo-compose-venv restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
-odoo-compose-venv restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose venv restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose venv restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
 ```
 
 For native workspaces, the filestore path comes from `[config].data_dir` or defaults to `ROOT/odoo-data`. Docker accesses the filestore through a one-off Odoo container.
@@ -1212,7 +1230,7 @@ Run Restic against the configured repository. Restic supports incremental filest
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
+{odoo-compose|odoo-compose venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
 ```
 
 **Arguments**
@@ -1248,12 +1266,12 @@ odoo-compose restic check
 # Native only: select a Restic executable instead of using PATH
 export RESTIC_BIN=/opt/restic/restic
 
-odoo-compose-venv restic init
-odoo-compose-venv restic snapshots
-odoo-compose-venv restic check
+odoo-compose venv restic init
+odoo-compose venv restic snapshots
+odoo-compose venv restic check
 ```
 
-**Configuration:** Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD`. Docker invokes Restic in a one-off container and bind-mounts an absolute local host repository; remote Restic repositories are also supported. For native workspaces, Restic is found through `PATH` by default; `RESTIC_BIN` sets the executable path at command runtime and applies only to `odoo-compose-venv`.
+**Configuration:** Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD`. Docker invokes Restic in a one-off container and bind-mounts an absolute local host repository; remote Restic repositories are also supported. For native workspaces, Restic is found through `PATH` by default; `RESTIC_BIN` sets the executable path at command runtime and applies only to `odoo-compose venv`.
 
 ### `backup-filestore-restic`
 
@@ -1262,7 +1280,7 @@ Back up the selected database's filestore as a Restic snapshot.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
+{odoo-compose|odoo-compose venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
 ```
 
 **Arguments**
@@ -1290,7 +1308,7 @@ odoo-compose backup-filestore-restic
 # Native only: optional Restic executable override
 export RESTIC_BIN=/opt/restic/restic
 
-odoo-compose-venv backup-filestore-restic
+odoo-compose venv backup-filestore-restic
 ```
 
 Set the repository and password as described under [`restic`](#restic). Snapshots are tagged `odoo`, `filestore` and `db:<database>`. Set `RESTIC_BACKUP_ID` for an additional `backup-id:<value>` tag; `RESTIC_HOST` overrides the default host used to group snapshots.
@@ -1302,7 +1320,7 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
+{odoo-compose|odoo-compose venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
 ```
 
 **Arguments**
@@ -1331,7 +1349,7 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 odoo-compose restore-filestore-restic --force latest
 
 # Native workflow:
-odoo-compose-venv restore-filestore-restic --force latest
+odoo-compose venv restore-filestore-restic --force latest
 ```
 
 Set `RESTIC_SOURCE_DB_NAME` to restore a snapshot belonging to another database. When selecting `latest`, snapshot lookup also filters by host and the original filestore path. For repository configuration, host/tag settings and `RESTIC_BIN`, see [`restic`](#restic) and [`backup-filestore-restic`](#backup-filestore-restic).
@@ -1343,7 +1361,7 @@ Neutralize a restored production database for development or testing, then execu
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
+{odoo-compose|odoo-compose venv} neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
 ```
 
 **Options**
@@ -1366,9 +1384,9 @@ odoo-compose neutralize --dry-run
 odoo-compose neutralize --dry-run ./preview-sql
 
 # Native workflow:
-odoo-compose-venv neutralize
-odoo-compose-venv neutralize --dry-run
-odoo-compose-venv neutralize --dry-run ./preview-sql
+odoo-compose venv neutralize
+odoo-compose venv neutralize --dry-run
+odoo-compose venv neutralize --dry-run ./preview-sql
 ```
 
 **Odoo versions:** For Odoo 16.0+, the command uses Odoo's built-in neutralization and installed modules' `neutralize.sql` scripts to disable or redirect supported production-side effects (including scheduled actions, outgoing email and external integrations). For Odoo 13.0–15.0, it uses compatibility neutralization of scheduled actions and outgoing/incoming mail servers: Docker uses the Odoo ORM and Venv uses PostgreSQL commands.
@@ -1423,10 +1441,10 @@ odoo-compose neutralize
 docker compose up -d odoo
 
 # Native workflow:
-odoo-compose-venv restore-db --copy ./odoo-backups/production.dump
-odoo-compose-venv restore-filestore ./odoo-backups/production-filestore.tar.gz
-odoo-compose-venv update --all
-odoo-compose-venv neutralize
+odoo-compose venv restore-db --copy ./odoo-backups/production.dump
+odoo-compose venv restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose venv update --all
+odoo-compose venv neutralize
 ```
 
 The Docker example uses `docker compose stop odoo` and `docker compose up -d odoo` intentionally: only the Odoo service is stopped and restarted, while PostgreSQL remains available for the restore operations.
@@ -1438,7 +1456,7 @@ Generate shell-completion definitions for either CLI. See [Shell completion](#sh
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose-venv} completion {bash|zsh|fish|powershell}
+{odoo-compose|odoo-compose venv} completion {bash|zsh|fish|powershell}
 ```
 
 **Arguments**
@@ -1508,7 +1526,7 @@ db_password = odoo
 CLI override example:
 
 ```bash
-odoo-compose-venv setup odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
+odoo-compose venv setup odoo-project.ini --sync-all --create-venv -e branch=dev -e db=odoo_dev
 ```
 
 ### `[virtualenv]`
@@ -1661,7 +1679,7 @@ This section is optional.
 
 When present, it contains Odoo server configuration values written into `ROOT/odoo-configs/odoo-server.conf`.
 
-For `odoo-compose-venv`, omitting `[config]` still generates a valid config file with generated values such as `addons_path` and `data_dir`. The Docker workflow does not generate `odoo-server.conf`.
+For `odoo-compose venv`, omitting `[config]` still generates a valid config file with generated values such as `addons_path` and `data_dir`. The Docker workflow does not generate `odoo-server.conf`.
 
 You can define standard Odoo configuration options here.
 

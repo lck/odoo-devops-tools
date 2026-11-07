@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Add `odoo-compose venv` as the preferred CLI for native Python virtualenv workflows.
+
+### Compatibility
+
+- Preserve `odoo-compose-venv` as a backward-compatible entry point.
+
 ## 1.25.4 (2026-11-04)
 
 ### Fixed

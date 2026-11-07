@@ -61,7 +61,7 @@ jobs:
         env:
           ODT_REF: ${{ github.head_ref || github.ref_name }}
         run: |
-          uv run odoo-compose-venv setup "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons.ini?ref=${ODT_REF}" \
+          uv run odoo-compose venv setup "git+https://github.com/lck/odoo-devops-tools.git//examples/odoo18-with-oca-addons.ini?ref=${ODT_REF}" \
             --sync-all \
             --create-venv
 
@@ -76,7 +76,7 @@ jobs:
 
       - name: Init database with OCA addons
         working-directory: odoo-workspace
-        run: uv run odoo-compose-venv run -i web_notify,helpdesk_mgmt --stop-after-init
+        run: uv run odoo-compose venv run -i web_notify,helpdesk_mgmt --stop-after-init
 
       - name: Verify OCA addons installed in database
         env:
@@ -98,7 +98,7 @@ jobs:
 
       - name: Update addons
         working-directory: odoo-workspace
-        run: uv run odoo-compose-venv update
+        run: uv run odoo-compose venv update
 
       - name: Show generated workspace and config
         if: always()

@@ -88,7 +88,7 @@ jobs:
 
       - name: Provision Odoo workspace
         run: |
-          uv run odoo-compose-venv setup ./odoo-project.ini \
+          uv run odoo-compose venv setup ./odoo-project.ini \
             --sync-all \
             --create-venv \
             --root odoo-workspace
@@ -104,7 +104,7 @@ jobs:
 
       - name: Init database with OCA addons
         working-directory: odoo-workspace
-        run: uv run odoo-compose-venv run -i web_notify,helpdesk_mgmt --stop-after-init
+        run: uv run odoo-compose venv run -i web_notify,helpdesk_mgmt --stop-after-init
 
       - name: Verify OCA addons installed in database
         env:
@@ -126,7 +126,7 @@ jobs:
 
       - name: Update addons
         working-directory: odoo-workspace
-        run: uv run odoo-compose-venv update
+        run: uv run odoo-compose venv update
 
       - name: Show generated workspace and config
         if: always()

@@ -21,81 +21,98 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq zsh fish
           python -m pip install --no-deps -e .
-      - name: Verify Bash completion
+      - name: Verify Docker, native and standalone entry points
         shell: bash
         run: |
           set -euo pipefail
-          for cli in odoo-compose odoo-compose-venv; do
-            "$cli" completion bash > "$RUNNER_TEMP/$cli.bash"
-            bash -n "$RUNNER_TEMP/$cli.bash"
-            source "$RUNNER_TEMP/$cli.bash"
-            fn="_${cli//-/_}_completion"
-            declare -F "$fn" > /dev/null
+          odoo-compose --help | grep -F 'venv COMMAND' > /dev/null
+          odoo-compose setup --help | grep -F -- '--create-docker-deploy' > /dev/null
+          ! odoo-compose setup --help | grep -F -- '--create-venv' > /dev/null
+          odoo-compose venv --help | grep -F 'odoo-compose venv' > /dev/null
+          odoo-compose venv setup --help | grep -F -- '--create-venv' > /dev/null
+          ! odoo-compose venv setup --help | grep -F -- '--create-docker-deploy' > /dev/null
+          odoo-compose venv --version | grep -F 'odoo-compose venv ' > /dev/null
+          # Both completion entry points emit the same script for the installed CLI.
+          diff <(odoo-compose completion bash) <(odoo-compose venv completion bash)
+          python -S odoo_devops_tools/odoo_compose.py venv setup --help | grep -F -- '--create-venv' > /dev/null
+          # Legacy entry point stays installed for backward compatibility.
+          odoo-compose-venv setup --help | grep -F -- '--create-venv' > /dev/null
+          new_version="$(odoo-compose venv --version | tail -1)"
+          old_version="$(odoo-compose-venv --version | tail -1)"
+          [[ "${new_version#odoo-compose venv }" == "${old_version#odoo-compose-venv }" ]]
+          root="$(mktemp -d)"
+          trap 'rm -rf "$root"' EXIT
+          odoo-compose venv setup --root "$root/native" --no-provisioning-log
+          test -f "$root/native/odoo-project.ini"
+          test -f "$root/native/odoo-configs/odoo-server.conf"
+          test ! -e "$root/native/compose.yaml"
+      - name: Verify Bash completion for Docker and nested venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          odoo-compose completion bash > "$RUNNER_TEMP/odoo-compose.bash"
+          bash -n "$RUNNER_TEMP/odoo-compose.bash"
+          source "$RUNNER_TEMP/odoo-compose.bash"
+          declare -F _odoo_compose_completion > /dev/null
 
-            COMP_WORDS=("$cli" res)
-            COMP_CWORD=1
-            "$fn"
-            [[ " ${COMPREPLY[*]} " == *' restore-db '* ]]
+          COMP_WORDS=(odoo-compose venv); COMP_CWORD=1
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' venv '* ]]
+          COMP_WORDS=(odoo-compose up); COMP_CWORD=1
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' up '* ]]
+          COMP_WORDS=(odoo-compose setup --sy); COMP_CWORD=2
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' --sync '* ]]
+          COMP_WORDS=(odoo-compose setup --cre); COMP_CWORD=2
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' --create-docker-deploy '* ]]
+          [[ " ${COMPREPLY[*]} " != *' --create-venv '* ]]
+          COMP_WORDS=(odoo-compose venv se); COMP_CWORD=2
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' setup '* ]]
+          COMP_WORDS=(odoo-compose venv setup --sy); COMP_CWORD=3
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' --sync '* ]]
+          COMP_WORDS=(odoo-compose venv setup --cre); COMP_CWORD=3
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' --create-venv '* ]]
+          [[ " ${COMPREPLY[*]} " != *' --create-docker-deploy '* ]]
+          COMP_WORDS=(odoo-compose venv up --b); COMP_CWORD=3
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " != *' --build '* ]]
+          COMP_WORDS=(odoo-compose venv completion po); COMP_CWORD=3
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' powershell '* ]]
 
-            COMP_WORDS=("$cli" u)
-            COMP_CWORD=1
-            "$fn"
-            [[ " ${COMPREPLY[*]} " == *' up '* ]]
+          mkdir -p "$RUNNER_TEMP/odoo-backups"
+          touch "$RUNNER_TEMP/odoo-backups/latest.dump"
+          (
+            cd "$RUNNER_TEMP"
+            COMP_WORDS=(odoo-compose venv restore-db odoo-backups/l); COMP_CWORD=3
+            _odoo_compose_completion
+            [[ " ${COMPREPLY[*]} " == *' odoo-backups/latest.dump '* ]]
+          )
 
-            COMP_WORDS=("$cli" up --ro)
-            COMP_CWORD=2
-            "$fn"
-            [[ " ${COMPREPLY[*]} " == *' --root '* ]]
-
-            COMP_WORDS=("$cli" setup --sy)
-            COMP_CWORD=2
-            "$fn"
-            [[ " ${COMPREPLY[*]} " == *' --sync '* ]]
-            [[ " ${COMPREPLY[*]} " == *' --sync-all '* ]]
-
-            COMP_WORDS=("$cli" completion po)
-            COMP_CWORD=2
-            "$fn"
-            [[ " ${COMPREPLY[*]} " == *' powershell '* ]]
-
-            mkdir -p "$RUNNER_TEMP/odoo-backups"
-            touch "$RUNNER_TEMP/odoo-backups/latest.dump"
-            (
-              cd "$RUNNER_TEMP"
-              COMP_WORDS=("$cli" restore-db odoo-backups/l)
-              COMP_CWORD=2
-              "$fn"
-              [[ " ${COMPREPLY[*]} " == *' odoo-backups/latest.dump '* ]]
-            )
-
-            if [[ "$cli" == odoo-compose ]]; then
-              COMP_WORDS=("$cli" up --b)
-              COMP_CWORD=2
-              "$fn"
-              [[ " ${COMPREPLY[*]} " == *' --build '* ]]
-              grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
-              ! grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
-            else
-              COMP_WORDS=("$cli" up --b)
-              COMP_CWORD=2
-              "$fn"
-              [[ " ${COMPREPLY[*]} " != *' --build '* ]]
-              grep -q -- '--create-venv' "$RUNNER_TEMP/$cli.bash"
-              ! grep -q -- '--create-docker-deploy' "$RUNNER_TEMP/$cli.bash"
-            fi
-          done
+          # The legacy executable retains its own completions.
+          odoo-compose-venv completion bash > "$RUNNER_TEMP/legacy.bash"
+          bash -n "$RUNNER_TEMP/legacy.bash"
+          source "$RUNNER_TEMP/legacy.bash"
+          COMP_WORDS=(odoo-compose-venv setup --cre); COMP_CWORD=2
+          _odoo_compose_venv_completion
+          [[ " ${COMPREPLY[*]} " == *' --create-venv '* ]]
       - name: Verify Zsh and Fish completion
         shell: bash
         run: |
           set -euo pipefail
-          for cli in odoo-compose odoo-compose-venv; do
-            "$cli" completion zsh > "$RUNNER_TEMP/$cli.zsh"
-            "$cli" completion fish > "$RUNNER_TEMP/$cli.fish"
-            zsh -n "$RUNNER_TEMP/$cli.zsh"
-            fish -n "$RUNNER_TEMP/$cli.fish"
-            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli setup --sy'" | grep -F 'sync-all'
-            fish -c "source '$RUNNER_TEMP/$cli.fish'; complete -C '$cli setup --sy'" | grep -E '^--sync([[:space:]]|$)'
-          done
+          odoo-compose completion zsh > "$RUNNER_TEMP/odoo-compose.zsh"
+          odoo-compose completion fish > "$RUNNER_TEMP/odoo-compose.fish"
+          zsh -n "$RUNNER_TEMP/odoo-compose.zsh"
+          fish -n "$RUNNER_TEMP/odoo-compose.fish"
+          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose setup --sy'" | grep -F 'sync-all'
+          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --sy'" | grep -F 'sync-all'
+          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --cre'" | grep -F -- '--create-venv'
+          ! fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --cre'" | grep -F -- '--create-docker-deploy'
 
   windows:
     name: PowerShell
@@ -107,14 +124,30 @@ jobs:
           python-version: '3.12'
       - name: Install CLI
         run: python -m pip install --no-deps -e .
+      - name: Verify native prefix and legacy entry point
+        shell: pwsh
+        run: |
+          $help = & odoo-compose venv setup --help | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $help.Contains('--create-venv') -or $help.Contains('--create-docker-deploy')) {
+            throw 'odoo-compose venv did not select the native workflow'
+          }
+          & odoo-compose venv --version
+          if ($LASTEXITCODE -ne 0) { throw 'odoo-compose venv --version failed' }
+          & odoo-compose-venv setup --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy entry point stopped working' }
       - name: Verify PowerShell completion
         shell: pwsh
         run: |
-          foreach ($cli in @('odoo-compose', 'odoo-compose-venv')) {
-            & $cli completion powershell | Out-String | Invoke-Expression
-            $inputLine = "$cli set"
+          & odoo-compose completion powershell | Out-String | Invoke-Expression
+          foreach ($test in @(
+            @{ Line = 'odoo-compose set'; Expected = 'setup' },
+            @{ Line = 'odoo-compose ve'; Expected = 'venv' },
+            @{ Line = 'odoo-compose venv set'; Expected = 'setup' },
+            @{ Line = 'odoo-compose venv setup --create-v'; Expected = '--create-venv' }
+          )) {
+            $inputLine = $test.Line
             $matches = [System.Management.Automation.CommandCompletion]::CompleteInput(
               $inputLine, $inputLine.Length, $null
             ).CompletionMatches.CompletionText
-            if ('setup' -notin $matches) { throw "Missing setup completion for $cli" }
+            if ($test.Expected -notin $matches) { throw "Missing $($test.Expected) completion for $inputLine" }
           }

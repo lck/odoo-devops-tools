@@ -37,8 +37,8 @@ Homepage = "https://github.com/lck/odoo-devops-tools"
 Repository = "https://github.com/lck/odoo-devops-tools"
 
 [project.scripts]
-odoo-compose = "odoo_devops_tools.env:main"
-odoo-compose-venv = "odoo_devops_tools.env:main_venv"
+odoo-compose = "odoo_devops_tools.odoo_compose:main"
+odoo-compose-venv = "odoo_devops_tools.odoo_compose:main_venv"
 
 [tool.setuptools.packages.find]
 where = ["."]

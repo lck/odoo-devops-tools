@@ -72,7 +72,7 @@ jobs:
           test -f "$tmp/docker-vars/odoo-addons/one/marker.txt"
           echo 'PASS variable override selects Docker workspace Odoo'
           make_ws native
-          run odoo-compose-venv setup --root "$tmp/native" --sync
+          run odoo-compose venv setup --root "$tmp/native" --sync
           test -f "$tmp/native/odoo/odoo-bin"
           test -f "$tmp/native/odoo-addons/one/marker.txt"
           test ! -e "$tmp/native/venv"
@@ -88,7 +88,7 @@ jobs:
           repo = $tmp/fixtures/addon
           branch = main
           EOF
-          run odoo-compose-venv setup --root "$tmp/native-local" --sync
+          run odoo-compose venv setup --root "$tmp/native-local" --sync
           test ! -d "$tmp/native-local/odoo/.git"
           test -f "$tmp/native-local/odoo-addons/one/marker.txt"
           echo 'PASS Venv local Odoo: only addons'
@@ -101,7 +101,7 @@ jobs:
           [addons.one]
           path = $tmp/fixtures/local-addon
           EOF
-          run odoo-compose-venv setup --root "$tmp/local-only" --sync
+          run odoo-compose venv setup --root "$tmp/local-only" --sync
           test ! -d "$tmp/local-only/odoo-addons/one/.git"
           echo 'PASS all local'
           mkdir -p "$tmp/no-repos"
@@ -128,7 +128,7 @@ jobs:
           repo = $tmp/fixtures/odoo
           branch = main
           EOF
-          run odoo-compose-venv setup --root "$tmp/odoo-only" --sync
+          run odoo-compose venv setup --root "$tmp/odoo-only" --sync
           test -f "$tmp/odoo-only/odoo/odoo-bin"
           test ! -d "$tmp/odoo-only/odoo-addons/one/.git"
           echo 'PASS native Odoo-only Git sync'
@@ -141,7 +141,7 @@ jobs:
           if odoo-compose setup --root "$tmp/native" --sync --sync-addons > "$tmp/conflict.log" 2>&1; then
             echo 'unexpected success for mutually exclusive flags'; exit 1
           fi
-          if odoo-compose-venv setup --sync --create-from-bundle bogus.zip > "$tmp/conflict.log" 2>&1; then
+          if odoo-compose venv setup --sync --create-from-bundle bogus.zip > "$tmp/conflict.log" 2>&1; then
             echo 'unexpected success for bundle import and --sync'; exit 1
           fi
           echo 'PASS mutually exclusive flags'

@@ -37,8 +37,8 @@ jobs:
 
           function Invoke-Cli {
             param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CommandArgs)
-            $output = & odoo-compose-venv @CommandArgs --root $root 2>&1 | Out-String
-            Write-Host "odoo-compose-venv $($CommandArgs -join ' ') -> $LASTEXITCODE`n$output"
+            $output = & odoo-compose venv @CommandArgs --root $root 2>&1 | Out-String
+            Write-Host "odoo-compose venv $($CommandArgs -join ' ') -> $LASTEXITCODE`n$output"
             if ($LASTEXITCODE -ne 0) { throw "CLI failed: $($CommandArgs -join ' ')" }
             return $output
           }
@@ -56,7 +56,7 @@ jobs:
               # An 8.3 pathname must refer to the same workspace as its long path.
               $shortRoot = (& cmd.exe /d /c ('for %I in ("{0}") do @echo %~sI' -f $root) | Out-String).Trim()
               if ((Test-Path $shortRoot) -and ($shortRoot -ne $root)) {
-                $shortStatus = & odoo-compose-venv status --root $shortRoot 2>&1 | Out-String
+                $shortStatus = & odoo-compose venv status --root $shortRoot 2>&1 | Out-String
                 if ($LASTEXITCODE -ne 0) { throw "8.3 workspace alias failed: $shortStatus" }
                 Assert-Output $shortStatus 'running'
               }
@@ -79,7 +79,7 @@ jobs:
             Write-Host 'Native lifecycle checks passed'
           }
           finally {
-            & odoo-compose-venv down --root $root 2>&1 | Out-Host
+            & odoo-compose venv down --root $root 2>&1 | Out-Host
             $log = Join-Path $root 'odoo-logs/odoo-up.log'
             if (Test-Path $log) { Get-Content $log -Tail 40 | Out-Host }
           }
