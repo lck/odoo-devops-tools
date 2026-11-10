@@ -154,9 +154,9 @@ jobs:
           uv run odoo-compose venv setup --root "$tmp/explicit" --no-provisioning-log
           grep -Fqx 'db_name = manual_db' "$tmp/explicit/odoo-project.ini"
           printf '[odoo]\nversion = 19.0\n' > "$tmp/docker-only/odoo-project.ini"
-          uv run odoo-compose setup --root "$tmp/docker-only" --no-provisioning-log
+          uv run odoo-compose docker setup --root "$tmp/docker-only" --no-provisioning-log
           ! grep -q '^db_name' "$tmp/docker-only/odoo-project.ini"
-          uv run odoo-compose setup --root "$tmp/first/moved" --no-provisioning-log
+          uv run odoo-compose docker setup --root "$tmp/first/moved" --no-provisioning-log
 
           # External INI sources must remain unchanged across generation.
           printf '[odoo]\nversion = 19.0\n' > "$tmp/external.ini"
@@ -221,7 +221,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          uv run odoo-compose setup ./init-project-root --root ./explicit-root \
+          uv run odoo-compose docker setup ./init-project-root --root ./explicit-root \
             > duplicate-root.log 2>&1
           status=$?
           set -e

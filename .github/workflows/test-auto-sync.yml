@@ -49,12 +49,12 @@ jobs:
           make_ws() { mkdir -p "$tmp/$1"; cp "$tmp/template.ini" "$tmp/$1/odoo-project.ini"; }
           run() { echo "RUN $*"; "$@" > "$tmp/cli.log" 2>&1 || { cat "$tmp/cli.log"; return 1; }; }
           make_ws docker-image
-          run odoo-compose setup --root "$tmp/docker-image" --sync
+          run odoo-compose docker setup --root "$tmp/docker-image" --sync
           test -f "$tmp/docker-image/odoo-addons/one/marker.txt"
           test ! -e "$tmp/docker-image/odoo/.git"
           echo 'PASS Docker image: only addons'
           make_ws docker-workspace
-          run odoo-compose setup --root "$tmp/docker-workspace" --sync --set docker:odoo_source=workspace
+          run odoo-compose docker setup --root "$tmp/docker-workspace" --sync --set docker:odoo_source=workspace
           test -f "$tmp/docker-workspace/odoo/odoo-bin"
           test -f "$tmp/docker-workspace/odoo-addons/one/marker.txt"
           grep -q 'odoo_source = workspace' "$tmp/docker-workspace/odoo-project.ini"
@@ -67,7 +67,7 @@ jobs:
           [docker]
           odoo_source = ${vars:odoo_mode}
           EOF
-          run odoo-compose setup --root "$tmp/docker-vars" --sync -e odoo_mode=workspace
+          run odoo-compose docker setup --root "$tmp/docker-vars" --sync -e odoo_mode=workspace
           test -f "$tmp/docker-vars/odoo/odoo-bin"
           test -f "$tmp/docker-vars/odoo-addons/one/marker.txt"
           echo 'PASS variable override selects Docker workspace Odoo'
@@ -106,7 +106,7 @@ jobs:
           echo 'PASS all local'
           mkdir -p "$tmp/no-repos"
           printf '[odoo]\nversion = 19.0\n' > "$tmp/no-repos/odoo-project.ini"
-          run odoo-compose setup --root "$tmp/no-repos" --sync
+          run odoo-compose docker setup --root "$tmp/no-repos" --sync
           test ! -d "$tmp/no-repos/odoo/.git"
           echo 'PASS Docker image no addons: no Git sync'
           mkdir -p "$tmp/with-includes"
@@ -116,7 +116,7 @@ jobs:
           repo = $tmp/fixtures/addon
           branch = main
           EOF
-          run odoo-compose setup "$tmp/base.ini" -i "$tmp/addons.ini" --root "$tmp/with-includes" --sync
+          run odoo-compose docker setup "$tmp/base.ini" -i "$tmp/addons.ini" --root "$tmp/with-includes" --sync
           test -f "$tmp/with-includes/odoo-addons/one/marker.txt"
           test ! -d "$tmp/with-includes/odoo/.git"
           echo 'PASS INI include selection'
@@ -134,11 +134,11 @@ jobs:
           echo 'PASS native Odoo-only Git sync'
           # --sync-all retains its explicit meaning even in Docker image mode.
           make_ws explicit-all
-          run odoo-compose setup --root "$tmp/explicit-all" --sync-all
+          run odoo-compose docker setup --root "$tmp/explicit-all" --sync-all
           test -f "$tmp/explicit-all/odoo/odoo-bin"
           test -f "$tmp/explicit-all/odoo-addons/one/marker.txt"
           echo 'PASS explicit --sync-all unchanged'
-          if odoo-compose setup --root "$tmp/native" --sync --sync-addons > "$tmp/conflict.log" 2>&1; then
+          if odoo-compose docker setup --root "$tmp/native" --sync --sync-addons > "$tmp/conflict.log" 2>&1; then
             echo 'unexpected success for mutually exclusive flags'; exit 1
           fi
           if odoo-compose venv setup --sync --create-from-bundle bogus.zip > "$tmp/conflict.log" 2>&1; then
@@ -193,7 +193,7 @@ jobs:
                 checkout="$root/workspace/odoo-addons/safe"
               fi
 
-              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              odoo-compose docker setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
               if [[ "$shallow" == true ]]; then
                 test "$(git -C "$checkout" rev-parse --is-shallow-repository)" = true
               fi
@@ -204,7 +204,7 @@ jobs:
               git -C "$checkout" commit -qm 'local unpublished commit'
               local_tip="$(git -C "$checkout" rev-parse HEAD)"
               test -z "$(git -C "$checkout" status --porcelain)"
-              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+              if odoo-compose docker setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
                 echo "ERROR: sync overwrote an unpublished commit ($name)"; exit 1
               fi
               grep -q 'Refusing to reset local Git branch' "$root/rejected.log" || { cat "$root/rejected.log"; exit 1; }
@@ -214,7 +214,7 @@ jobs:
 
               # The target branch must also be protected when another branch is checked out.
               git -C "$checkout" switch -q -c another-branch
-              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+              if odoo-compose docker setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
                 echo "ERROR: sync overwrote an inactive branch ($name)"; exit 1
               fi
               test "$(git -C "$checkout" rev-parse main)" = "$local_tip"
@@ -223,7 +223,7 @@ jobs:
               # Once pushed, the local commit is safe; a subsequent remote
               # fast-forward must still work, including for shallow clones.
               git -C "$checkout" push -q origin main
-              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              odoo-compose docker setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
               test "$(git -C "$checkout" rev-parse HEAD)" = "$local_tip"
               git clone -q "$root/origin.git" "$root/publisher"
               echo remote-update >> "$root/publisher/marker.txt"
@@ -231,7 +231,7 @@ jobs:
               git -C "$root/publisher" commit -qm 'remote fast-forward'
               git -C "$root/publisher" push -q origin main
               remote_tip="$(git -C "$root/publisher" rev-parse HEAD)"
-              odoo-compose setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
+              odoo-compose docker setup --root "$root/workspace" --sync > "$root/sync.log" 2>&1 || { cat "$root/sync.log"; exit 1; }
               test "$(git -C "$checkout" rev-parse HEAD)" = "$remote_tip"
 
               # A concurrent remote update must not clobber a new local commit.
@@ -243,7 +243,7 @@ jobs:
               git -C "$root/publisher" add .
               git -C "$root/publisher" commit -qm 'concurrent remote update'
               git -C "$root/publisher" push -q origin main
-              if odoo-compose setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
+              if odoo-compose docker setup --root "$root/workspace" --sync > "$root/rejected.log" 2>&1; then
                 echo "ERROR: sync overwrote divergent local commits ($name)"; exit 1
               fi
               grep -q 'Refusing to reset local Git branch' "$root/rejected.log" || { cat "$root/rejected.log"; exit 1; }

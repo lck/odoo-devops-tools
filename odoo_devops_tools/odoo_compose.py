@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""
-odoo-compose
+# SPDX-FileCopyrightText: 2026 Roman Lacko
+# SPDX-License-Identifier: MIT
 
-Build a reproducible Odoo workspace from a project definition.
+"""
+odoo-compose - Build and manage reproducible Odoo workspaces.
+
+Supports Docker Compose and native Python virtual environments.
+Workspaces are defined using an INI project configuration.
+
+Standalone usage:
+    python odoo_compose.py docker setup
+    python odoo_compose.py docker up
+    python odoo_compose.py venv setup
+    python odoo_compose.py venv up
 """
 
 from __future__ import annotations
@@ -203,7 +213,6 @@ _CLI_COMMANDS = (
     ("up", "Prepare and start the Odoo workspace"),
     ("down", "Stop the Odoo workspace (keep data)"),
     ("status", "Show the Odoo runtime status"),
-    ("completion", "Generate shell completion script (bash, zsh, fish, powershell)"),
     ("run", "Run Odoo"),
     ("shell", "Open an Odoo shell"),
     ("update", "Update installed Odoo modules"),
@@ -4202,7 +4211,7 @@ def _sync_project_impl(
     if target == "docker" and (create_venv or reuse_wheelhouse or bundle_output is not None):
         raise ValueError("venv provisioning and workspace bundles require odoo-compose venv")
     if target == "venv" and create_docker_deploy_requested:
-        raise ValueError("--create-docker-deploy requires odoo-compose")
+        raise ValueError("--create-docker-deploy requires odoo-compose docker")
 
     root = (root_override or ini_path.parent).resolve()
     if root.exists() and not root.is_dir():
@@ -5519,17 +5528,29 @@ def _prepare_included_project_ini(
         return output_path
 
 
-def build_parser(prog: str = "odoo-compose", target: str = "docker", *, setup_command: bool = False) -> argparse.ArgumentParser:
+def build_parser(prog: str = "odoo-compose", target: Optional[str] = None, *, setup_command: bool = False) -> argparse.ArgumentParser:
     """Build the top-level command list or the full workspace setup parser."""
     if not setup_command:
+        if target is None:
+            epilog = ("Workflows (required for workspace commands):\n"
+                      "  docker                       Docker Compose workflow\n"
+                      "  venv                         Native Python virtualenv workflow\n"
+                      "\nGlobal commands:\n"
+                      "  completion SHELL             Generate shell completion for both workflows\n"
+                      "\nExamples:\n"
+                      "  odoo-compose docker setup ./odoo19 --sync\n"
+                      "  odoo-compose venv setup ./odoo19 --sync --create-venv\n"
+                      "  odoo-compose completion bash\n"
+                      "\nUse 'odoo-compose <docker|venv> COMMAND --help' for command help.\n")
+        else:
+            epilog = ("Commands:\n" + "\n".join(
+                f"  {name:<27} {description}" for name, description in _CLI_COMMANDS
+            ) + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n")
         parser = argparse.ArgumentParser(
             prog=prog,
             description=f"{prog} {__version__} — build reproducible Odoo workspaces",
             formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog=("Commands:\n" + "\n".join(
-                f"  {name:<27} {description}" for name, description in _CLI_COMMANDS
-            ) + ("\n  venv COMMAND                Use the native virtualenv workflow" if target == "docker" else "")
-              + f"\n\nUse '{prog} COMMAND --help' for command-specific help.\n"),
+            epilog=epilog,
         )
         parser.add_argument("--version", action="version", version=f"{prog} {__version__}")
         return parser
@@ -5538,9 +5559,9 @@ def build_parser(prog: str = "odoo-compose", target: str = "docker", *, setup_co
         epilog = """Create or update an Odoo Docker workspace.
 
 Examples:
-  odoo-compose setup ./odoo19 --sync
-  odoo-compose setup --sync --create-docker-deploy
-  odoo-compose setup ./odoo-project.ini --show-last-run
+  odoo-compose docker setup ./odoo19 --sync
+  odoo-compose docker setup --sync --create-docker-deploy
+  odoo-compose docker setup ./odoo-project.ini --show-last-run
 """
     else:
         epilog = """Create or update a native Odoo workspace.
@@ -6777,18 +6798,16 @@ def _completion_bash(name: str, commands: list[str], options: dict[str, list[str
         f'            candidates={shlex.quote(" ".join(commands))}',
         '        fi',
         '        mapfile -t COMPREPLY < <(compgen -W "$candidates" -- "$cur")',
-        '        if [[ "$cur" != -* ]]; then',
-        '            mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -f -- "$cur")',
-        '            compopt -o filenames 2>/dev/null || true',
-        '        fi',
         '        return',
         '    fi',
         *([
-            '    if [[ "${COMP_WORDS[1]}" == venv ]]; then',
-            '        local -a native_words=("${COMP_WORDS[0]}" "${COMP_WORDS[@]:2}")',
-            '        local -a COMP_WORDS=("${native_words[@]}")',
+            '    if [[ "${COMP_WORDS[1]}" == docker || "${COMP_WORDS[1]}" == venv ]]; then',
+            '        local workflow="${COMP_WORDS[1]}"',
+            '        local -a stripped_words=("${COMP_WORDS[0]}" "${COMP_WORDS[@]:2}")',
+            '        local -a COMP_WORDS=("${stripped_words[@]}")',
             '        local COMP_CWORD=$(( COMP_CWORD - 1 ))',
-            f'        _{name.replace("-", "_")}_native_completion',
+            f'        if [[ "$workflow" == docker ]]; then _{name.replace("-", "_")}_docker_completion',
+            f'        else _{name.replace("-", "_")}_venv_completion; fi',
             '        return',
             '    fi',
         ] if native_options is not None else []),
@@ -6837,67 +6856,67 @@ def _completion_bash(name: str, commands: list[str], options: dict[str, list[str
     primary = "\n".join(output)
     if native_options is None:
         return primary
-    # The private helper follows the same completion rules as the legacy native CLI.
-    native_name = name + "-native"
-    native_script = _completion_bash(native_name, [command for command, _ in _CLI_COMMANDS], native_options)
-    native_fn = "_" + native_name.replace("-", "_") + "_completion"
-    native_script = native_script.replace(f"complete -F {native_fn} {native_name}\n", "")
-    return native_script + "\n" + primary
+    # Reuse the standard option/path rules for both workflow command namespaces.
+    private_parts = []
+    for workflow, workflow_options in (('docker', options), ('venv', native_options)):
+        private_name = name + '-' + workflow
+        private_script = _completion_bash(private_name, _CLI_COMMANDS_NAMES, workflow_options)
+        private_fn = '_' + private_name.replace('-', '_') + '_completion'
+        private_script = private_script.replace(f'complete -F {private_fn} {private_name}\n', '')
+        private_parts.append(private_script)
+    return '\n'.join(private_parts) + '\n' + primary
 
 
 def _completion_zsh(name: str, commands: list[str], options: dict[str, list[str]],
                     native_options: Optional[dict[str, list[str]]] = None) -> str:
-    fn = "_" + name.replace("-", "_") + "_completion"
+    fn = '_' + name.replace('-', '_') + '_completion'
     output = [
-        f"#compdef {name}",
-        f"{fn}() {{",
+        f'#compdef {name}',
+        f'{fn}() {{',
         '    local -a candidates',
         '    if (( CURRENT == 2 )); then',
         '        if [[ "$PREFIX" == -* ]]; then',
-        '            candidates=(' + ' '.join(shlex.quote(x) for x in options['']) + ')',
+        "            candidates=(-h --help --version)",
         '        else',
-        '            candidates=(' + ' '.join(shlex.quote(x) for x in commands) + ')',
+        '            candidates=(docker venv completion)',
         '        fi',
         '        compadd -- "${candidates[@]}"',
-        '        [[ "$PREFIX" != -* ]] && _files',
         '        return',
         '    fi',
-        '    if [[ "${words[2]}" == completion && CURRENT -eq 3 ]]; then',
-        '        candidates=(' + ' '.join(_COMPLETION_SHELLS) + ')',
+        '    if [[ "${words[2]}" == completion ]]; then',
+        '        (( CURRENT == 3 )) && compadd -- ' + ' '.join(_COMPLETION_SHELLS),
+        '        return',
+        '    fi',
+        '    if (( CURRENT == 3 )); then',
+        '        if [[ "$PREFIX" == -* ]]; then',
+        '            candidates=(-h --help --version)',
+        '        else',
+        '            candidates=(' + ' '.join(_CLI_COMMANDS_NAMES) + ')',
+        '        fi',
         '        compadd -- "${candidates[@]}"',
         '        return',
         '    fi',
-        *([
-            '    if [[ "${words[2]}" == venv ]]; then',
-            '        if (( CURRENT == 3 )); then',
-            '            candidates=(' + ' '.join(shlex.quote(x) for x in _CLI_COMMANDS_NAMES) + ')',
-            '            if [[ "$PREFIX" == -* ]]; then',
-            '                candidates=(' + ' '.join(shlex.quote(x) for x in native_options['']) + ')',
-            '            fi',
-            '            compadd -- "${candidates[@]}"',
-            '            [[ "$PREFIX" != -* ]] && _files',
-            '            return',
-            '        fi',
-            '        if [[ "${words[3]}" == completion && CURRENT -eq 4 ]]; then',
-            '            candidates=(' + ' '.join(_COMPLETION_SHELLS) + ')',
-            '            compadd -- "${candidates[@]}"',
-            '            return',
-            '        fi',
-            '        case "${words[3]}" in',
-            *[f"            {shlex.quote(cmd)}) candidates=({' '.join(shlex.quote(x) for x in opts)}) ;;" for cmd, opts in native_options.items() if cmd],
-            '            *) candidates=(' + ' '.join(shlex.quote(x) for x in native_options['']) + ') ;;',
-            '        esac',
-            '    else',
-        ] if native_options is not None else []),
         '    case "${words[2]}" in',
+        '        docker)',
+        '            case "${words[3]}" in',
     ]
     for cmd, opts in options.items():
         if cmd:
-            output.append(f"        {shlex.quote(cmd)}) candidates=({' '.join(shlex.quote(x) for x in opts)}) ;;")
+            output.append(f"                {shlex.quote(cmd)}) candidates=({' '.join(shlex.quote(x) for x in opts)}) ;;")
     output.extend([
-        '        *) candidates=(' + ' '.join(shlex.quote(x) for x in options['']) + ') ;;',
+        "                *) candidates=(-h --help --version) ;;",
+        '            esac ;;',
+        '        venv)',
+        '            case "${words[3]}" in',
+    ])
+    for cmd, opts in (native_options or {}).items():
+        if cmd:
+            output.append(f"                {shlex.quote(cmd)}) candidates=({' '.join(shlex.quote(x) for x in opts)}) ;;")
+    output.extend([
+        "                *) candidates=(-h --help --version) ;;",
+        '            esac ;;',
+        '        *) return ;;',
         '    esac',
-        *(['    fi'] if native_options is not None else []),
         '    case "${words[CURRENT-1]}" in',
         '        --root) _files -/; return ;;',
         '        --create-bundle|--dry-run) [[ "$PREFIX" != -* ]] && _files && return ;;',
@@ -6918,74 +6937,44 @@ def _completion_zsh(name: str, commands: list[str], options: dict[str, list[str]
 
 def _completion_fish(name: str, commands: list[str], options: dict[str, list[str]],
                      native_options: Optional[dict[str, list[str]]] = None) -> str:
-    fn = "__" + name.replace("-", "_") + "_completion_command"
-    output = [
-        f"# Fish completion for {name}",
-        f"function {fn}",
+    fn = '__' + name.replace('-', '_') + '_completion'
+    output = [f'# Fish completion for {name}']
+    output.extend([
+        f'function {fn}_root',
         '    set -l tokens (commandline -opc)',
-        *(['    if test (count $tokens) -gt 1; and test "$tokens[2]" = venv',
-           '        return 1',
-           '    end'] if native_options is not None else []),
-        '    if test (count $tokens) -lt 2',
-        '        test (count $argv) -eq 0',
-        '        return $status',
-        '    end',
-        '    test (count $argv) -gt 0; and test "$tokens[2]" = "$argv[1]"',
+        '    test (count $tokens) -eq 1',
         'end',
-    ]
-    output.append(f"complete -c {name} -n '{fn}' -f -a {shlex.quote(' '.join(commands))} -d 'CLI command'")
-    for cmd, opts in options.items():
-        cond = fn if not cmd else f"{fn} {cmd}"
-        for opt in opts:
-            # Action descriptions are provided by --help; avoid duplicating them here.
-            if opt.startswith('--'):
-                flag = '-l ' + opt[2:]
-            elif len(opt) == 2:
-                flag = '-s ' + opt[1:]
-            else:
-                continue
-            kind = _COMPLETION_PATH_OPTIONS.get(opt)
-            if kind == "directory":
-                extra = " -a '(__fish_complete_directories)'" if opt == '--dry-run' else " -r -a '(__fish_complete_directories)'"
-            elif kind == "file":
-                extra = ' -F' if opt == '--create-bundle' else ' -r -F'
-            elif opt in ('--set', '-S', '--extra-var', '-e'):
-                extra = ' -r -f'
-            else:
-                extra = ''
-            output.append(f"complete -c {name} -n '{cond}' {flag}{extra}")
-    output.append(f"complete -c {name} -n '{fn} completion' -f -a '" + " ".join(_COMPLETION_SHELLS) + "' -d 'Target shell'")
-    if native_options is not None:
-        nested = fn + "_venv"
-        nested_cmd = nested + "_command"
-        nested_root = nested + "_root"
+        f"complete -c {name} -n '{fn}_root' -f -a 'docker venv completion' -d 'Workflow or global command'",
+        f'function {fn}_shell',
+        '    set -l tokens (commandline -opc)',
+        '    test (count $tokens) -eq 2; and test "$tokens[2]" = completion',
+        'end',
+        f"complete -c {name} -n '{fn}_shell' -f -a '{' '.join(_COMPLETION_SHELLS)}' -d 'Target shell'",
+    ])
+    for workflow, workflow_options in (('docker', options), ('venv', native_options or {})):
+        base = fn + '_' + workflow
         output.extend([
-            f"function {nested}",
+            f'function {base}_commands',
             '    set -l tokens (commandline -opc)',
-            '    test (count $tokens) -ge 2; and test "$tokens[2]" = venv',
-            'end',
-            f"function {nested_root}",
-            '    set -l tokens (commandline -opc)',
-            f'    {nested}; or return 1',
+            f'    test (count $tokens) -ge 2; and test "$tokens[2]" = {workflow}',
+            '    or return 1',
             '    if test (count $tokens) -eq 2',
             '        return 0',
             '    end',
-            '    if test (count $tokens) -eq 3',
-            '        test "$tokens[3]" = (commandline -ct)',
-            '        return $status',
-            '    end',
-            '    return 1',
+            '    test (count $tokens) -eq 3; and test "$tokens[3]" = (commandline -ct)',
             'end',
-            f"function {nested_cmd}",
+            f"complete -c {name} -n '{base}_commands' -f -a '{' '.join(_CLI_COMMANDS_NAMES)}' -d 'Workspace command'",
+            f'function {base}_action',
             '    set -l tokens (commandline -opc)',
-            f'    {nested}',
+            f'    test (count $tokens) -ge 3; and test "$tokens[2]" = {workflow}',
             '    or return 1',
-            '    test (count $tokens) -ge 3; and test (count $argv) -gt 0; and test "$tokens[3]" = "$argv[1]"',
+            '    test (count $argv) -eq 1; and test "$tokens[3]" = "$argv[1]"',
             'end',
-            f"complete -c {name} -n '{nested_root}' -f -a '{' '.join(_CLI_COMMANDS_NAMES)}' -d 'Native CLI command'",
         ])
-        for cmd, opts in native_options.items():
-            condition = nested_root if not cmd else f"{nested_cmd} {cmd}"
+        for cmd, opts in workflow_options.items():
+            # For the workflow root, allow --help / --version before the action.
+            if not cmd:
+                continue
             for opt in opts:
                 if opt.startswith('--'):
                     flag = '-l ' + opt[2:]
@@ -7002,8 +6991,7 @@ def _completion_fish(name: str, commands: list[str], options: dict[str, list[str
                     extra = ' -r -f'
                 else:
                     extra = ''
-                output.append(f"complete -c {name} -n '{condition}' {flag}{extra}")
-        output.append(f"complete -c {name} -n '{nested_cmd} completion' -f -a '" + " ".join(_COMPLETION_SHELLS) + "' -d 'Target shell'")
+                output.append(f"complete -c {name} -n '{base}_action {cmd}' {flag}{extra}")
     output.append('')
     return '\n'.join(output)
 
@@ -7030,9 +7018,9 @@ def _completion_powershell(name: str, commands: list[str], options: dict[str, li
         '    if ($wordToComplete.Length -gt 0 -and $parts.Count -gt 0) {',
         '        $before = @($parts | Select-Object -SkipLast 1)',
         '    }',
-        *(['    if ($before.Count -ge 2 -and $before[1] -eq "venv") {',
+        *(['    if ($before.Count -ge 2 -and $before[1] -in @("docker", "venv")) {',
+           '        if ($before[1] -eq "venv") { $optionSets = $nativeOptionSets }',
            '        $before = @($before[0]) + @($before | Select-Object -Skip 2)',
-           '        $optionSets = $nativeOptionSets',
            '        $commands = @('+', '.join(_completion_ps_quote(x) for x in _CLI_COMMANDS_NAMES)+')',
            '    }'] if native_options is not None else []),
         '    $action = if ($before.Count -ge 2) { $before[1] } else { "" }',
@@ -7040,8 +7028,7 @@ def _completion_powershell(name: str, commands: list[str], options: dict[str, li
         '    $candidates = @()',
         '    $pathType = ""',
         '    if ($before.Count -lt 2) {',
-        '        $candidates = if ($wordToComplete.StartsWith("-")) { $optionSets[""] } else { $commands }',
-        '        if (-not $wordToComplete.StartsWith("-")) { $pathType = "file" }',
+        '        $candidates = if ($wordToComplete.StartsWith("-")) { @("--help", "-h", "--version") } else { $commands }',
         '    } elseif ($action -eq "completion" -and $before.Count -eq 2) {',
         '        $candidates = $shells',
         '    } elseif ($previous -eq "--root") {',
@@ -7092,66 +7079,72 @@ def _generate_completion(
     parsers: dict[str, argparse.ArgumentParser],
     native_parsers: Optional[dict[str, argparse.ArgumentParser]] = None,
 ) -> str:
-    """Return a script containing only available commands and argparse options."""
+    """Generate global completion with separate Docker and venv command namespaces."""
     if shell not in _COMPLETION_SHELLS:
         raise ValueError(f"Unsupported shell: {shell}")
-    commands = [name for name, _ in command_descriptions]
-    options = {name: _completion_options(parser) for name, parser in parsers.items()}
-    native_options = ({name: _completion_options(parser) for name, parser in native_parsers.items()}
-                      if native_parsers is not None else None)
-    if native_options is not None:
-        commands.append('venv')
+    docker_options = {name: _completion_options(parser) for name, parser in parsers.items()}
+    venv_options = ({name: _completion_options(parser) for name, parser in native_parsers.items()}
+                    if native_parsers is not None else None)
+    commands = ['docker', 'venv', 'completion']
     if shell == 'bash':
-        return _completion_bash(program, commands, options, native_options)
+        return _completion_bash(program, commands, docker_options, venv_options)
     if shell == 'zsh':
-        return _completion_zsh(program, commands, options, native_options)
+        return _completion_zsh(program, commands, docker_options, venv_options)
     if shell == 'fish':
-        return _completion_fish(program, commands, options, native_options)
-    return _completion_powershell(program, commands, options, native_options)
+        return _completion_fish(program, commands, docker_options, venv_options)
+    return _completion_powershell(program, commands, docker_options, venv_options)
 
 
-def _run_completion_cli(target: str, args: list[str], prog: str) -> int:
-    """Print shell completion code without reading or provisioning a workspace."""
-    if target == 'venv' and prog.endswith(' venv'):
-        # The installed CLI has one completion registration for both workflows.
-        return _run_completion_cli('docker', args, prog[:-5])
+def _run_completion_cli(args: list[str]) -> int:
+    """Global completion covers both workflow prefixes, without touching a workspace."""
+    prog = "odoo-compose"
     parser = argparse.ArgumentParser(
         prog=f"{prog} completion", description="Generate shell completion for this CLI."
     )
     parser.add_argument("shell", choices=_COMPLETION_SHELLS)
     opts = parser.parse_args(args)
-    parsers = {
-        "": build_parser(prog, target),
-        "setup": build_parser(f"{prog} setup", target, setup_command=True),
-        **{name: _build_lifecycle_parser(name, prog, target) for name in ("up", "down", "status")},
-        "completion": parser,
-        **{name: _build_odoo_parser(name, prog) for name in ("run", "shell", "update", "test")},
-        "neutralize": _build_neutralize_parser(prog),
-        **{name: _build_backup_restore_parser(name, prog) for name in _BACKUP_RESTORE_SCRIPT_NAMES},
-    }
-    native_parsers = None
-    if target == 'docker':
-        native_prog = prog + ' venv'
-        native_parsers = {
-            "": build_parser(native_prog, 'venv'),
-            "setup": build_parser(f"{native_prog} setup", 'venv', setup_command=True),
-            **{name: _build_lifecycle_parser(name, native_prog, 'venv') for name in ("up", "down", "status")},
-            "completion": parser,
-            **{name: _build_odoo_parser(name, native_prog) for name in ("run", "shell", "update", "test")},
-            "neutralize": _build_neutralize_parser(native_prog),
-            **{name: _build_backup_restore_parser(name, native_prog) for name in _BACKUP_RESTORE_SCRIPT_NAMES},
+    def collect(target: str) -> dict[str, argparse.ArgumentParser]:
+        workflow_prog = f"{prog} {target}"
+        return {
+            "": build_parser(workflow_prog, target),
+            "setup": build_parser(f"{workflow_prog} setup", target, setup_command=True),
+            **{name: _build_lifecycle_parser(name, workflow_prog, target)
+               for name in ("up", "down", "status")},
+            **{name: _build_odoo_parser(name, workflow_prog)
+               for name in ("run", "shell", "update", "test")},
+            "neutralize": _build_neutralize_parser(workflow_prog),
+            **{name: _build_backup_restore_parser(name, workflow_prog)
+               for name in _BACKUP_RESTORE_SCRIPT_NAMES},
         }
-    print(_generate_completion(opts.shell, prog, _CLI_COMMANDS, parsers, native_parsers), end="")
+    print(_generate_completion(opts.shell, prog, _CLI_COMMANDS,
+                               collect('docker'), collect('venv')), end="")
     return 0
 
 
-def main(target: str = "docker", prog: str = "odoo-compose") -> None:
-    # Also accept the native CLI as a subcommand of the Docker entry point.
-    # This works both for installed `odoo-compose` and for a standalone script.
-    if target == "docker" and sys.argv[1:2] == ["venv"]:
-        sys.argv.pop(1)
-        target = "venv"
-        prog = f"{prog} venv"
+def main() -> None:
+    """Dispatch workspace commands only after an explicit workflow selection."""
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in ("docker", "venv"):
+        parser = build_parser()
+        if not argv:
+            parser.print_help()
+            return
+        if argv[0] in ("--help", "-h", "--version"):
+            parser.parse_args(argv)
+            return
+        if argv[0] == "completion":
+            raise SystemExit(_run_completion_cli(argv[1:]))
+        if argv[0] in _CLI_COMMANDS_NAMES:
+            parser.error(
+                "Missing workflow: use 'odoo-compose docker " + argv[0] +
+                "' or 'odoo-compose venv " + argv[0] + "'."
+            )
+        parser.error("Expected workflow 'docker' or 'venv' before the command.")
+
+    target = argv[0]
+    prog = f"odoo-compose {target}"
+    original_argv = sys.argv[:]
+    sys.argv.pop(1)
 
     # Standard logging to stdout only.
     logging.basicConfig(
@@ -7159,18 +7152,18 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
         stream=sys.stdout,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # --help, --version and completion should remain clean and side-effect free.
+    if (sys.argv[1:2] and sys.argv[1] in _CLI_COMMANDS_NAMES
+            and not any(flag in sys.argv[2:] for flag in ("--help", "-h", "--version"))):
+        _logger.info("Workflow: %s (explicit)", target)
     if sys.argv[1:2] and sys.argv[1] in ("up", "down", "status"):
         raise SystemExit(_run_lifecycle_cli(target, sys.argv[1], sys.argv[2:], prog))
-    if sys.argv[1:2] == ["completion"]:
-        raise SystemExit(_run_completion_cli(target, sys.argv[2:], prog))
     if sys.argv[1:2] and sys.argv[1] in ("run", "shell", "update", "test"):
         raise SystemExit(_run_odoo_cli(target, sys.argv[1], sys.argv[2:], prog))
     if sys.argv[1:2] == ["neutralize"]:
         raise SystemExit(_run_neutralize_cli(target, sys.argv[2:], prog))
     if sys.argv[1:2] and sys.argv[1] in _BACKUP_RESTORE_SCRIPT_NAMES:
         raise SystemExit(_run_backup_restore_cli(target, sys.argv[1], sys.argv[2:], prog))
-    _logger.info("%s %s", prog, __version__)
-
     # All workspace provisioning is explicitly dispatched through `setup`.
     # Plain invocations only print CLI help, and never touch the workspace.
     if sys.argv[1:2] != ["setup"]:
@@ -7306,7 +7299,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 no_data_dir=no_data_dir,
                 # Bundle import is the offline deployment path. Local-development
                 # Docker artifacts intentionally require online dependency resolution
-                # and can be generated later by a normal odoo-compose run.
+                # and can be generated later by a normal odoo-compose docker run.
                 target="venv",
                 create_docker_deploy_requested=False,
                 bundle_output=None,
@@ -7314,7 +7307,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
                 vars_overrides=vars_overrides,
                 ini_overrides=ini_overrides,
                 no_provisioning_log=no_provisioning_log,
-                cli_argv=sys.argv,
+                cli_argv=original_argv,
                 source_ini_layers=[_path_for_report(bundle_path)],
                 project_ini_status=(
                     f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from workspace bundle "
@@ -7584,7 +7577,7 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             no_provisioning_log=no_provisioning_log,
-            cli_argv=sys.argv,
+            cli_argv=original_argv,
             source_ini_layers=source_ini_layers,
             project_ini_status=project_ini_status,
             preserved_db_name=preserved_db_name,
@@ -7593,11 +7586,6 @@ def main(target: str = "docker", prog: str = "odoo-compose") -> None:
     except Exception as e:
         _logger.error(f'{e}')
         raise SystemExit(1)
-
-
-def main_venv() -> None:
-    """Entry point for native Odoo workspaces (venv is opt-in)."""
-    main(target="venv", prog="odoo-compose-venv")
 
 
 if __name__ == "__main__":

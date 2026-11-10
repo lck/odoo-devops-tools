@@ -41,7 +41,7 @@ jobs:
             }
           }
           ini_docker() {
-            odoo-compose setup "$@" > "$tmp/cli.log" 2>&1 || {
+            odoo-compose docker setup "$@" > "$tmp/cli.log" 2>&1 || {
               cat "$tmp/cli.log"
               return 1
             }
@@ -134,7 +134,7 @@ jobs:
           reject --init --root "$tmp/native-init"
           reject --init-project "$tmp/native-init"
           odoo-compose venv setup --help | grep -Fq 'usage: odoo-compose venv setup'
-          odoo-compose setup --help | grep -Fq 'usage: odoo-compose setup'
+          odoo-compose docker setup --help | grep -Fq 'usage: odoo-compose docker setup'
 
           echo '--- Implicit --set / -S / -e / --extra-var ---'
           mkdir -p "$tmp/implicit"
@@ -507,7 +507,7 @@ jobs:
             if [[ "$mode" == native ]]; then
               command=(odoo-compose venv)
             else
-              command=(odoo-compose)
+              command=(odoo-compose docker)
             fi
             PATH="$tmp/sql-mock-bin:$PATH" "${command[@]}" neutralize --root "$work" --dry-run > "$work/cli.log" 2>&1 || {
               cat "$work/cli.log"; exit 1;
@@ -571,13 +571,13 @@ jobs:
           SH
           chmod +x "$tmp/direct-mock-bin/docker"
           export ODT_DIRECT_LOG="$tmp/direct.log"
-          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose run --root "$work" -i base --stop-after-init
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose docker run --root "$work" -i base --stop-after-init
           contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps odoo -- -c /etc/odoo/odoo.conf -d odt_direct_test -i base --stop-after-init' 'Docker run forwards Odoo arguments'
-          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose shell --root "$work" --no-http
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose docker shell --root "$work" --no-http
           contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps --entrypoint odoo odoo shell -c /etc/odoo/odoo.conf -d odt_direct_test --no-http' 'Docker shell forwards Odoo arguments'
-          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose update --root "$work" --all
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose docker update --root "$work" --all
           contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps -T --entrypoint click-odoo-update odoo -c /etc/odoo/odoo.conf -d odt_direct_test --log-level debug --update-all' 'update --all maps to click-odoo-update --update-all'
-          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose test --root "$work" -i sale --test-tags /sale
+          PATH="$tmp/direct-mock-bin:$PATH" odoo-compose docker test --root "$work" -i sale --test-tags /sale
           contains "$ODT_DIRECT_LOG" 'compose run --rm --no-deps -T odoo -- -c /etc/odoo/odoo.conf -d odt_direct_test --test-enable --stop-after-init -i sale --test-tags /sale' 'Docker test uses test flags and forwards Odoo options'
           ini --root "$work"
           for helper in run shell update test instance; do
@@ -629,8 +629,7 @@ jobs:
 
           echo '--- All CLI commands provide standalone --help ---'
           for target in docker venv; do
-            cli=(odoo-compose)
-            if [[ "$target" == venv ]]; then cli+=(venv); fi
+            cli=(odoo-compose "$target")
             for action in run shell update neutralize backup-db restore-db backup-filestore restore-filestore restic backup-filestore-restic restore-filestore-restic; do
               "${cli[@]}" "$action" --root "$tmp/nonexistent-help-workspace" --help > "$tmp/subcommand-help.txt" 2>&1
               contains "$tmp/subcommand-help.txt" "usage: ${cli[*]} $action" "${cli[*]} $action has its own --help"
@@ -640,10 +639,10 @@ jobs:
             "${cli[@]}" test --root "$tmp/nonexistent-help-workspace" --help > "$tmp/subcommand-help.txt" 2>&1
             contains "$tmp/subcommand-help.txt" "usage: ${cli[*]} test" "${cli[*]} test has its own --help"
           done
-          odoo-compose update --help > "$tmp/subcommand-help.txt" 2>&1
+          odoo-compose docker update --help > "$tmp/subcommand-help.txt" 2>&1
           contains "$tmp/subcommand-help.txt" '--all' 'update help documents --all'
           odoo-compose --help > "$tmp/subcommand-help.txt" 2>&1
-          contains "$tmp/subcommand-help.txt" 'Commands:' 'Docker top-level help lists commands'
+          contains "$tmp/subcommand-help.txt" 'Workflows (required for workspace commands):' 'global top-level help lists workflows'
           odoo-compose venv --help > "$tmp/subcommand-help.txt" 2>&1
           contains "$tmp/subcommand-help.txt" 'Commands:' 'native top-level help lists commands'
 

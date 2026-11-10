@@ -107,7 +107,7 @@ Add-Content -Path $PROFILE -Value 'odoo-compose completion powershell | Out-Stri
 ```
 
 Restart your shell or reload its configuration to activate completion. For example,
-`odoo-compose setup --sy<TAB>` suggests matching options such as `--sync`,
+`odoo-compose docker setup --sy<TAB>` suggests matching options such as `--sync`,
 `--sync-odoo`, `--sync-addons`, and `--sync-all`.
 
 ---
@@ -116,17 +116,17 @@ Restart your shell or reload its configuration to activate completion. For examp
 
 `odoo-devops-tools` supports two development workflows:
 
-- **Docker workflow (`odoo-compose`)** — run Odoo and PostgreSQL with the generated Docker Compose environment.
+- **Docker workflow (`odoo-compose docker`)** — run Odoo and PostgreSQL with the generated Docker Compose environment.
 - **Native development with venv (`odoo-compose venv`)** — run Odoo directly on the host using a generated Python virtual environment.
 
-Choose the workflow that fits your environment. Both use the same `odoo-project.ini` project definition.
+Every workspace command must specify its workflow explicitly (`docker` or `venv`); no implicit default is used. Both share the same `odoo-project.ini` project definition. `odoo-compose --help`, `odoo-compose --version` and `odoo-compose completion SHELL` remain global.
 
 ## 1. Docker workflow
 
 Create a new workspace:
 
 ```bash
-odoo-compose setup ./odoo19
+odoo-compose docker setup ./odoo19
 ```
 
 This creates `./odoo19/odoo-project.ini` with this initial content:
@@ -140,13 +140,13 @@ Then prepare and start the Docker Compose environment:
 
 ```bash
 cd ./odoo19
-odoo-compose up --build
+odoo-compose docker up --build
 ```
 
 Optionally initialize the Odoo database from the command line instead of through the web interface:
 
 ```bash
-odoo-compose run -i base --without-demo=all --stop-after-init
+odoo-compose docker run -i base --without-demo=all --stop-after-init
 ```
 
 Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localhost:8069.
@@ -155,8 +155,8 @@ Docker Compose runs both Odoo and PostgreSQL. Odoo is available at http://localh
 > By default, generated Compose services use `restart: unless-stopped`; to prevent a development stack from automatically starting after a host or Docker restart, run:
 > 
 > ```bash
-> odoo-compose setup --set docker:restart=no
-> odoo-compose up --build
+> odoo-compose docker setup --set docker:restart=no
+> odoo-compose docker up --build
 > ```
 
 ### 1.1. Adding extra addons
@@ -178,8 +178,8 @@ branch = ${odoo:version}
 Sync the addon repositories and regenerate the Docker environment:
 
 ```bash
-odoo-compose setup --sync
-odoo-compose up --build
+odoo-compose docker setup --sync
+odoo-compose docker up --build
 ```
 
 The repositories are cloned into `ROOT/odoo-addons/` and bind-mounted into the Odoo container. Python dependencies from their `requirements.txt` files are included when rebuilding the Docker image.
@@ -187,13 +187,13 @@ The repositories are cloned into `ROOT/odoo-addons/` and bind-mounted into the O
 Install the new modules:
 
 ```bash
-odoo-compose run -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
+odoo-compose docker run -i web_notify,helpdesk_mgmt --without-demo=all --stop-after-init
 ```
 
 For subsequent addon updates, use:
 
 ```bash
-odoo-compose update
+odoo-compose docker update
 ```
 
 ### 1.2. Running Odoo from workspace source
@@ -217,8 +217,8 @@ odoo_source = workspace
 Sync the Odoo source and generate the Docker artifacts:
 
 ```bash
-odoo-compose setup --sync
-odoo-compose up --build
+odoo-compose docker setup --sync
+odoo-compose docker up --build
 ```
 
 The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Python source from the base image is removed while its installed dependencies remain available.
@@ -228,15 +228,15 @@ The resolved Odoo source is bind-mounted read-only at `/opt/odoo`. The Odoo Pyth
 Enable Mailpit in the local Docker workflow when you need to inspect or test email without sending it to a real SMTP server:
 
 ```bash
-odoo-compose setup --set docker:mailpit_enabled=true
-odoo-compose up
+odoo-compose docker setup --set docker:mailpit_enabled=true
+odoo-compose docker up
 ```
 
 Mailpit is available at http://localhost:8025 by default. When running multiple workspaces, override the host web UI port, for example:
 
 ```bash
-odoo-compose setup --set docker:mailpit_enabled=true --set docker:mailpit_webui_port=8026
-odoo-compose up
+odoo-compose docker setup --set docker:mailpit_enabled=true --set docker:mailpit_webui_port=8026
+odoo-compose docker up
 ```
 
 The generated local Odoo configuration sends outgoing email to `mailpit:1025`. When Mailpit is enabled, local Docker SMTP connection settings (`smtp_server`, `smtp_port`, `smtp_ssl`, `smtp_user`, and `smtp_password`) are intentionally overridden; the deploy configuration keeps the values from `[config]` unchanged.
@@ -281,7 +281,7 @@ Each option is independent and optional. If an option is missing or empty, `odoo
 Apply the updated resource limits and start the services. `up` regenerates the Compose configuration automatically, so no separate `setup` or image rebuild is necessary:
 
 ```bash
-odoo-compose up
+odoo-compose docker up
 ```
 
 ### 1.6. Creating a Docker deploy build context
@@ -291,13 +291,13 @@ Use `--create-docker-deploy` to generate a self-contained Docker build context f
 Addon modules are staged into the build context so the resulting image does not depend on bind-mounted workspace sources:
 
 ```bash
-odoo-compose setup --sync --create-docker-deploy
+odoo-compose docker setup --sync --create-docker-deploy
 ```
 
 When `[docker].odoo_source = workspace`, sync the Odoo source as well:
 
 ```bash
-odoo-compose setup --sync --create-docker-deploy
+odoo-compose docker setup --sync --create-docker-deploy
 ```
 
 This additionally creates:
@@ -598,11 +598,11 @@ my-project/
 Then run the Docker workflow from the project directory:
 
 ```bash
-python odoo_compose.py setup --sync
-python odoo_compose.py up --build
+python odoo_compose.py docker setup --sync
+python odoo_compose.py docker up --build
 ```
 
-For the native venv workflow, add `venv` before the command:
+For the native venv workflow, choose the `venv` prefix:
 
 ```bash
 python odoo_compose.py venv setup --sync --create-venv
@@ -613,13 +613,13 @@ python odoo_compose.py venv run
 
 ## Runtime lifecycle
 
-Use the same lifecycle commands with either CLI after provisioning the workspace with `setup`:
+Use the same lifecycle commands with either workflow after provisioning the workspace with `setup`:
 
 ```bash
 # Docker: generate Docker config and start the Compose stack
-odoo-compose up --build
-odoo-compose status
-odoo-compose down
+odoo-compose docker up --build
+odoo-compose docker status
+odoo-compose docker down
 
 # Native: generate config and start Odoo in the background
 odoo-compose venv up
@@ -627,9 +627,9 @@ odoo-compose venv status
 odoo-compose venv down
 ```
 
-`odoo-compose up` regenerates local workspace artifacts and then runs the equivalent of `docker compose up -d --wait`.
+`odoo-compose docker up` regenerates local workspace artifacts and then runs the equivalent of `docker compose up -d --wait`.
 
-`odoo-compose up --build` additionally builds the images (`docker compose up -d --build --wait`).
+`odoo-compose docker up --build` additionally builds the images (`docker compose up -d --build --wait`).
 
 Container orchestration remains with Docker Compose, and its CLI can still be used directly for advanced or service-specific operations.
 
@@ -639,9 +639,9 @@ Container orchestration remains with Docker Compose, and its CLI can still be us
 
 ## Commands
 
-`odoo-compose` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
+`odoo-compose docker` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
 
-Running either CLI without a command displays help; workspace changes are performed through `setup`. Use `odoo-compose <command> --help` or `odoo-compose venv <command> --help` for command-specific help. The global `--version` option shows the installed CLI version. Use `--root ROOT` to select a workspace outside the current directory where supported.
+Running `odoo-compose` without arguments displays help. Workspace commands require an explicit `docker` or `venv` prefix; bare commands such as `odoo-compose setup` are no longer accepted. Use `odoo-compose docker <command> --help` or `odoo-compose venv <command> --help` for command-specific help. The global `--version` option shows the installed CLI version. Use `--root ROOT` to select a workspace outside the current directory where supported.
 
 ### Overview
 
@@ -720,9 +720,9 @@ Alternatively, load the workspace definition from a local INI file, Git reposito
 
 ```bash
 # Docker workflow:
-odoo-compose setup /path/to/odoo-project.ini
-odoo-compose setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
-odoo-compose setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
+odoo-compose docker setup /path/to/odoo-project.ini
+odoo-compose docker setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
+odoo-compose docker setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 
 # Native workflow:
 odoo-compose venv setup /path/to/odoo-project.ini
@@ -818,8 +818,8 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
 ```bash
 # Docker workflow:
-odoo-compose setup ./odoo19
-odoo-compose setup ./odoo18 --set odoo:version=18.0
+odoo-compose docker setup ./odoo19
+odoo-compose docker setup ./odoo18 --set odoo:version=18.0
 
 # Native workflow:
 odoo-compose venv setup ./odoo19 --sync --create-venv
@@ -834,7 +834,7 @@ Prepare and start the selected workspace. Requires an existing `odoo-project.ini
 
 ```text
 {odoo-compose|odoo-compose venv} up [--root ROOT]
-odoo-compose up [--root ROOT] [--build] [--recreate]
+odoo-compose docker up [--root ROOT] [--build] [--recreate]
 ```
 
 **Options**
@@ -928,7 +928,7 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 
 ```bash
 # Docker workflow:
-odoo-compose run -i base --stop-after-init
+odoo-compose docker run -i base --stop-after-init
 
 # Native workflow:
 odoo-compose venv run -i base --stop-after-init
@@ -964,7 +964,7 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 
 ```bash
 # Docker workflow:
-odoo-compose shell
+odoo-compose docker shell
 
 # Native workflow:
 odoo-compose venv shell
@@ -1003,7 +1003,7 @@ Update installed Odoo addons through `click-odoo-update`.
 
 ```bash
 # Docker workflow:
-odoo-compose update --all
+odoo-compose docker update --all
 
 # Native workflow:
 odoo-compose venv update --all
@@ -1039,7 +1039,7 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 
 ```bash
 # Docker workflow:
-odoo-compose test -i sale --test-tags /sale
+odoo-compose docker test -i sale --test-tags /sale
 
 # Native workflow:
 odoo-compose venv test -i sale --test-tags /sale
@@ -1077,7 +1077,7 @@ Create a PostgreSQL custom-format database dump.
 
 ```bash
 # Docker workflow:
-odoo-compose backup-db
+odoo-compose docker backup-db
 
 # Native only: select a specific version of the PostgreSQL client tools
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
@@ -1128,9 +1128,9 @@ Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults
 
 ```bash
 # Docker workflow:
-odoo-compose restore-db ./odoo-backups/pre-upgrade.dump
-odoo-compose restore-db --force --copy ./odoo-backups/pre-upgrade.dump
-odoo-compose restore-db --move ./odoo-backups/pre-upgrade.dump
+odoo-compose docker restore-db ./odoo-backups/pre-upgrade.dump
+odoo-compose docker restore-db --force --copy ./odoo-backups/pre-upgrade.dump
+odoo-compose docker restore-db --move ./odoo-backups/pre-upgrade.dump
 
 # Native only: optionally override PostgreSQL client location
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
@@ -1172,7 +1172,7 @@ Archive the selected database's filestore as a `.tar.gz` file.
 
 ```bash
 # Docker workflow:
-odoo-compose backup-filestore
+odoo-compose docker backup-filestore
 
 # Native workflow:
 odoo-compose venv backup-filestore
@@ -1213,8 +1213,8 @@ Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo be
 
 ```bash
 # Docker workflow:
-odoo-compose restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
-odoo-compose restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose docker restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
+odoo-compose docker restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
 
 # Native workflow:
 odoo-compose venv restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
@@ -1259,9 +1259,9 @@ export RESTIC_REPOSITORY=/srv/restic/odoo
 export RESTIC_PASSWORD_FILE=/etc/restic/odoo-password
 
 # Docker workflow:
-odoo-compose restic init
-odoo-compose restic snapshots
-odoo-compose restic check
+odoo-compose docker restic init
+odoo-compose docker restic snapshots
+odoo-compose docker restic check
 
 # Native only: select a Restic executable instead of using PATH
 export RESTIC_BIN=/opt/restic/restic
@@ -1303,7 +1303,7 @@ Back up the selected database's filestore as a Restic snapshot.
 
 ```bash
 # Docker workflow:
-odoo-compose backup-filestore-restic
+odoo-compose docker backup-filestore-restic
 
 # Native only: optional Restic executable override
 export RESTIC_BIN=/opt/restic/restic
@@ -1346,7 +1346,7 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 
 ```bash
 # Docker workflow:
-odoo-compose restore-filestore-restic --force latest
+odoo-compose docker restore-filestore-restic --force latest
 
 # Native workflow:
 odoo-compose venv restore-filestore-restic --force latest
@@ -1379,9 +1379,9 @@ Neutralize a restored production database for development or testing, then execu
 
 ```bash
 # Docker workflow:
-odoo-compose neutralize
-odoo-compose neutralize --dry-run
-odoo-compose neutralize --dry-run ./preview-sql
+odoo-compose docker neutralize
+odoo-compose docker neutralize --dry-run
+odoo-compose docker neutralize --dry-run ./preview-sql
 
 # Native workflow:
 odoo-compose venv neutralize
@@ -1434,10 +1434,10 @@ Neutralization is a separate step after restoring the database and filestore:
 ```bash
 # Docker workflow:
 docker compose stop odoo
-odoo-compose restore-db --copy ./odoo-backups/production.dump
-odoo-compose restore-filestore ./odoo-backups/production-filestore.tar.gz
-odoo-compose update --all
-odoo-compose neutralize
+odoo-compose docker restore-db --copy ./odoo-backups/production.dump
+odoo-compose docker restore-filestore ./odoo-backups/production-filestore.tar.gz
+odoo-compose docker update --all
+odoo-compose docker neutralize
 docker compose up -d odoo
 
 # Native workflow:
@@ -1668,7 +1668,7 @@ target = /mnt/exchange
 The same share can be configured through the CLI:
 
 ```bash
-odoo-compose setup \
+odoo-compose docker setup \
   --set docker.share.exchange:source=/mnt/nfs/exchange \
   --set docker.share.exchange:target=/mnt/exchange
 ```

@@ -21,32 +21,37 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq zsh fish
           python -m pip install --no-deps -e .
-      - name: Verify Docker, native and standalone entry points
+      - name: Verify mandatory workflow prefixes and standalone script
         shell: bash
         run: |
           set -euo pipefail
-          odoo-compose --help | grep -F 'venv COMMAND' > /dev/null
-          odoo-compose setup --help | grep -F -- '--create-docker-deploy' > /dev/null
-          ! odoo-compose setup --help | grep -F -- '--create-venv' > /dev/null
+          odoo-compose --help | grep -F 'Workflows' > /dev/null
+          odoo-compose --help | grep -F 'docker' > /dev/null
+          odoo-compose --version | grep -F 'odoo-compose ' > /dev/null
+          odoo-compose | grep -F 'Workflows' > /dev/null
+          if odoo-compose setup > "$RUNNER_TEMP/missing-workflow.log" 2>&1; then
+            echo 'Bare setup unexpectedly succeeded'; exit 1
+          fi
+          grep -F 'Missing workflow' "$RUNNER_TEMP/missing-workflow.log"
+          if odoo-compose up > /dev/null 2>&1; then echo 'Bare up succeeded'; exit 1; fi
+          odoo-compose docker setup --help | grep -F -- '--create-docker-deploy' > /dev/null
+          ! odoo-compose docker setup --help | grep -F -- '--create-venv' > /dev/null
           odoo-compose venv --help | grep -F 'odoo-compose venv' > /dev/null
           odoo-compose venv setup --help | grep -F -- '--create-venv' > /dev/null
           ! odoo-compose venv setup --help | grep -F -- '--create-docker-deploy' > /dev/null
           odoo-compose venv --version | grep -F 'odoo-compose venv ' > /dev/null
-          # Both completion entry points emit the same script for the installed CLI.
-          diff <(odoo-compose completion bash) <(odoo-compose venv completion bash)
+          # Shell completion is a global command only.
+          if odoo-compose docker completion bash > /dev/null 2>&1; then echo 'Completion should be global'; exit 1; fi
           python -S odoo_devops_tools/odoo_compose.py venv setup --help | grep -F -- '--create-venv' > /dev/null
-          # Legacy entry point stays installed for backward compatibility.
-          odoo-compose-venv setup --help | grep -F -- '--create-venv' > /dev/null
-          new_version="$(odoo-compose venv --version | tail -1)"
-          old_version="$(odoo-compose-venv --version | tail -1)"
-          [[ "${new_version#odoo-compose venv }" == "${old_version#odoo-compose-venv }" ]]
+          # Removed the former second console entry point.
+          if command -v odoo-compose-venv >/dev/null; then echo 'Legacy executable is still installed'; exit 1; fi
           root="$(mktemp -d)"
           trap 'rm -rf "$root"' EXIT
           odoo-compose venv setup --root "$root/native" --no-provisioning-log
           test -f "$root/native/odoo-project.ini"
           test -f "$root/native/odoo-configs/odoo-server.conf"
           test ! -e "$root/native/compose.yaml"
-      - name: Verify Bash completion for Docker and nested venv
+      - name: Verify Bash completion for both mandatory workflows
         shell: bash
         run: |
           set -euo pipefail
@@ -58,13 +63,19 @@ jobs:
           COMP_WORDS=(odoo-compose venv); COMP_CWORD=1
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " == *' venv '* ]]
-          COMP_WORDS=(odoo-compose up); COMP_CWORD=1
+          COMP_WORDS=(odoo-compose do); COMP_CWORD=1
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' docker '* ]]
+          COMP_WORDS=(odoo-compose se); COMP_CWORD=1
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " != *' setup '* ]]
+          COMP_WORDS=(odoo-compose docker up); COMP_CWORD=2
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " == *' up '* ]]
-          COMP_WORDS=(odoo-compose setup --sy); COMP_CWORD=2
+          COMP_WORDS=(odoo-compose docker setup --sy); COMP_CWORD=3
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " == *' --sync '* ]]
-          COMP_WORDS=(odoo-compose setup --cre); COMP_CWORD=2
+          COMP_WORDS=(odoo-compose docker setup --cre); COMP_CWORD=3
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " == *' --create-docker-deploy '* ]]
           [[ " ${COMPREPLY[*]} " != *' --create-venv '* ]]
@@ -81,7 +92,7 @@ jobs:
           COMP_WORDS=(odoo-compose venv up --b); COMP_CWORD=3
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " != *' --build '* ]]
-          COMP_WORDS=(odoo-compose venv completion po); COMP_CWORD=3
+          COMP_WORDS=(odoo-compose completion po); COMP_CWORD=2
           _odoo_compose_completion
           [[ " ${COMPREPLY[*]} " == *' powershell '* ]]
 
@@ -94,13 +105,10 @@ jobs:
             [[ " ${COMPREPLY[*]} " == *' odoo-backups/latest.dump '* ]]
           )
 
-          # The legacy executable retains its own completions.
-          odoo-compose-venv completion bash > "$RUNNER_TEMP/legacy.bash"
-          bash -n "$RUNNER_TEMP/legacy.bash"
-          source "$RUNNER_TEMP/legacy.bash"
-          COMP_WORDS=(odoo-compose-venv setup --cre); COMP_CWORD=2
-          _odoo_compose_venv_completion
-          [[ " ${COMPREPLY[*]} " == *' --create-venv '* ]]
+          # Top-level completion only suggests workflows and the global command.
+          COMP_WORDS=(odoo-compose docker se); COMP_CWORD=2
+          _odoo_compose_completion
+          [[ " ${COMPREPLY[*]} " == *' setup '* ]]
       - name: Verify Zsh and Fish completion
         shell: bash
         run: |
@@ -109,13 +117,14 @@ jobs:
           odoo-compose completion fish > "$RUNNER_TEMP/odoo-compose.fish"
           zsh -n "$RUNNER_TEMP/odoo-compose.zsh"
           fish -n "$RUNNER_TEMP/odoo-compose.fish"
-          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose setup --sy'" | grep -F 'sync-all'
+          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose do'" | grep -F 'docker'
+          fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose docker setup --sy'" | grep -F 'sync-all'
           fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --sy'" | grep -F 'sync-all'
           fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --cre'" | grep -F -- '--create-venv'
           ! fish -c "source '$RUNNER_TEMP/odoo-compose.fish'; complete -C 'odoo-compose venv setup --cre'" | grep -F -- '--create-docker-deploy'
 
   windows:
-    name: PowerShell
+    name: Windows / PowerShell
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -123,31 +132,85 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install CLI
+        shell: pwsh
         run: python -m pip install --no-deps -e .
-      - name: Verify native prefix and legacy entry point
+
+      # subprocess captures the expected argparse exit code and stderr itself.
+      # PowerShell never invokes a deliberately failing native command.
+      - name: Verify workflow CLI on Windows
         shell: pwsh
         run: |
-          $help = & odoo-compose venv setup --help | Out-String
-          if ($LASTEXITCODE -ne 0 -or -not $help.Contains('--create-venv') -or $help.Contains('--create-docker-deploy')) {
-            throw 'odoo-compose venv did not select the native workflow'
+          @'
+          import shutil
+          import subprocess
+          import sys
+
+          cli = shutil.which("odoo-compose")
+          if not cli:
+              sys.exit("odoo-compose executable was not found on PATH")
+
+          def check(args, *, code=0, include=(), exclude=()):
+              result = subprocess.run(
+                  [cli, *args], capture_output=True, text=True,
+                  encoding="utf-8", errors="replace", check=False,
+              )
+              output = result.stdout + result.stderr
+              problems = []
+              if result.returncode != code:
+                  problems.append(f"exit code {result.returncode}, expected {code}")
+              problems.extend(f"missing {item!r}" for item in include if item not in output)
+              problems.extend(f"unexpected {item!r}" for item in exclude if item in output)
+              if problems:
+                  print(f"FAIL: odoo-compose {' '.join(args)}: {'; '.join(problems)}")
+                  print(output)
+                  sys.exit(1)
+              print(f"PASS: odoo-compose {' '.join(args)}")
+
+          check(["--version"], include=("odoo-compose",))
+          check(["docker", "--version"], include=("odoo-compose docker",))
+          check(["venv", "--version"], include=("odoo-compose venv",))
+          check(["docker", "setup", "--help"],
+                include=("--create-docker-deploy",), exclude=("--create-venv",))
+          check(["venv", "setup", "--help"],
+                include=("--create-venv",), exclude=("--create-docker-deploy",))
+          check(["setup"], code=2, include=("Missing workflow",))
+          check(["up"], code=2, include=("Missing workflow",))
+          check(["completion", "powershell"], include=("Register-ArgumentCompleter",))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows workflow CLI checks failed' }
+
+      # Only successful CLI commands execute directly in PowerShell.
+      # Exercise real tab completion, not just generated script content.
+      - name: Verify PowerShell tab completion
+        shell: pwsh
+        run: |
+          $completionScript = & odoo-compose completion powershell | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $completionScript.Contains('Register-ArgumentCompleter')) {
+            throw 'Could not generate PowerShell completion'
           }
-          & odoo-compose venv --version
-          if ($LASTEXITCODE -ne 0) { throw 'odoo-compose venv --version failed' }
-          & odoo-compose-venv setup --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Legacy entry point stopped working' }
-      - name: Verify PowerShell completion
-        shell: pwsh
-        run: |
-          & odoo-compose completion powershell | Out-String | Invoke-Expression
-          foreach ($test in @(
-            @{ Line = 'odoo-compose set'; Expected = 'setup' },
-            @{ Line = 'odoo-compose ve'; Expected = 'venv' },
-            @{ Line = 'odoo-compose venv set'; Expected = 'setup' },
-            @{ Line = 'odoo-compose venv setup --create-v'; Expected = '--create-venv' }
-          )) {
-            $inputLine = $test.Line
-            $matches = [System.Management.Automation.CommandCompletion]::CompleteInput(
-              $inputLine, $inputLine.Length, $null
-            ).CompletionMatches.CompletionText
-            if ($test.Expected -notin $matches) { throw "Missing $($test.Expected) completion for $inputLine" }
+          Invoke-Expression $completionScript
+
+          $cases = @(
+            @{ Line = 'odoo-compose do'; Present = 'docker' },
+            @{ Line = 'odoo-compose ve'; Present = 'venv' },
+            @{ Line = 'odoo-compose se'; Absent = 'setup' },
+            @{ Line = 'odoo-compose docker set'; Present = 'setup' },
+            @{ Line = 'odoo-compose venv set'; Present = 'setup' },
+            @{ Line = 'odoo-compose docker setup --create-d'; Present = '--create-docker-deploy'; Absent = '--create-venv' },
+            @{ Line = 'odoo-compose venv setup --create-v'; Present = '--create-venv'; Absent = '--create-docker-deploy' }
+          )
+          foreach ($case in $cases) {
+            $line = [string]$case.Line
+            $suggestions = @(
+              [System.Management.Automation.CommandCompletion]::CompleteInput(
+                $line, $line.Length, $null
+              ).CompletionMatches | ForEach-Object { $_.CompletionText }
+            )
+            if ($case.ContainsKey('Present') -and $case.Present -notin $suggestions) {
+              throw "Missing '$($case.Present)' for '$line'. Got: $($suggestions -join ', ')"
+            }
+            if ($case.ContainsKey('Absent') -and $case.Absent -in $suggestions) {
+              throw "Unexpected '$($case.Absent)' for '$line'. Got: $($suggestions -join ', ')"
+            }
+            Write-Host "PASS: $line"
           }

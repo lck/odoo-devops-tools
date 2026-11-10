@@ -125,7 +125,7 @@ jobs:
           chmod +x "$base/bin/docker"
           export PATH="$base/bin:$PATH"
 
-          cli() { odoo-compose "$@" --root "$root"; }
+          cli() { odoo-compose docker "$@" --root "$root"; }
           has() { grep -Fq -- "$1" "$FAKE_DOCKER_LOG"; }
           not_has() { ! has "$1"; }
 
