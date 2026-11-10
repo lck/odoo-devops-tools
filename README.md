@@ -525,13 +525,13 @@ odoo-compose venv setup --sync --create-venv --create-bundle
 When no output path is supplied, the bundle is written to:
 
 ```text
-ROOT/dist/ROOT-NAME.odt.zip
+ROOT/bundles/ROOT-NAME-bundle.zip
 ```
 
 You can also select an explicit output file:
 
 ```bash
-odoo-compose venv setup --sync --create-venv --create-bundle ./artifacts/odoo18-production.odt.zip
+odoo-compose venv setup --sync --create-venv --create-bundle ./artifacts/odoo18-production-bundle.zip
 ```
 
 #### 4.1.1. Including uncommitted changes
@@ -549,7 +549,7 @@ odoo-compose venv setup --sync --create-venv --create-bundle --allow-dirty-bundl
 Copy the ZIP to the target machine and import it into an empty directory:
 
 ```bash
-odoo-compose venv setup --create-from-bundle ./odoo18-production.odt.zip \
+odoo-compose venv setup --create-from-bundle ./odoo18-production-bundle.zip \
   --root ./odoo18-prod \
   --set config:db_host=127.0.0.1 \
   --set config:db_name=odoo \
@@ -796,7 +796,7 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dd><p>Remove all items from pip's wheel cache.</p></dd>
 
 <dt><code>--create-bundle</code> <i>[BUNDLE]</i></dt>
-<dd><p>Create a verified portable ZIP containing sources, a sanitized project INI and the wheelhouse (Venv only). Default output: <code>ROOT/dist/ROOT-NAME.odt.zip</code>. Explicit relative paths are resolved from the current directory.</p></dd>
+<dd><p>Create a verified portable ZIP containing sources, a sanitized project INI and the wheelhouse (Venv only). Default output: <code>ROOT/bundles/ROOT-NAME-bundle.zip</code>. Explicit relative paths are resolved from the current directory.</p></dd>
 
 <dt><code>--allow-dirty-bundle</code></dt>
 <dd><p>Allow bundle creation from repositories with uncommitted changes; otherwise dirty repositories abort the operation.</p></dd>

@@ -61,7 +61,7 @@ _DEFAULT_PROJECT_INI_NAME = "odoo-project.ini"
 _BUNDLE_FORMAT = "odt-env-workspace-bundle"
 _BUNDLE_FORMAT_VERSION = 1
 _BUNDLE_MANIFEST_NAME = "manifest.json"
-_BUNDLE_DEFAULT_SUFFIX = ".odt.zip"
+_BUNDLE_DEFAULT_SUFFIX = "-bundle.zip"
 _BUNDLE_ALLOWED_TOP_LEVEL = {
     _BUNDLE_MANIFEST_NAME,
     _DEFAULT_PROJECT_INI_NAME,
@@ -4158,7 +4158,7 @@ def extract_workspace_bundle(bundle_path: Path, root: Path) -> tuple[Path, dict[
 
 def _default_bundle_output(root: Path) -> Path:
     workspace_name = root.name.strip() or "odoo-workspace"
-    return root / "dist" / f"{workspace_name}{_BUNDLE_DEFAULT_SUFFIX}"
+    return root / "bundles" / f"{workspace_name}{_BUNDLE_DEFAULT_SUFFIX}"
 
 
 def _resolve_bundle_output(raw_output: str, root: Path) -> Path:
@@ -5549,7 +5549,7 @@ The virtual environment is recreated only when explicitly requested.
 Examples:
   odoo-compose venv setup ./odoo19 --sync --create-venv
   odoo-compose venv setup -i base.ini -i addons.ini --sync --create-venv
-  odoo-compose venv setup --create-from-bundle ./workspace.odt.zip --root ./restored
+  odoo-compose venv setup --create-from-bundle ./workspace-bundle.zip --root ./restored
 """
 
     parser = argparse.ArgumentParser(
@@ -5660,7 +5660,7 @@ Examples:
             help=(
                 "Create a portable ZIP containing Odoo sources, configured addon sources, "
                 "a sanitized project INI, and the offline wheelhouse. When BUNDLE is omitted, "
-                "write ROOT/dist/ROOT-NAME.odt.zip."
+                "write ROOT/bundles/ROOT-NAME-bundle.zip."
             ),
         )
         parser.add_argument(

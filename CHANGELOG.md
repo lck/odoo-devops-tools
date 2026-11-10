@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Change the default bundle filename from `<root>.odt.zip` to `<root>-bundle.zip`.
+- Change the default bundle output directory from `dist/` to `bundles/`.
+
 ## 1.26.0 (2026-11-07)
 
 ### Added

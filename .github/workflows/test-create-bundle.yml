@@ -117,7 +117,7 @@ jobs:
           cat dirty-bundle-rejected.log
           test "$status" -ne 0
           grep -F -- "--allow-dirty-bundle" dirty-bundle-rejected.log
-          test ! -e source-workspace/dist/source-workspace.odt.zip
+          test ! -e source-workspace/bundles/source-workspace-bundle.zip
 
       - name: Create portable bundle from dirty workspace
         shell: bash
@@ -127,12 +127,12 @@ jobs:
             --create-bundle \
             --allow-dirty-bundle
 
-          test -f source-workspace/dist/source-workspace.odt.zip
+          test -f source-workspace/bundles/source-workspace-bundle.zip
           mkdir -p bundle-artifacts
-          mv source-workspace/dist/source-workspace.odt.zip \
-            bundle-artifacts/source-workspace.odt.zip
+          mv source-workspace/bundles/source-workspace-bundle.zip \
+            bundle-artifacts/source-workspace-bundle.zip
 
-          ls -lh bundle-artifacts/source-workspace.odt.zip
+          ls -lh bundle-artifacts/source-workspace-bundle.zip
 
       - name: Validate bundle manifest and contents
         shell: bash
@@ -146,7 +146,7 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          bundle_path = Path("bundle-artifacts/source-workspace.odt.zip")
+          bundle_path = Path("bundle-artifacts/source-workspace-bundle.zip")
           assert bundle_path.is_file(), bundle_path
 
           with zipfile.ZipFile(bundle_path) as archive:
@@ -224,8 +224,8 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          source_path = Path("bundle-artifacts/source-workspace.odt.zip")
-          target_path = Path("bundle-artifacts/tampered.odt.zip")
+          source_path = Path("bundle-artifacts/source-workspace-bundle.zip")
+          target_path = Path("bundle-artifacts/tampered-bundle.zip")
 
           with zipfile.ZipFile(source_path, "r") as source, zipfile.ZipFile(
               target_path,
@@ -247,7 +247,7 @@ jobs:
         run: |
           set +e
           UV_OFFLINE=1 uv run odoo-compose venv setup \
-            --create-from-bundle bundle-artifacts/tampered.odt.zip \
+            --create-from-bundle bundle-artifacts/tampered-bundle.zip \
             --root tampered-workspace \
             > tampered-bundle-rejected.log 2>&1
           status=$?
@@ -269,7 +269,7 @@ jobs:
         shell: bash
         run: |
           UV_OFFLINE=1 uv run odoo-compose venv setup \
-            --create-from-bundle bundle-artifacts/source-workspace.odt.zip \
+            --create-from-bundle bundle-artifacts/source-workspace-bundle.zip \
             --root restored-workspace \
             --set config:db_password=odoo \
             --set config:db_name=odoo_bundle

@@ -73,6 +73,7 @@ env/
 uv.lock
 build/
 dist/
+bundles/
 *.egg-info/
 
 # tests
