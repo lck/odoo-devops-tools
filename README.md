@@ -110,8 +110,6 @@ Restart your shell or reload its configuration to activate completion. For examp
 `odoo-compose docker setup --sy<TAB>` suggests matching options such as `--sync`,
 `--sync-odoo`, `--sync-addons`, and `--sync-all`.
 
----
-
 ## Usage
 
 `odoo-devops-tools` supports two development workflows:
@@ -1699,3 +1697,22 @@ db_user = odoo
 db_password = odoo
 http_port = 8069
 ```
+
+---
+
+## Running tests
+
+From the repository root:
+
+Install the test dependency with `python -m pip install -e ".[test]"`, then run:
+
+```bash
+pytest                         # All available tests
+pytest -m "not integration"     # Fast tests only
+pytest -m integration          # Integration tests only
+pytest tests/test_git.py       # Specific test file
+```
+
+Integration tests use Docker to prepare Odoo and PostgreSQL automatically.
+Unavailable platform-specific tests are reported as `SKIP`.
+GitHub Actions uses the same pytest commands. See [tests/README.md](tests/README.md).

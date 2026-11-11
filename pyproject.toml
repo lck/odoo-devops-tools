@@ -41,3 +41,11 @@ odoo-compose = "odoo_devops_tools.odoo_compose:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: real Odoo, Docker and PostgreSQL end-to-end tests"]
+addopts = "-ra -s"

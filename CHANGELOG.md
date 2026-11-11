@@ -4,13 +4,8 @@
 
 ### Changed
 
-- **BREAKING:** Require an explicit `docker` or `venv` workflow prefix for all workspace commands.
-- Change the default bundle filename from `<root>.odt.zip` to `<root>-bundle.zip`.
-- Change the default bundle output directory from `dist/` to `bundles/`.
-
-### Removed
-
-- **BREAKING:** Remove the `odoo-compose-venv` entry point. Use `odoo-compose venv <command>` instead.
+- Require an explicit `docker` or `venv` prefix for all commands.
+- Migrate tests to pytest.
 
 ## 1.26.0 (2026-11-07)
 

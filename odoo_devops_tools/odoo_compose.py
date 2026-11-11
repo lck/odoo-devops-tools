@@ -7,12 +7,6 @@ odoo-compose - Build and manage reproducible Odoo workspaces.
 
 Supports Docker Compose and native Python virtual environments.
 Workspaces are defined using an INI project configuration.
-
-Standalone usage:
-    python odoo_compose.py docker setup
-    python odoo_compose.py docker up
-    python odoo_compose.py venv setup
-    python odoo_compose.py venv up
 """
 
 from __future__ import annotations

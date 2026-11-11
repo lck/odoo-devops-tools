@@ -1,0 +1,59 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -e ".[test]"
+      - name: Install shell completion tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fish zsh
+      - name: Verify Docker Engine
+        if: runner.os == 'Linux'
+        run: docker info && docker compose version
+      - name: Prepare Windows PostgreSQL
+        if: runner.os == 'Windows'
+        uses: ikalnytskyi/action-setup-postgres@v8
+        with:
+          username: odoo
+          password: odoo
+          database: postgres
+          port: 5432
+          postgres-version: '16'
+      - uses: astral-sh/setup-uv@v8.1.0
+        if: runner.os == 'Windows'
+      - name: Build Windows Docker CLI mock
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet publish tests/mock-docker/docker.csproj -c Release -r win-x64 --self-contained false -o "$env:RUNNER_TEMP/odt-mock-docker"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:RUNNER_TEMP/odt-mock-docker" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Verify Windows native test prerequisites
+        if: runner.os == 'Windows'
+        env:
+          ODT_TEST_ISOLATED_POSTGRES: '1'
+        run: python -c "from tests.conftest import windows_native_available; assert windows_native_available(), 'Windows native test prerequisites unavailable'"
+      - name: Run every available test
+        env:
+          ODT_TEST_ISOLATED_POSTGRES: '1'
+        run: pytest

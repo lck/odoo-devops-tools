@@ -30,6 +30,7 @@ nosetests.xml
 coverage.xml
 *,cover
 .hypothesis/
+.pytest_cache/
 
 # Translations
 *.mo
@@ -76,8 +77,7 @@ dist/
 bundles/
 *.egg-info/
 
-# tests
-tests
+# Test sources are tracked; Python caches are ignored above.
 
 .env
 .env.*
