@@ -2198,14 +2198,25 @@ def _run(cmd: list[str], cwd: Optional[Path] = None) -> str:
     # shallow fetch and rewrites .git/shallow while it is being read.
     # Disable automatic maintenance for our Git commands without changing the
     # user's persistent Git configuration.
-    run_cmd = ["git", "-c", "maintenance.auto=false", *cmd[1:]] if cmd and cmd[0] == "git" else cmd
-    if cmd and cmd[0] == "git":
+    is_git = bool(cmd and cmd[0] == "git")
+    run_cmd = ["git", "-c", "maintenance.auto=false", *cmd[1:]] if is_git else cmd
+    # Git writes clone/fetch progress to stderr. Stream it directly on a TTY,
+    # just like Docker output; keep normal output capture for scripts and CI.
+    show_progress = (
+        is_git and len(cmd) > 1
+        and cmd[1] in ("clone", "fetch")
+        and sys.stderr.isatty()
+    )
+    if show_progress:
+        run_cmd.insert(4, "--progress")
+    if is_git:
         _logger.info("git: %s (cwd=%s)", " ".join(run_cmd), str(cwd) if cwd else "<cwd>")
     p = subprocess.run(
         run_cmd,
         cwd=str(cwd) if cwd else None,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=None if show_progress else subprocess.PIPE,
     )
 
     out = (p.stdout or "").strip()
@@ -2216,7 +2227,7 @@ def _run(cmd: list[str], cwd: Optional[Path] = None) -> str:
         if err:
             _logger.info("git stderr: %s", err)
     if p.returncode != 0:
-        raise Exception(f"Command failed: {' '.join(cmd)} {p.stdout} {p.stderr}")
+        raise Exception(f"Command failed: {' '.join(cmd)} {p.stdout or ''} {p.stderr or ''}")
     return out
 
 
