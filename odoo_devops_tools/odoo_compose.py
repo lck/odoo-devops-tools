@@ -2200,12 +2200,12 @@ def _run(cmd: list[str], cwd: Optional[Path] = None) -> str:
     # user's persistent Git configuration.
     is_git = bool(cmd and cmd[0] == "git")
     run_cmd = ["git", "-c", "maintenance.auto=false", *cmd[1:]] if is_git else cmd
-    # Git writes clone/fetch progress to stderr. Stream it directly on a TTY,
-    # just like Docker output; keep normal output capture for scripts and CI.
+    # Git writes clone/fetch progress to stderr. Stream it on a TTY (or when
+    # explicitly enabled); otherwise keep output captured for scripts and CI.
     show_progress = (
         is_git and len(cmd) > 1
         and cmd[1] in ("clone", "fetch")
-        and sys.stderr.isatty()
+        and (sys.stderr.isatty() or os.environ.get("ODT_GIT_PROGRESS") == "1")
     )
     if show_progress:
         run_cmd.insert(4, "--progress")
