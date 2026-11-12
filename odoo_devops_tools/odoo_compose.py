@@ -41,7 +41,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-__version__ = "1.27.0"
+__version__ = "1.27.1"
 
 _logger = logging.getLogger("odoo-compose")
 
