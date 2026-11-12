@@ -1704,13 +1704,13 @@ http_port = 8069
 
 From the repository root:
 
-Install the test dependency with `python -m pip install -e ".[test]"`, then run:
+With [uv](https://docs.astral.sh/uv/) installed, run:
 
 ```bash
-pytest                         # All available tests
-pytest -m "not integration"     # Fast tests only
-pytest -m integration          # Integration tests only
-pytest tests/test_git.py       # Specific test file
+uv run pytest                         # All available tests
+uv run pytest -m "not integration"    # Fast tests only
+uv run pytest -m integration          # Integration tests only
+uv run pytest tests/test_git.py       # Specific test file
 ```
 
 Integration tests use Docker to prepare Odoo and PostgreSQL automatically.

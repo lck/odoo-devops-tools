@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.1 (2026-11-12)
+
+### Changed
+
+- Use uv to manage and run tests.
+
 ## 1.27.0 (2026-11-12)
 
 ### Changed

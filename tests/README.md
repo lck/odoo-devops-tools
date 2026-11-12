@@ -1,21 +1,14 @@
 # Tests
 
-Install the test dependency once:
+Run tests from the repository root with uv (which installs the `dev` dependencies automatically):
 
 ```bash
-python -m pip install -e ".[test]"
-```
-
-Run with standard pytest commands from the repository root:
-
-```bash
-pytest                         # Everything available on this machine
-pytest -m "not integration"    # Fast tests, no real Docker/Odoo required
-pytest -m integration          # Only real integrations
-pytest tests/test_git.py       # One functional area
-pytest tests/test_git.py -k clone  # Match test names
-pytest tests/test_git.py::GitSourceSelection::test_shallow_clone_fast_forward_and_divergence  # One test
-pytest tests/test_bundle.py    # Only portable bundle integration
+uv run pytest                             # Everything available on this machine
+uv run pytest -m "not integration"        # Fast tests, no real Docker/Odoo required
+uv run pytest -m integration              # Only real integrations
+uv run pytest tests/test_git.py           # One functional area
+uv run pytest tests/test_git.py -k clone  # Match test names
+uv run pytest tests/test_bundle.py        # Only portable bundle integration
 ```
 
 Tests are organized by feature (`test_cli.py`, `test_ini.py`, `test_git.py`,
