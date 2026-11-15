@@ -703,7 +703,8 @@ Create or update an Odoo workspace. When no project file exists, `setup` creates
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} setup [ROOT|INI] [OPTIONS]
+odoo-compose docker setup [ROOT|INI] [OPTIONS]
+odoo-compose venv setup [ROOT|INI] [OPTIONS]
 ```
 
 **Arguments**
@@ -831,8 +832,8 @@ Prepare and start the selected workspace. Requires an existing `odoo-project.ini
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} up [--root ROOT]
 odoo-compose docker up [--root ROOT] [--build] [--recreate]
+odoo-compose venv up [--root ROOT]
 ```
 
 **Options**
@@ -861,7 +862,8 @@ Stop the selected workspace, preserving data. Docker delegates to `docker compos
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} down [--root ROOT]
+odoo-compose docker down [--root ROOT]
+odoo-compose venv down [--root ROOT]
 ```
 
 **Options**
@@ -882,7 +884,8 @@ Show runtime status without provisioning or changing the workspace. Docker displ
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} status [--root ROOT]
+odoo-compose docker status [--root ROOT]
+odoo-compose venv status [--root ROOT]
 ```
 
 **Options**
@@ -903,7 +906,8 @@ Run Odoo directly from the selected workspace. Docker uses a one-off container; 
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} run [--root ROOT] [ODOO_ARGS...]
+odoo-compose docker run [--root ROOT] [ODOO_ARGS...]
+odoo-compose venv run [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -939,7 +943,8 @@ Open an interactive Odoo shell. Like `run`, this uses a one-off container for Do
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} shell [--root ROOT] [ODOO_ARGS...]
+odoo-compose docker shell [--root ROOT] [ODOO_ARGS...]
+odoo-compose venv shell [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -975,7 +980,8 @@ Update installed Odoo addons through `click-odoo-update`.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} update [--root ROOT] [--all] [ODOO_ARGS...]
+odoo-compose docker update [--root ROOT] [--all] [ODOO_ARGS...]
+odoo-compose venv update [--root ROOT] [--all] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -1014,7 +1020,8 @@ Run Odoo with `--test-enable --stop-after-init` in either workflow.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} test [--root ROOT] [ODOO_ARGS...]
+odoo-compose docker test [--root ROOT] [ODOO_ARGS...]
+odoo-compose venv test [--root ROOT] [ODOO_ARGS...]
 ```
 
 **Arguments**
@@ -1052,7 +1059,8 @@ Create a PostgreSQL custom-format database dump.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} backup-db [--root ROOT] [OUTPUT]
+odoo-compose docker backup-db [--root ROOT] [OUTPUT]
+odoo-compose venv backup-db [--root ROOT] [OUTPUT]
 ```
 
 **Arguments**
@@ -1094,7 +1102,8 @@ Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
+odoo-compose docker restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
+odoo-compose venv restore-db [--root ROOT] [--force] [--copy|--move] BACKUP.dump
 ```
 
 **Arguments**
@@ -1147,7 +1156,8 @@ Archive the selected database's filestore as a `.tar.gz` file.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} backup-filestore [--root ROOT] [OUTPUT]
+odoo-compose docker backup-filestore [--root ROOT] [OUTPUT]
+odoo-compose venv backup-filestore [--root ROOT] [OUTPUT]
 ```
 
 **Arguments**
@@ -1185,7 +1195,8 @@ Restore the selected database's filestore from a `.tar.gz` archive. Stop Odoo be
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
+odoo-compose docker restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
+odoo-compose venv restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
 ```
 
 **Arguments**
@@ -1228,7 +1239,8 @@ Run Restic against the configured repository. Restic supports incremental filest
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} restic [--root ROOT] RESTIC_COMMAND [ARGS...]
+odoo-compose docker restic [--root ROOT] RESTIC_COMMAND [ARGS...]
+odoo-compose venv restic [--root ROOT] RESTIC_COMMAND [ARGS...]
 ```
 
 **Arguments**
@@ -1278,7 +1290,8 @@ Back up the selected database's filestore as a Restic snapshot.
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
+odoo-compose docker backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
+odoo-compose venv backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
 ```
 
 **Arguments**
@@ -1318,7 +1331,8 @@ Restore the selected database's filestore from a Restic snapshot. Stop Odoo befo
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
+odoo-compose docker restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
+odoo-compose venv restore-filestore-restic [--root ROOT] [--force] [SNAPSHOT]
 ```
 
 **Arguments**
@@ -1359,7 +1373,8 @@ Neutralize a restored production database for development or testing, then execu
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
+odoo-compose docker neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
+odoo-compose venv neutralize [--root ROOT] [--dry-run [OUTPUT_DIR]]
 ```
 
 **Options**
@@ -1454,7 +1469,8 @@ Generate shell-completion definitions for either CLI. See [Shell completion](#sh
 **Usage**
 
 ```text
-{odoo-compose|odoo-compose venv} completion {bash|zsh|fish|powershell}
+odoo-compose docker completion {bash|zsh|fish|powershell}
+odoo-compose venv completion {bash|zsh|fish|powershell}
 ```
 
 **Arguments**
