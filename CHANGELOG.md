@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.27.2 (2026-11-15)
+
+### Documentation
+
+- Update Commands Usage.
+
 ## 1.27.1 (2026-11-12)
 
 ### Changed
