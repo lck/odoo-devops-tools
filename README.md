@@ -637,9 +637,9 @@ Container orchestration remains with Docker Compose, and its CLI can still be us
 
 ## Commands
 
-`odoo-compose docker` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts. Commands operate directly through the installed CLI; generated wrapper scripts are not required.
+`odoo-compose docker` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts.
 
-Running `odoo-compose` without arguments displays help. Workspace commands require an explicit `docker` or `venv` prefix; bare commands such as `odoo-compose setup` are no longer accepted. Use `odoo-compose docker <command> --help` or `odoo-compose venv <command> --help` for command-specific help. The global `--version` option shows the installed CLI version. Use `--root ROOT` to select a workspace outside the current directory where supported.
+Running `odoo-compose` without arguments displays help. Use `odoo-compose docker <command> --help` or `odoo-compose venv <command> --help` for command-specific help. Use `--root ROOT` to select a workspace outside the current directory where supported.
 
 ### Overview
 
