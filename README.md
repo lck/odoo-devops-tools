@@ -639,7 +639,12 @@ Container orchestration remains with Docker Compose, and its CLI can still be us
 
 `odoo-compose docker` operates on Docker workspaces; `odoo-compose venv` operates on native Python virtualenv workspaces. Both use `ROOT/odoo-project.ini`, but generate their own workflow artifacts.
 
-Running `odoo-compose` without arguments displays help. Use `odoo-compose docker <command> --help` or `odoo-compose venv <command> --help` for command-specific help. Use `--root ROOT` to select a workspace outside the current directory where supported.
+Running `odoo-compose` without arguments displays help. Use `odoo-compose docker <command> --help` or `odoo-compose venv <command> --help` for command-specific help.
+
+Use `--root ROOT` to select a workspace outside the current directory where supported.
+
+> **Configuration regeneration:** `setup` and `up` regenerate workspace configuration from `odoo-project.ini`.
+> Commands `run`, `shell`, `update`, and `test` do **not** regenerate it; they use previously generated configuration.
 
 ### Overview
 
@@ -827,7 +832,12 @@ odoo-compose venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-ven
 
 ### `up`
 
-Prepare and start the selected workspace. Requires an existing `odoo-project.ini`. Docker regenerates the local Docker build context, Odoo config and `compose.yaml`, then starts services with Docker Compose; it waits for health checks. Native regenerates its configuration and starts Odoo in the background using the existing virtualenv. Neither variant automatically synchronizes repositories or rebuilds the native virtualenv.
+Prepare and start the selected workspace. Requires an existing `odoo-project.ini`.
+
+- `docker up` regenerates the local Docker build context, Odoo config and `compose.yaml`, then starts services with Docker Compose.
+- `venv up` regenerates its configuration and starts Odoo in the background using the existing virtualenv.
+
+Neither variant automatically synchronizes repositories.
 
 **Usage**
 
@@ -851,13 +861,16 @@ odoo-compose venv up [--root ROOT]
 
 **Notes**
 
-Docker `up` remembers the last applied generated Odoo configuration and recreates the Odoo container when it changes, including after a separate `setup`.
+- `docker up` remembers the last applied generated Odoo configuration and recreates the Odoo container when it changes, including after a separate `setup`.
 Running `up` without `--build` does not guarantee that changed Python dependencies or Dockerfile instructions are built into the image.
-Native `up` uses `ROOT/.odt-env/odoo-process.json` for process identity and writes runtime output to `ROOT/odoo-logs/odoo-up.log`; it restarts the tracked process if the generated config changes.
+- `venv up` uses `ROOT/.odt-env/odoo-process.json` for process identity and writes runtime output to `ROOT/odoo-logs/odoo-up.log`; it restarts the tracked process if the generated config changes.
 
 ### `down`
 
-Stop the selected workspace, preserving data. Docker delegates to `docker compose down` **without** `--volumes`; native gracefully stops only the verified Odoo process created by `odoo-compose venv up`.
+Stop the selected workspace, preserving data.
+
+- `docker down` delegates to `docker compose down` **without** `--volumes`.
+- `venv down` gracefully stops only the verified Odoo process created by `odoo-compose venv up`.
 
 **Usage**
 
@@ -875,11 +888,15 @@ odoo-compose venv down [--root ROOT]
 
 **Notes**
 
-Native `down` never terminates arbitrary processes found by name or port. It does not stop PostgreSQL or a separately managed systemd service. Docker `down` removes Compose-managed containers and networks, but retains named volumes.
+- `docker down` removes Compose-managed containers and networks, but retains named volumes.
+- `venv down` never terminates arbitrary processes found by name or port. It does not stop PostgreSQL or a separately managed systemd service.
 
 ### `status`
 
-Show runtime status without provisioning or changing the workspace. Docker displays the Docker Compose service table; native reports the tracked Odoo PID and whether the process is still running.
+Show runtime status without provisioning or changing the workspace.
+
+- `docker status` displays the Docker Compose service table.
+- `venv status` reports the tracked Odoo PID and whether the process is still running.
 
 **Usage**
 
@@ -897,11 +914,14 @@ odoo-compose venv status [--root ROOT]
 
 **Notes**
 
-Native `status` verifies the recorded process identity to avoid confusing a reused PID with Odoo. It does not probe the Odoo HTTP endpoint or report application health.
+- `venv status` verifies the recorded process identity to avoid confusing a reused PID with Odoo. It does not probe the Odoo HTTP endpoint or report application health.
 
 ### `run`
 
-Run Odoo directly from the selected workspace. Docker uses a one-off container; Venv uses the existing virtualenv and generated `odoo-server.conf`.
+Run Odoo directly from the selected workspace.
+
+- `docker run` uses a one-off container
+- `venv run` uses the existing virtualenv and generated `odoo-server.conf`.
 
 **Usage**
 
@@ -938,7 +958,10 @@ odoo-compose venv run -i base --stop-after-init
 
 ### `shell`
 
-Open an interactive Odoo shell. Like `run`, this uses a one-off container for Docker or the existing virtualenv for native workspaces.
+Open an interactive Odoo shell.
+
+- `docker shell` uses a one-off container.
+- `venv shell` uses the existing virtualenv.
 
 **Usage**
 
