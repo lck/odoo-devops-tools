@@ -643,9 +643,6 @@ Running `odoo-compose` without arguments displays help. Use `odoo-compose docker
 
 Use `--root ROOT` to select a workspace outside the current directory where supported.
 
-> **Configuration regeneration:** `setup` and `up` regenerate workspace configuration from `odoo-project.ini`.
-> Commands `run`, `shell`, `update`, and `test` do **not** regenerate it; they use previously generated configuration.
-
 ### Overview
 
 <dl class="cli-reference">
@@ -703,7 +700,7 @@ Use `--root ROOT` to select a workspace outside the current directory where supp
 
 ### `setup`
 
-Create or update an Odoo workspace. When no project file exists, `setup` creates the default `ROOT/odoo-project.ini`; otherwise it reuses the existing configuration. Synchronizing repositories, building a virtual environment, creating bundles, and generating Docker artifacts are optional.
+Create or update an Odoo workspace. When no project file exists, `setup` creates the default `ROOT/odoo-project.ini`; otherwise it reuses the existing configuration.
 
 **Usage**
 
@@ -716,25 +713,11 @@ odoo-compose venv setup [ROOT|INI] [OPTIONS]
 
 <dl class="cli-reference">
 <dt><code>ROOT|INI</code></dt>
-<dd><p>Optional workspace directory, existing local project INI file, Git-based INI source, or URL. A directory is created if needed; an existing INI is preserved. When omitted, the current directory is the workspace root. An existing file or path ending in <code>.ini</code> is interpreted as an INI source.</p></dd>
+<dd><p>Optional workspace directory, existing local project INI file, Git-based INI source, or URL. A directory is created if needed; an existing INI is preserved. When omitted, the current directory is the workspace root.
+<br><br>Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
+</p></dd>
 
 </dl>
-
-Alternatively, load the workspace definition from a local INI file, Git repository, or URL:
-
-```bash
-# Docker workflow:
-odoo-compose docker setup /path/to/odoo-project.ini
-odoo-compose docker setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
-odoo-compose docker setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
-
-# Native workflow:
-odoo-compose venv setup /path/to/odoo-project.ini
-odoo-compose venv setup 'git+git@github.com:company/repo.git//examples/odoo-project.ini?ref=main'
-odoo-compose venv setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
-```
-
-Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
 **Options**
 
@@ -783,15 +766,15 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dd><p>Explicitly select both Odoo and addon sources, regardless of the selected workflow. Unlike <code>--sync</code>, this can fetch Odoo sources even when Docker runs Odoo from the base image.</p></dd>
 
 > **Note:**
-> Repository sync aborts if a target Git repository has uncommitted changes **or a local branch contains commits absent from the remote branch**. Commit/stash uncommitted changes or push/reconcile unpublished commits before syncing. The four sync switches are mutually exclusive; without any of them, <code>setup</code> only regenerates artifacts and does not fetch repositories.
+> Repository sync aborts if a target Git repository has uncommitted changes **or a local branch contains commits absent from the remote branch**. Commit/stash uncommitted changes or push/reconcile unpublished commits before syncing.
 
 </dl>
 
-**Virtualenv and bundles** (`odoo-compose venv` only where indicated)
+**Virtualenv and bundles**
 
 <dl class="cli-reference">
 <dt><code>--create-venv</code></dt>
-<dd><p>Explicitly create or recreate <code>ROOT/venv</code> and refresh the wheelhouse (Venv only). Without a virtualenv-provisioning option, the environment is not recreated.</p></dd>
+<dd><p>Explicitly create or recreate <code>ROOT/venv</code> and refresh the wheelhouse. Without a virtualenv-provisioning option, the environment is not recreated.</p></dd>
 
 <dt><code>--create-venv-from-wheelhouse</code></dt>
 <dd><p>Recreate <code>ROOT/venv</code> offline from <code>ROOT/wheelhouse/</code> and <code>all-requirements.lock.txt</code>, without compiling dependencies or rebuilding the wheelhouse.</p></dd>
@@ -800,13 +783,13 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 <dd><p>Remove all items from pip's wheel cache.</p></dd>
 
 <dt><code>--create-bundle</code> <i>[BUNDLE]</i></dt>
-<dd><p>Create a verified portable ZIP containing sources, a sanitized project INI and the wheelhouse (Venv only). Default output: <code>ROOT/bundles/ROOT-NAME-bundle.zip</code>. Explicit relative paths are resolved from the current directory.</p></dd>
+<dd><p>Create a verified portable ZIP containing sources, a sanitized project INI and the wheelhouse. Default output: <code>ROOT/bundles/ROOT-NAME-bundle.zip</code>. Explicit relative paths are resolved from the current directory.</p></dd>
 
 <dt><code>--allow-dirty-bundle</code></dt>
 <dd><p>Allow bundle creation from repositories with uncommitted changes; otherwise dirty repositories abort the operation.</p></dd>
 
 <dt><code>--create-from-bundle</code> <i>BUNDLE</i></dt>
-<dd><p>Verify and import a bundle into an empty <code>ROOT</code> and recreate the virtualenv from its wheelhouse (Venv only). Does not generate Docker artifacts and cannot be combined with <code>--create-docker-deploy</code>.</p></dd>
+<dd><p>Verify and import a bundle into an empty <code>ROOT</code> and recreate the virtualenv from its wheelhouse. Does not generate Docker artifacts and cannot be combined with <code>--create-docker-deploy</code>.</p></dd>
 
 </dl>
 
@@ -814,7 +797,7 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 
 <dl class="cli-reference">
 <dt><code>--create-docker-deploy</code></dt>
-<dd><p>Generate a self-contained deployment build context under <code>ROOT/docker/deploy/</code> (Docker only).</p></dd>
+<dd><p>Generate a self-contained deployment build context under <code>ROOT/docker/deploy/</code>.</p></dd>
 
 </dl>
 
@@ -824,10 +807,12 @@ Git source syntax: `git+REPO_URL//PATH/TO/PROJECT.ini?ref=REF`.
 # Docker workflow:
 odoo-compose docker setup ./odoo19
 odoo-compose docker setup ./odoo18 --set odoo:version=18.0
+odoo-compose docker setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 
 # Native workflow:
 odoo-compose venv setup ./odoo19 --sync --create-venv
 odoo-compose venv setup ./odoo18 --set odoo:version=18.0 --sync-all --create-venv
+odoo-compose venv setup 'https://github.com/lck/odoo-devops-tools/blob/main/examples/odoo-project.ini'
 ```
 
 ### `up`
@@ -859,12 +844,6 @@ odoo-compose venv up [--root ROOT]
 <dd><p>Force recreation of the Odoo container, without forcing recreation of the database container (Docker only).</p></dd>
 </dl>
 
-**Notes**
-
-- `docker up` remembers the last applied generated Odoo configuration and recreates the Odoo container when it changes, including after a separate `setup`.
-Running `up` without `--build` does not guarantee that changed Python dependencies or Dockerfile instructions are built into the image.
-- `venv up` uses `ROOT/.odt-env/odoo-process.json` for process identity and writes runtime output to `ROOT/odoo-logs/odoo-up.log`; it restarts the tracked process if the generated config changes.
-
 ### `down`
 
 Stop the selected workspace, preserving data.
@@ -886,11 +865,6 @@ odoo-compose venv down [--root ROOT]
 <dd><p>Select an existing workspace (default: current directory).</p></dd>
 </dl>
 
-**Notes**
-
-- `docker down` removes Compose-managed containers and networks, but retains named volumes.
-- `venv down` never terminates arbitrary processes found by name or port. It does not stop PostgreSQL or a separately managed systemd service.
-
 ### `status`
 
 Show runtime status without provisioning or changing the workspace.
@@ -911,10 +885,6 @@ odoo-compose venv status [--root ROOT]
 <dt><code>--root</code> <i>ROOT</i></dt>
 <dd><p>Select an existing workspace (default: current directory).</p></dd>
 </dl>
-
-**Notes**
-
-- `venv status` verifies the recorded process identity to avoid confusing a reused PID with Odoo. It does not probe the Odoo HTTP endpoint or report application health.
 
 ### `run`
 
@@ -986,16 +956,6 @@ odoo-compose venv shell [--root ROOT] [ODOO_ARGS...]
 
 </dl>
 
-**Examples**
-
-```bash
-# Docker workflow:
-odoo-compose docker shell
-
-# Native workflow:
-odoo-compose venv shell
-```
-
 ### `update`
 
 Update installed Odoo addons through `click-odoo-update`.
@@ -1025,16 +985,6 @@ odoo-compose venv update [--root ROOT] [--all] [ODOO_ARGS...]
 <dd><p>Invoke <code>click-odoo-update --update-all</code>.</p></dd>
 
 </dl>
-
-**Examples**
-
-```bash
-# Docker workflow:
-odoo-compose docker update --all
-
-# Native workflow:
-odoo-compose venv update --all
-```
 
 ### `test`
 
@@ -1073,7 +1023,7 @@ odoo-compose docker test -i sale --test-tags /sale
 odoo-compose venv test -i sale --test-tags /sale
 ```
 
-> **Docker note:** Docker commands use one-off containers. Set `ODOO_DOCKER_SUDO=1` on Linux if Docker requires `sudo`.
+> **Docker note:** Set `ODOO_DOCKER_SUDO=1` on Linux if Docker requires `sudo`.
 
 ### `backup-db`
 
@@ -1108,19 +1058,20 @@ odoo-compose venv backup-db [--root ROOT] [OUTPUT]
 # Docker workflow:
 odoo-compose docker backup-db
 
-# Native only: select a specific version of the PostgreSQL client tools
-export POSTGRES_BIN=/usr/lib/postgresql/16/bin
+# Docker with sudo:
+export ODOO_DOCKER_SUDO=1
+odoo-compose docker backup-db
 
+# Native workflow: select a specific version of the PostgreSQL client tools:
+export POSTGRES_BIN=/usr/lib/postgresql/16/bin
 odoo-compose venv backup-db
 ```
 
-**Native PostgreSQL configuration:** The database name comes from `[config].db_name` in `odoo-project.ini`; if missing, provisioning generates a workspace-specific name and saves it there. Connection details come from `[config]` or the standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, etc.), with `.pgpass` also supported. By default, client executables are found through `PATH`; `POSTGRES_BIN` selects their directory (`pg_dump`, `pg_restore`, `psql`, `createdb`, `dropdb`) for `odoo-compose venv` only, at command runtime.
-
-For Docker, the database name defaults to `odoo` when not specified.
-
 ### `restore-db`
 
-Restore a PostgreSQL custom-format dump into `[config].db_name` (Docker defaults to `odoo`). Stop Odoo before restoring its active database.
+Restore a PostgreSQL custom-format dump. Stop Odoo before restoring its active database.
+
+An existing target database is never replaced without `--force`.
 
 **Usage**
 
@@ -1162,15 +1113,12 @@ odoo-compose docker restore-db ./odoo-backups/pre-upgrade.dump
 odoo-compose docker restore-db --force --copy ./odoo-backups/pre-upgrade.dump
 odoo-compose docker restore-db --move ./odoo-backups/pre-upgrade.dump
 
-# Native only: optionally override PostgreSQL client location
+# Native workflow: select a specific version of the PostgreSQL client tools:
 export POSTGRES_BIN=/usr/lib/postgresql/16/bin
-
 odoo-compose venv restore-db ./odoo-backups/pre-upgrade.dump
 odoo-compose venv restore-db --force --copy ./odoo-backups/pre-upgrade.dump
 odoo-compose venv restore-db --move ./odoo-backups/pre-upgrade.dump
 ```
-
-An existing target database is never replaced without `--force`. For native connection and client configuration, see [`backup-db`](#backup-db).
 
 ### `backup-filestore`
 
@@ -1198,18 +1146,6 @@ odoo-compose venv backup-filestore [--root ROOT] [OUTPUT]
 <dd><p>Select a workspace.</p></dd>
 
 </dl>
-
-**Examples**
-
-```bash
-# Docker workflow:
-odoo-compose docker backup-filestore
-
-# Native workflow:
-odoo-compose venv backup-filestore
-```
-
-For native workspaces, the filestore path comes from `[config].data_dir` or defaults to `ROOT/odoo-data`. Docker accesses the filestore through a one-off Odoo container.
 
 ### `restore-filestore`
 
@@ -1240,20 +1176,6 @@ odoo-compose venv restore-filestore [--root ROOT] [--force] FILESTORE.tar.gz
 <dd><p>Allow replacing an existing filestore.</p></dd>
 
 </dl>
-
-**Examples**
-
-```bash
-# Docker workflow:
-odoo-compose docker restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
-odoo-compose docker restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
-
-# Native workflow:
-odoo-compose venv restore-filestore ./odoo-backups/pre-upgrade-filestore.tar.gz
-odoo-compose venv restore-filestore --force ./odoo-backups/pre-upgrade-filestore.tar.gz
-```
-
-For native workspaces, the filestore path comes from `[config].data_dir` or defaults to `ROOT/odoo-data`. Docker accesses the filestore through a one-off Odoo container.
 
 ### `restic`
 
@@ -1296,19 +1218,18 @@ odoo-compose docker restic init
 odoo-compose docker restic snapshots
 odoo-compose docker restic check
 
-# Native only: select a Restic executable instead of using PATH
+# Native workflow: select a specific version of the Restic executable
 export RESTIC_BIN=/opt/restic/restic
-
 odoo-compose venv restic init
 odoo-compose venv restic snapshots
 odoo-compose venv restic check
 ```
 
-**Configuration:** Set `RESTIC_REPOSITORY` and either `RESTIC_PASSWORD_FILE` or `RESTIC_PASSWORD`. Docker invokes Restic in a one-off container and bind-mounts an absolute local host repository; remote Restic repositories are also supported. For native workspaces, Restic is found through `PATH` by default; `RESTIC_BIN` sets the executable path at command runtime and applies only to `odoo-compose venv`.
-
 ### `backup-filestore-restic`
 
 Back up the selected database's filestore as a Restic snapshot.
+
+Snapshots are tagged `odoo`, `filestore` and `db:<database>`. Set `RESTIC_BACKUP_ID` for an additional `backup-id:<value>` tag; `RESTIC_HOST` overrides the default host used to group snapshots.
 
 **Usage**
 
@@ -1339,13 +1260,10 @@ odoo-compose venv backup-filestore-restic [--root ROOT] [RESTIC_ARGS...]
 # Docker workflow:
 odoo-compose docker backup-filestore-restic
 
-# Native only: optional Restic executable override
+# Native workflow: select a specific version of the Restic executable
 export RESTIC_BIN=/opt/restic/restic
-
 odoo-compose venv backup-filestore-restic
 ```
-
-Set the repository and password as described under [`restic`](#restic). Snapshots are tagged `odoo`, `filestore` and `db:<database>`. Set `RESTIC_BACKUP_ID` for an additional `backup-id:<value>` tag; `RESTIC_HOST` overrides the default host used to group snapshots.
 
 ### `restore-filestore-restic`
 
@@ -1387,11 +1305,15 @@ odoo-compose docker restore-filestore-restic --force latest
 odoo-compose venv restore-filestore-restic --force latest
 ```
 
-Set `RESTIC_SOURCE_DB_NAME` to restore a snapshot belonging to another database. When selecting `latest`, snapshot lookup also filters by host and the original filestore path. For repository configuration, host/tag settings and `RESTIC_BIN`, see [`restic`](#restic) and [`backup-filestore-restic`](#backup-filestore-restic).
+Set `RESTIC_SOURCE_DB_NAME` to restore a snapshot belonging to another database. When selecting `latest`, snapshot lookup also filters by host and the original filestore path.
 
 ### `neutralize`
 
-Neutralize a restored production database for development or testing, then execute optional workspace SQL. Both workflows read `ROOT/odoo-project.ini` and do not regenerate workspace artifacts.
+Neutralize a restored production database for development or testing, then execute optional workspace neutralization scripts.
+
+For **Odoo 16.0+**, the command uses Odoo's built-in neutralization.
+
+For **Odoo 13.0–15.0**, it uses compatibility neutralization of scheduled actions and outgoing/incoming mail servers.
 
 **Usage**
 
@@ -1425,11 +1347,9 @@ odoo-compose venv neutralize --dry-run
 odoo-compose venv neutralize --dry-run ./preview-sql
 ```
 
-**Odoo versions:** For Odoo 16.0+, the command uses Odoo's built-in neutralization and installed modules' `neutralize.sql` scripts to disable or redirect supported production-side effects (including scheduled actions, outgoing email and external integrations). For Odoo 13.0–15.0, it uses compatibility neutralization of scheduled actions and outgoing/incoming mail servers: Docker uses the Odoo ORM and Venv uses PostgreSQL commands.
+#### Workspace neutralization scripts
 
-#### Workspace SQL and INI interpolation
-
-After standard neutralization, the command executes optional `*.sql` files directly inside `ROOT/neutralize/`, sorted by filename (no recursion):
+After standard neutralization, the command executes optional Workspace neutralization scripts inside `ROOT/neutralize/`, sorted by filename:
 
 ```text
 neutralize/
@@ -1438,7 +1358,10 @@ neutralize/
 └── 03-set-ir-config-params.sql
 ```
 
-Execution stops at the first SQL error; if the directory is missing, only standard/legacy neutralization runs. Custom SQL accepts `${section:option}` references to the current project INI, including nested `[vars]` references. Each reference is inserted as a **quoted PostgreSQL text literal**—do **not** surround it with SQL quotes.
+Execution stops at the first SQL error; if the directory is missing, only standard/legacy neutralization runs.
+
+Neutralization scripts accepts `${section:option}` references to the current project INI, including `[vars]` references.
+Each reference is inserted as a **quoted PostgreSQL text literal**—do **not** surround it with SQL quotes.
 
 `odoo-project.ini`:
 
@@ -1455,13 +1378,7 @@ VALUES ('web.base.url', ${vars:base_url})
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 ```
 
-Use `\${section:option}` to include the reference literally. Paired backslashes before `${...}` produce literal backslashes; `$` and `$$` are unchanged. Unknown references cause an error before the affected SQL file is sent to PostgreSQL. Resolved SQL is streamed to `psql` without being saved, and original SQL files are not modified. See `examples/neutralize/` for templates.
-
-#### SQL preview (`--dry-run`)
-
-Without an explicit directory, preview files are written to `ROOT/.odt-env/neutralize-preview/`. Only custom `ROOT/neutralize/*.sql` is previewed, **not** Odoo's built-in neutralization. No SQL is executed.
-
-> **Security note:** Preview files may contain interpolated passwords or tokens. Protect or delete them after inspection. On Unix-like systems, newly created preview SQL files have permissions `0600`.
+Use `\${section:option}` to include the reference literally. Paired backslashes before `${...}` produce literal backslashes; `$` and `$$` are unchanged.
 
 #### Restore, update and neutralize
 
