@@ -36,12 +36,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Iterable, Optional, Union
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
-__version__ = "1.27.2"
+__version__ = "1.27.3"
 
 _logger = logging.getLogger("odoo-compose")
 
@@ -132,7 +132,7 @@ _DOCKER_ODOO_CONF_IGNORED_CONFIG_KEYS = {
 
 _DEFAULT_ODOO_REPO = "https://github.com/odoo/odoo.git"
 
-_BACKUP_RESTORE_SCRIPT_NAMES = (
+_BACKUP_RESTORE_COMMANDS = (
     "backup-db", "restore-db", "backup-filestore", "restore-filestore",
     "restic", "backup-filestore-restic", "restore-filestore-restic",
 )
@@ -202,6 +202,9 @@ _NATIVE_RUNTIME_STATE = "odoo-process.json"
 _NATIVE_RUNTIME_LOCK = "odoo-process.lock"
 _NATIVE_RUNTIME_LOG = "odoo-up.log"
 
+_LIFECYCLE_COMMANDS = ("up", "down", "status")
+_ODOO_COMMANDS = ("run", "shell", "update", "test")
+
 _CLI_COMMANDS = (
     ("setup", "Create or update an Odoo workspace"),
     ("up", "Prepare and start the Odoo workspace"),
@@ -226,6 +229,21 @@ _CLI_COMMANDS_NAMES = [name for name, _ in _CLI_COMMANDS]
 # -----------------------------
 # Data models
 # -----------------------------
+
+@dataclass(frozen=True)
+class SetupOptions:
+    sync_odoo: bool
+    sync_addons: bool
+    reuse_wheelhouse: bool = False
+    create_venv: bool = False
+    clear_pip_wheel_cache: bool = False
+    no_configs: bool = False
+    no_data_dir: bool = False
+    target: str = "docker"
+    create_docker_deploy_requested: bool = False
+    bundle_output: Optional[Path] = None
+    allow_dirty_bundle: bool = False
+
 
 @dataclass(frozen=True)
 class OdooSpec:
@@ -301,15 +319,15 @@ class DockerConfig:
     db_mem_limit: Optional[str] = None
     mailpit_cpus: Optional[str] = None
     mailpit_mem_limit: Optional[str] = None
-    shares: Dict[str, DockerShareSpec] = field(default_factory=dict)
+    shares: dict[str, DockerShareSpec] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ProjectConfig:
     virtualenv: VirtualenvConfig
     odoo: OdooSpec
-    addons: Dict[str, AddonSpec]
-    config: Dict[str, Any]
+    addons: dict[str, AddonSpec]
+    config: dict[str, Any]
     docker: DockerConfig
 
 
@@ -326,6 +344,18 @@ class Layout:
     docker_dir: Path
     docker_local_dir: Path
     docker_deploy_dir: Path
+
+    @property
+    def venv_dir(self) -> Path:
+        return self.root / "venv"
+
+    @property
+    def state_dir(self) -> Path:
+        return self.root / ".odt-env"
+
+    @property
+    def project_ini(self) -> Path:
+        return self.root / _DEFAULT_PROJECT_INI_NAME
 
     @staticmethod
     def from_root(root: Path) -> "Layout":
@@ -357,6 +387,12 @@ class Layout:
 # -----------------------------
 # Helpers: validation & parsing
 # -----------------------------
+
+def _explicit_ini_keys(cp: configparser.ConfigParser, section: str) -> Iterable[str]:
+    # Public ConfigParser APIs include inherited DEFAULT options; we need only
+    # the options physically present in this section.
+    return cp._sections.get(section, {}).keys()
+
 
 class _IniInterpolation(configparser.ExtendedInterpolation):
     """Interpolate ${section:option}; literal dollars need no escaping.
@@ -486,33 +522,20 @@ def _chmod_private(path: Path) -> None:
         pass
 
 
-def _make_executable(path: Path) -> None:
-    try:
-        mode = path.stat().st_mode
-        path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    except OSError:
-        pass
-
-
 def _write_text_file(
         path: Path,
         content: str,
         *,
         private: bool = False,
-        executable: bool = False,
         atomic: bool = False,
-        crlf: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = content.replace("\n", "\r\n") if crlf else content
     target = path.with_suffix(path.suffix + ".tmp") if atomic else path
-    target.write_text(text, encoding="utf-8")
+    target.write_text(content, encoding="utf-8")
     if atomic:
         os.replace(target, path)
     if private:
         _chmod_private(path)
-    if executable:
-        _make_executable(path)
 
 
 def _rmtree(path: Path) -> None:
@@ -530,36 +553,6 @@ def _rmtree(path: Path) -> None:
     shutil.rmtree(path, onerror=onerror)
 
 
-def _require_table(d: Dict[str, Any], key: str) -> Dict[str, Any]:
-    v = d.get(key)
-    if not isinstance(v, dict):
-        raise Exception(f"Missing or invalid [{key}] table in INI.")
-    return v
-
-
-def _require_str(d: Dict[str, Any], key: str) -> str:
-    v = d.get(key)
-    if not isinstance(v, str) or not v.strip():
-        raise Exception(f"Missing or invalid '{key}' (expected non-empty string).")
-    return v
-
-
-def _require_int(d: Dict[str, Any], key: str) -> int:
-    v = d.get(key)
-    if not isinstance(v, int):
-        raise Exception(f"Missing or invalid '{key}' (expected integer).")
-    return v
-
-
-def _require_list_str(d: Dict[str, Any], key: str) -> list[str]:
-    v = d.get(key)
-    if v is None:
-        return []
-    if not isinstance(v, list) or any((not isinstance(x, str) or not x.strip()) for x in v):
-        raise Exception(f"Missing or invalid '{key}' (expected list of non-empty strings).")
-    return [x.strip() for x in v]
-
-
 def _render_resolved_ini(
         cp: configparser.ConfigParser, *, redact: bool = False, escape_references: bool = False,
 ) -> str:
@@ -568,7 +561,7 @@ def _render_resolved_ini(
 
     for section in cp.sections():
         rendered.add_section(section)
-        for option in cp._sections.get(section, {}).keys():
+        for option in _explicit_ini_keys(cp, section):
             value = cp.get(section, option, raw=False)
             if redact and _is_sensitive_key(option):
                 value = "******"
@@ -603,7 +596,7 @@ def _ini_for_merged_source_file(cp: configparser.ConfigParser) -> str:
 
     for section in cp.sections():
         rendered.add_section(section)
-        for option in cp._sections.get(section, {}).keys():
+        for option in _explicit_ini_keys(cp, section):
             rendered.set(section, option, cp.get(section, option, raw=True))
 
     buf = io.StringIO()
@@ -770,7 +763,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _provisioning_paths(layout: Layout, run_id: str) -> tuple[Path, Path, Path, Path]:
-    base_dir = layout.root / ".odt-env"
+    base_dir = layout.state_dir
     run_path = base_dir / "history" / f"{run_id}-provisioning.json"
     source_ini_path = base_dir / "history" / f"{run_id}.source-project.ini"
     resolved_ini_path = base_dir / "history" / f"{run_id}.resolved-project.ini"
@@ -801,19 +794,10 @@ def _write_default_project_ini_template(ini_path: Path) -> None:
     _logger.info("Created default project INI template: %s", ini_path)
 
 
-def _implicit_ini_needs_effective_save(
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
-        force: bool = False,
-) -> bool:
-    """Return True when implicit-INI mode should persist an effective project file."""
-    return bool(force or vars_overrides or ini_overrides)
-
-
 def _resolved_ini_for_manifest(
         ini_path: Path,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]] = None,
 ) -> Optional[str]:
     try:
         cp = _read_ini(
@@ -830,8 +814,8 @@ def _resolved_ini_for_manifest(
 
 def _source_ini_for_manifest(layout: Layout, ini_path: Path) -> Optional[Path]:
     """Return the best source INI to copy into the per-run provisioning audit."""
-    source_project_ini_path = layout.root / ".odt-env" / "last-source-project.ini"
-    resolved_project_ini_path = layout.root / ".odt-env" / "last-resolved-project.ini"
+    source_project_ini_path = layout.state_dir / "last-source-project.ini"
+    resolved_project_ini_path = layout.state_dir / "last-resolved-project.ini"
 
     # When a remote/implicit project file was materialized, the workspace-root
     # INI is rewritten to its effective resolved form and the original source is
@@ -895,8 +879,8 @@ def _save_resolved_project_ini_copy(ini_path: Path, resolved_ini: str) -> Path:
 
 def _save_effective_ini_copy(
     ini_path: Path,
-    vars_overrides: Optional[Dict[str, str]],
-    ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+    vars_overrides: Optional[dict[str, str]],
+    ini_overrides: Optional[dict[str, dict[str, str]]] = None,
 ) -> None:
     """
     Rewrite a workspace-root INI with the values actually used after CLI
@@ -933,11 +917,11 @@ def _save_effective_ini_copy(
 
 def _update_ini_values_preserving_layout(
         content: str,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
 ) -> str:
     """Apply CLI overrides without rewriting unrelated INI lines or interpolation."""
-    values: Dict[str, Dict[str, str]] = {}
+    values: dict[str, dict[str, str]] = {}
     if vars_overrides:
         values["vars"] = dict(vars_overrides)
     if ini_overrides:
@@ -951,7 +935,7 @@ def _update_ini_values_preserving_layout(
     def ini_value(value: str) -> str:
         # Keep multi-line CLI values indented as valid INI continuation lines.
         return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", newline + "    ")
-    sections: Dict[str, tuple[int, int]] = {}
+    sections: dict[str, tuple[int, int]] = {}
     current_section = None
     start = 0
     header_pattern = re.compile(r"^[ \t]*\[([^\]\r\n]+)\][ \t]*(?:[;#].*)?$")
@@ -1019,8 +1003,8 @@ def _update_ini_values_preserving_layout(
 def _save_workspace_ini_overrides(
         source_ini: Path,
         workspace_ini: Path,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
 ) -> None:
     """Persist --set/-e only to ROOT/odoo-project.ini, preserving source layout."""
     # Reject invalid effective values before touching the workspace file.
@@ -1052,8 +1036,8 @@ def _save_workspace_ini_overrides(
 def _refresh_last_ini_snapshots(
         layout: Layout,
         ini_path: Path,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
         source_snapshot_ready: bool = False,
 ) -> None:
     """Keep current source and resolved INI snapshots on every provisioning run."""
@@ -1064,13 +1048,13 @@ def _refresh_last_ini_snapshots(
         log_overrides=False,
     )
     resolved_ini = _ini_for_effective_file(cp)
-    source_snapshot = layout.root / ".odt-env" / "last-source-project.ini"
+    source_snapshot = layout.state_dir / "last-source-project.ini"
     if not source_snapshot_ready:
         source_snapshot.parent.mkdir(parents=True, exist_ok=True)
         if not _same_path(ini_path, source_snapshot):
             shutil.copy2(ini_path, source_snapshot)
         _chmod_private(source_snapshot)
-    _save_resolved_project_ini_copy(layout.root / _DEFAULT_PROJECT_INI_NAME, resolved_ini)
+    _save_resolved_project_ini_copy(layout.project_ini, resolved_ini)
 
 
 def _existing_workspace_db_name(root: Path) -> Optional[str]:
@@ -1095,8 +1079,8 @@ def _persist_native_db_name(
         root: Path,
         ini_path: Path,
         db_name: str,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
 ) -> None:
     """Save the fallback to ROOT/odoo-project.ini without modifying external sources."""
     project_ini = root / _DEFAULT_PROJECT_INI_NAME
@@ -1170,8 +1154,8 @@ def _split_cli_assignment(item: str, option: str, expected: str) -> tuple[str, s
     return target, value.strip()
 
 
-def _parse_cli_vars(extra_vars: list[str]) -> Dict[str, str]:
-    overrides: Dict[str, str] = {}
+def _parse_cli_vars(extra_vars: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
 
     for item in extra_vars:
         key, value = _split_cli_assignment(item, "-e/--extra-var", "KEY=VALUE")
@@ -1182,9 +1166,9 @@ def _parse_cli_vars(extra_vars: list[str]) -> Dict[str, str]:
     return overrides
 
 
-def _parse_cli_ini_overrides(raw_overrides: list[str]) -> Dict[str, Dict[str, str]]:
+def _parse_cli_ini_overrides(raw_overrides: list[str]) -> dict[str, dict[str, str]]:
     """Parse -S/--set overrides in SECTION:KEY=VALUE format."""
-    overrides: Dict[str, Dict[str, str]] = {}
+    overrides: dict[str, dict[str, str]] = {}
 
     for item in raw_overrides:
         target, value = _split_cli_assignment(item, "-S/--set", "SECTION:KEY=VALUE")
@@ -1206,7 +1190,7 @@ def _parse_cli_ini_overrides(raw_overrides: list[str]) -> Dict[str, Dict[str, st
 
 
 def _validate_ini_overrides(
-        ini_overrides: Dict[str, Dict[str, str]],
+        ini_overrides: dict[str, dict[str, str]],
 ) -> None:
     """Validate --set targets against the supported project-file schema."""
     for section, options in ini_overrides.items():
@@ -1269,8 +1253,8 @@ def _validate_ini_overrides(
 
 def _read_ini(
         entry_ini: Path,
-        vars_overrides: Optional[Dict[str, str]] = None,
-        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        vars_overrides: Optional[dict[str, str]] = None,
+        ini_overrides: Optional[dict[str, dict[str, str]]] = None,
         log_overrides: bool = True,
 ) -> configparser.ConfigParser:
     cp = configparser.ConfigParser(interpolation=_IniInterpolation())
@@ -1488,35 +1472,7 @@ def _get_ini_bool(
         ) from e
 
 
-def load_project_config(
-        ini_path: Path,
-        vars_overrides: Optional[Dict[str, str]] = None,
-        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
-        log_resolved: bool = True,
-        log_overrides: bool = True,
-) -> ProjectConfig:
-    if not ini_path.exists():
-        raise Exception(f"INI config not found: {ini_path}")
-
-    cp = _read_ini(
-        ini_path,
-        vars_overrides=vars_overrides,
-        ini_overrides=ini_overrides,
-        log_overrides=log_overrides,
-    )
-
-    if log_resolved:
-        _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
-
-    # Sections expected:
-    #   [virtualenv] (optional)
-    #   [odoo]
-    #   [addons.<name>] for each addon (optional)
-    #   [docker] (optional)
-    #   [docker.share.<name>] for each host-directory share (optional)
-    #   [config] (optional)
-
-    odoo_version = _require_ini_option(cp, "odoo", "version").strip()
+def _parse_virtualenv_config(cp: configparser.ConfigParser, odoo_version: str) -> VirtualenvConfig:
     default_python_version, default_build_constraints, default_requirements = _get_default_virtualenv_settings(
         odoo_version
     )
@@ -1559,6 +1515,10 @@ def load_project_config(
         managed_python=_get_ini_bool(cp, "virtualenv", "managed_python", default=True),
     )
 
+    return venv
+
+
+def _parse_odoo_spec(cp: configparser.ConfigParser, odoo_version: str) -> OdooSpec:
     has_odoo_path = cp.has_option("odoo", "path")
     has_odoo_repo = cp.has_option("odoo", "repo")
     has_odoo_branch = cp.has_option("odoo", "branch")
@@ -1596,8 +1556,12 @@ def load_project_config(
             shallow=_get_ini_bool(cp, "odoo", "shallow", default=True),
         )
 
+    return odoo
+
+
+def _parse_addon_specs(cp: configparser.ConfigParser) -> dict[str, AddonSpec]:
     # Addons are optional. If there are no [addons.<name>] sections, keep addons empty.
-    addons: Dict[str, AddonSpec] = {}
+    addons: dict[str, AddonSpec] = {}
     for sec in cp.sections():
         if sec.startswith("addons."):
             name = sec.split(".", 1)[1]
@@ -1637,7 +1601,11 @@ def load_project_config(
                 shallow=_get_ini_bool(cp, sec, "shallow", default=True),
             )
 
-    docker_shares: Dict[str, DockerShareSpec] = {}
+    return addons
+
+
+def _parse_docker_shares(cp: configparser.ConfigParser) -> dict[str, DockerShareSpec]:
+    docker_shares: dict[str, DockerShareSpec] = {}
     share_targets: set[str] = set()
     for sec in cp.sections():
         if sec == "docker.share":
@@ -1653,7 +1621,7 @@ def load_project_config(
                 f"Invalid section [{sec}] (expected [docker.share.<name>] with a non-empty name)."
             )
 
-        for key in cp._sections.get(sec, {}).keys():
+        for key in _explicit_ini_keys(cp, sec):
             if key not in _INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS:
                 supported_keys = ", ".join(sorted(_INI_SET_DOCKER_SHARE_SUPPORTED_OPTIONS))
                 raise Exception(
@@ -1686,34 +1654,18 @@ def load_project_config(
         share_targets.add(target)
         docker_shares[name] = DockerShareSpec(source=source, target=target)
 
-    docker = DockerConfig(
-        base_image=f"odoo:{odoo_version}",
-        odoo_source=_DOCKER_ODOO_SOURCE_IMAGE,
-        postgres_version=_DEFAULT_DOCKER_POSTGRES_VERSION,
-        restic_version=_DEFAULT_DOCKER_RESTIC_VERSION,
-        mailpit_enabled=False,
-        mailpit_version=_DEFAULT_DOCKER_MAILPIT_VERSION,
-        mailpit_webui_port=_DEFAULT_DOCKER_MAILPIT_WEBUI_PORT,
-        shares=docker_shares,
-    )
+    return docker_shares
+
+
+def _parse_docker_config(
+        cp: configparser.ConfigParser,
+        odoo_version: str,
+        docker_shares: dict[str, DockerShareSpec],
+) -> DockerConfig:
+    docker = DockerConfig(base_image=f"odoo:{odoo_version}", shares=docker_shares)
     if cp.has_section("docker"):
-        supported_docker_options = {
-            "base_image",
-            "odoo_source",
-            "postgres_version",
-            "restic_version",
-            "mailpit_enabled",
-            "mailpit_version",
-            "mailpit_webui_port",
-            "odoo_cpus",
-            "odoo_mem_limit",
-            "db_cpus",
-            "db_mem_limit",
-            "mailpit_cpus",
-            "mailpit_mem_limit",
-            "restart",
-        }
-        for key in cp._sections.get("docker", {}).keys():
+        supported_docker_options = _INI_SET_SUPPORTED_OPTIONS["docker"]
+        for key in _explicit_ini_keys(cp, "docker"):
             if key not in supported_docker_options:
                 raise Exception(
                     f"Unsupported option '{key}' in section [docker]. "
@@ -1792,16 +1744,63 @@ def load_project_config(
             shares=docker_shares,
         )
 
-    config: Dict[str, Any] = {}
+    return docker
+
+
+def _parse_odoo_config(cp: configparser.ConfigParser) -> dict[str, Any]:
+    config: dict[str, Any] = {}
     # [config] is optional. Only include keys explicitly defined in [config]
     # (exclude DEFAULT values).
-    for key in cp._sections.get("config", {}).keys():
+    for key in _explicit_ini_keys(cp, "config"):
         if key == "addons_path":
             raise Exception(
                 "Option 'addons_path' in section [config] is not allowed. "
                 "addons_path is always generated automatically; add addons only via [addons.<name>] sections."
             )
         config[key] = cp.get("config", key)
+
+    return config
+
+
+def load_project_config(
+        ini_path: Path,
+        vars_overrides: Optional[dict[str, str]] = None,
+        ini_overrides: Optional[dict[str, dict[str, str]]] = None,
+        log_resolved: bool = True,
+        log_overrides: bool = True,
+) -> ProjectConfig:
+    if not ini_path.exists():
+        raise Exception(f"INI config not found: {ini_path}")
+
+    cp = _read_ini(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+        log_overrides=log_overrides,
+    )
+
+    if log_resolved:
+        _logger.info("Loaded INI (resolved) from %s:\n\n%s", ini_path, _ini_for_audit_log(cp))
+
+    return _parse_project_config(cp)
+
+
+def _parse_project_config(cp: configparser.ConfigParser) -> ProjectConfig:
+    # Sections expected:
+    #   [virtualenv] (optional)
+    #   [odoo]
+    #   [addons.<name>] for each addon (optional)
+    #   [docker] (optional)
+    #   [docker.share.<name>] for each host-directory share (optional)
+    #   [config] (optional)
+
+    odoo_version = _require_ini_option(cp, "odoo", "version").strip()
+    venv = _parse_virtualenv_config(cp, odoo_version)
+    odoo = _parse_odoo_spec(cp, odoo_version)
+    addons = _parse_addon_specs(cp)
+    docker_shares = _parse_docker_shares(cp)
+    docker = _parse_docker_config(cp, odoo_version, docker_shares)
+    config = _parse_odoo_config(cp)
 
     project = ProjectConfig(
         virtualenv=venv,
@@ -1822,7 +1821,7 @@ def require_venv(
         reuse_wheelhouse: bool = False,
         managed_python: bool = True,
 ) -> None:
-    venv_dir = layout.root / "venv"
+    venv_dir = layout.venv_dir
 
     if not (python_version or "").strip():
         raise Exception("Missing required uv python version (python_version).")
@@ -1867,7 +1866,7 @@ def require_venv(
 
         # Install seed packages into virtualenv
         if not reuse_wheelhouse:
-            venv_py = venv_dir / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+            venv_py = _venv_executable(venv_dir, "python")
             if not venv_py.exists():
                 raise Exception(f"venv python not found at expected path: {venv_py}")
             seed_packages = [
@@ -2188,6 +2187,7 @@ def pip_install_requirements_file(
 # -----------------------------
 
 def _run(cmd: list[str], cwd: Optional[Path] = None) -> str:
+    """Run a Git-oriented command, capturing its text output and streaming progress when appropriate."""
     # Git 2.54+ can spawn background maintenance that races with a subsequent
     # shallow fetch and rewrites .git/shallow while it is being read.
     # Disable automatic maintenance for our Git commands without changing the
@@ -2549,7 +2549,13 @@ def _format_conf_value(value: Any) -> str:
     return str(value)
 
 
-def _resolve_workspace_path(layout: Layout, raw_path: str, fallback: Path) -> Path:
+def _venv_executable(venv: Path, name: str = "python") -> Path:
+    if os.name == "nt":
+        return venv / "Scripts" / f"{name}.exe"
+    return venv / "bin" / name
+
+
+def _resolve_workspace_path(layout: Layout, raw_path: str, fallback: Path, *, fallback_on_error: bool = True) -> Path:
     path_text = (raw_path or "").strip()
     if not path_text:
         return fallback
@@ -2560,6 +2566,8 @@ def _resolve_workspace_path(layout: Layout, raw_path: str, fallback: Path) -> Pa
     try:
         return path.resolve()
     except Exception:
+        if not fallback_on_error:
+            raise
         return path.absolute()
 
 
@@ -2610,7 +2618,7 @@ def _validate_local_addon_path(layout: Layout, addon_name: str, spec: AddonSpec)
     return _validate_existing_dir(addon_path, f"Local addon path for [addons.{addon_name}]")
 
 
-def render_odoo_conf(cfg: Dict[str, Any], layout: Layout, addon_paths: list[Path]) -> str:
+def render_odoo_conf(cfg: dict[str, Any], layout: Layout, addon_paths: list[Path]) -> str:
     odoo_addons_candidates = [
         layout.odoo_dir / "addons",
         layout.odoo_dir / "odoo" / "addons",
@@ -2936,7 +2944,7 @@ def write_dockerignore(docker_context_dir: Path, *, local: bool) -> Path:
     return path
 
 
-def _get_optional_docker_host_port(cfg: Dict[str, Any], key: str) -> Optional[int]:
+def _get_optional_docker_host_port(cfg: dict[str, Any], key: str) -> Optional[int]:
     raw = cfg.get(key)
     if raw is None or str(raw).strip() == "":
         return None
@@ -2956,7 +2964,7 @@ def _get_optional_docker_host_port(cfg: Dict[str, Any], key: str) -> Optional[in
     return port
 
 
-def _render_docker_compose_ports(cfg: Dict[str, Any]) -> str:
+def _render_docker_compose_ports(cfg: dict[str, Any]) -> str:
     """Render host-side ports for the generated local Docker Compose file."""
     host_http_port = (
         _get_optional_docker_host_port(cfg, "http_port")
@@ -3274,33 +3282,32 @@ def write_docker_compose(
     return path
 
 
-def _docker_default_db_name(cfg: ProjectConfig) -> str:
-    db_name = cfg.config.get("db_name")
-    if not isinstance(db_name, str) or not db_name.strip():
-        return "odoo"
-    db_name = db_name.strip()
-    # The same name is used by database and destructive filestore helpers.
-    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
+def _valid_db_name(db_name: str) -> bool:
+    return len(db_name) <= 63 and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name) is not None
+
+
+def _validate_db_name(db_name: str) -> str:
+    if not _valid_db_name(db_name):
         raise Exception(
             "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
             "underscores, dots or hyphens, starting with a letter, digit or underscore."
         )
     return db_name
+
+
+def _docker_default_db_name(cfg: ProjectConfig) -> str:
+    db_name = cfg.config.get("db_name")
+    if not isinstance(db_name, str) or not db_name.strip():
+        return "odoo"
+    db_name = db_name.strip()
+    return _validate_db_name(db_name)
 
 
 def _native_default_db_name(cfg: ProjectConfig) -> str:
     db_name = str(cfg.config.get("db_name") or "").strip()
     if not db_name:
         raise Exception("Native database commands require [config].db_name.")
-    # These names become PostgreSQL identifiers, filesystem path components and
-    # Windows batch variables. Reject traversal, CMD metacharacters and names
-    # that PostgreSQL could silently truncate to another database name.
-    if len(db_name) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", db_name):
-        raise Exception(
-            "Invalid [config].db_name: expected 1-63 ASCII letters, digits, "
-            "underscores, dots or hyphens, starting with a letter, digit or underscore."
-        )
-    return db_name
+    return _validate_db_name(db_name)
 
 
 def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
@@ -3317,15 +3324,14 @@ def _native_pg_env(cfg: ProjectConfig) -> dict[str, str]:
     return values
 
 
-def write_dockerfile(
-        docker_context_dir: Path,
+def render_dockerfile(
         cfg: ProjectConfig,
         has_constraints: bool,
         has_build_constraints: bool,
         *,
         include_addons: bool,
         include_config: bool,
-) -> Path:
+) -> str:
     constraints_copy = ""
     constraints_compile = ""
     build_constraints_copy = ""
@@ -3404,9 +3410,36 @@ RUN if grep -Eq '^[[:space:]]*[^#[:space:]]' /tmp/all-requirements.in.txt; then 
 {odoo_source_copy_step}{workspace_runtime_step}
 USER odoo
 """
+    return content
+
+
+def write_dockerfile(
+        docker_context_dir: Path,
+        cfg: ProjectConfig,
+        has_constraints: bool,
+        has_build_constraints: bool,
+        *,
+        include_addons: bool,
+        include_config: bool,
+) -> Path:
+    content = render_dockerfile(cfg, has_constraints, has_build_constraints,
+                                include_addons=include_addons, include_config=include_config)
     path = _dockerfile_path(docker_context_dir)
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _write_dependency_constraints(
+        venv: VirtualenvConfig,
+        constraints_path: Path,
+        build_constraints_path: Path,
+) -> None:
+    if venv.constraints:
+        _write_constraints(constraints_path, venv.constraints, venv.explicit_requirements)
+    if venv.build_constraints:
+        build_constraints_path.write_text(
+            "\n".join(venv.build_constraints).rstrip("\n") + "\n", encoding="utf-8",
+        )
 
 
 def _prepare_docker_requirements(
@@ -3432,19 +3465,8 @@ def _prepare_docker_requirements(
         return input_path, constraints_path, build_constraints_path
 
     constraints_path = _docker_constraints_path(docker_context_dir)
-    if cfg.virtualenv.constraints:
-        _write_constraints(
-            constraints_path,
-            cfg.virtualenv.constraints,
-            cfg.virtualenv.explicit_requirements,
-        )
-
     build_constraints_path = _docker_build_constraints_path(docker_context_dir)
-    if cfg.virtualenv.build_constraints:
-        build_constraints_path.write_text(
-            "\n".join(cfg.virtualenv.build_constraints).rstrip("\n") + "\n",
-            encoding="utf-8",
-        )
+    _write_dependency_constraints(cfg.virtualenv, constraints_path, build_constraints_path)
 
     input_path = _docker_requirements_input_path(docker_context_dir)
     write_docker_requirements_input(
@@ -3457,6 +3479,36 @@ def _prepare_docker_requirements(
     return input_path, constraints_path, build_constraints_path
 
 
+def _write_docker_context_files(
+        context_dir: Path,
+        cfg: ProjectConfig,
+        constraints_path: Path,
+        build_constraints_path: Path,
+        *,
+        local: bool,
+) -> tuple[Path, Path, Path]:
+    dockerignore_path = write_dockerignore(context_dir, local=local)
+    docker_conf_path = write_docker_odoo_conf(
+        context_dir, cfg,
+        addons_path=_docker_runtime_addons_path(cfg, local=local),
+        local_database=local,
+    )
+    dockerfile_path = write_dockerfile(
+        context_dir, cfg,
+        has_constraints=constraints_path.is_file(),
+        has_build_constraints=build_constraints_path.is_file(),
+        include_addons=not local,
+        include_config=not local,
+    )
+    return dockerignore_path, docker_conf_path, dockerfile_path
+
+
+def _reset_docker_context(path: Path) -> None:
+    if path.exists():
+        _rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def create_local_docker_artifacts(
         layout: Layout,
         cfg: ProjectConfig,
@@ -3465,9 +3517,7 @@ def create_local_docker_artifacts(
         effective_ini_sha256: str,
 ) -> dict[str, Any]:
     """Generate the default local-development Docker context and ROOT/compose.yaml."""
-    if layout.docker_local_dir.exists():
-        _rmtree(layout.docker_local_dir)
-    layout.docker_local_dir.mkdir(parents=True, exist_ok=True)
+    _reset_docker_context(layout.docker_local_dir)
 
     input_path, constraints_path, build_constraints_path = _prepare_docker_requirements(
         layout=layout,
@@ -3475,20 +3525,8 @@ def create_local_docker_artifacts(
         addon_requirement_files=addon_requirement_files,
         docker_context_dir=layout.docker_local_dir,
     )
-    dockerignore_path = write_dockerignore(layout.docker_local_dir, local=True)
-    docker_conf_path = write_docker_odoo_conf(
-        layout.docker_local_dir,
-        cfg,
-        addons_path=_docker_runtime_addons_path(cfg, local=True),
-        local_database=True,
-    )
-    dockerfile_path = write_dockerfile(
-        layout.docker_local_dir,
-        cfg,
-        has_constraints=constraints_path.is_file(),
-        has_build_constraints=build_constraints_path.is_file(),
-        include_addons=False,
-        include_config=False,
+    dockerignore_path, docker_conf_path, dockerfile_path = _write_docker_context_files(
+        layout.docker_local_dir, cfg, constraints_path, build_constraints_path, local=True,
     )
     compose_path = write_docker_compose(layout, cfg, source_ini, effective_ini_sha256)
 
@@ -3516,9 +3554,7 @@ def create_deploy_docker_artifacts(
         requirements_source_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Generate a self-contained Docker deployment build context under ROOT/docker/deploy/."""
-    if layout.docker_deploy_dir.exists():
-        _rmtree(layout.docker_deploy_dir)
-    layout.docker_deploy_dir.mkdir(parents=True, exist_ok=True)
+    _reset_docker_context(layout.docker_deploy_dir)
 
     input_path, constraints_path, build_constraints_path = _prepare_docker_requirements(
         layout=layout,
@@ -3529,19 +3565,8 @@ def create_deploy_docker_artifacts(
     )
     staged_module_count = stage_docker_addons(layout, cfg, layout.docker_deploy_dir)
     staged_odoo_source = stage_docker_odoo_source(layout, cfg, layout.docker_deploy_dir)
-    dockerignore_path = write_dockerignore(layout.docker_deploy_dir, local=False)
-    docker_conf_path = write_docker_odoo_conf(
-        layout.docker_deploy_dir,
-        cfg,
-        addons_path=_docker_runtime_addons_path(cfg, local=False),
-    )
-    dockerfile_path = write_dockerfile(
-        layout.docker_deploy_dir,
-        cfg,
-        has_constraints=constraints_path.is_file(),
-        has_build_constraints=build_constraints_path.is_file(),
-        include_addons=True,
-        include_config=True,
+    dockerignore_path, docker_conf_path, dockerfile_path = _write_docker_context_files(
+        layout.docker_deploy_dir, cfg, constraints_path, build_constraints_path, local=False,
     )
 
     _logger.info("Generated Docker deploy build context: %s", layout.docker_deploy_dir)
@@ -3725,8 +3750,8 @@ def _git_snapshot(path: Path, label: str, allow_dirty: bool) -> dict[str, Any]:
 def _portable_project_ini(
         ini_path: Path,
         cfg: ProjectConfig,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
 ) -> str:
     source = _read_ini(
         ini_path,
@@ -3740,7 +3765,7 @@ def _portable_project_ini(
         if section == "odoo" or section.startswith("addons."):
             continue
         portable.add_section(section)
-        for option in source._sections.get(section, {}).keys():
+        for option in _explicit_ini_keys(source, section):
             value = source.get(section, option, raw=False)
             if _is_sensitive_key(option):
                 value = ""
@@ -3805,8 +3830,8 @@ def create_workspace_bundle(
         cfg: ProjectConfig,
         ini_path: Path,
         output_path: Path,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
         allow_dirty: bool,
 ) -> Path:
     output_path = output_path.expanduser()
@@ -3957,8 +3982,9 @@ def create_workspace_bundle(
 
 def _validate_bundle_member(info: zipfile.ZipInfo) -> PurePosixPath:
     raw_name = info.filename
-    if not raw_name or "\\" in raw_name or raw_name.startswith("/"):
-        raise Exception(f"Unsafe path in workspace bundle: {raw_name!r}")
+    # ZipInfo normalizes backslashes on Windows; validate the original name too.
+    if not raw_name or "\\" in info.orig_filename or raw_name.startswith("/"):
+        raise Exception(f"Unsafe path in workspace bundle: {info.orig_filename!r}")
 
     path = PurePosixPath(raw_name)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -4188,48 +4214,19 @@ def _resolve_bundle_output(raw_output: str, root: Path) -> Path:
 
 
 # -----------------------------
-# Main logic
+# Workspace setup and provisioning
 # -----------------------------
 
-def _sync_project_impl(
+def _prepare_setup_layout(
+        layout: Layout,
+        cfg: ProjectConfig,
         ini_path: Path,
-        sync_odoo: bool,
-        sync_addons: bool,
-        root_override: Optional[Path] = None,
-        reuse_wheelhouse: bool = False,
-        create_venv: bool = False,
-        clear_pip_wheel_cache: bool = False,
-        no_configs: bool = False,
-        no_data_dir: bool = False,
-        target: str = "docker",
-        create_docker_deploy_requested: bool = False,
-        bundle_output: Optional[Path] = None,
-        allow_dirty_bundle: bool = False,
-        vars_overrides: Optional[Dict[str, str]] = None,
-        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
-        source_ini_layers: Optional[list[str]] = None,
-        project_ini_status: Optional[str] = None,
-        preserved_db_name: Optional[str] = None,
-) -> None:
-    if target not in ("docker", "venv"):
-        raise ValueError(f"Unsupported target: {target!r}")
-    if target == "docker" and (create_venv or reuse_wheelhouse or bundle_output is not None):
-        raise ValueError("venv provisioning and workspace bundles require odoo-compose venv")
-    if target == "venv" and create_docker_deploy_requested:
-        raise ValueError("--create-docker-deploy requires odoo-compose docker")
-
-    root = (root_override or ini_path.parent).resolve()
-    if root.exists() and not root.is_dir():
-        raise Exception(f"ROOT exists but is not a directory: {root}")
-    layout = Layout.from_root(root)
-
-    cfg = load_project_config(
-        ini_path,
-        vars_overrides=vars_overrides,
-        ini_overrides=ini_overrides,
-    )
-
-    if target == "venv":
+        options: SetupOptions,
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
+        preserved_db_name: Optional[str],
+) -> Layout:
+    if options.target == "venv":
         db_name = str(cfg.config.get("db_name") or "").strip()
         if not db_name:
             db_name = preserved_db_name or _generated_workspace_db_name(layout.root)
@@ -4237,7 +4234,7 @@ def _sync_project_impl(
                 layout.root, ini_path, db_name, vars_overrides, ini_overrides,
             )
             cfg.config["db_name"] = db_name
-        elif not _same_path(ini_path, layout.root / _DEFAULT_PROJECT_INI_NAME):
+        elif not _same_path(ini_path, layout.project_ini):
             # When an external local file is the source, persist the effective
             # config in ROOT as well. A newly explicit name replaces the old one.
             cp = _read_ini(
@@ -4245,7 +4242,7 @@ def _sync_project_impl(
                 ini_overrides=ini_overrides, log_overrides=False,
             )
             _write_text_file(
-                layout.root / _DEFAULT_PROJECT_INI_NAME,
+                layout.project_ini,
                 _ini_for_effective_file(cp), private=True, atomic=True,
             )
 
@@ -4256,13 +4253,7 @@ def _sync_project_impl(
     if "data_dir" in cfg.config:
         cfg_data_dir_raw = (cfg.config.get("data_dir") or "").strip()
         if cfg_data_dir_raw:
-            cfg_data_dir_path = Path(cfg_data_dir_raw).expanduser()
-            if not cfg_data_dir_path.is_absolute():
-                cfg_data_dir_path = layout.root / cfg_data_dir_path
-            try:
-                cfg_data_dir = cfg_data_dir_path.resolve()
-            except Exception:
-                cfg_data_dir = cfg_data_dir_path.absolute()
+            cfg_data_dir = _resolve_workspace_path(layout, cfg_data_dir_raw, layout.data_dir)
             _logger.warning(f"data_dir override via [config] section: from={layout.data_dir}, to={cfg_data_dir}")
             layout = replace(layout, data_dir=cfg_data_dir)
         else:
@@ -4275,23 +4266,22 @@ def _sync_project_impl(
         _logger.info("Using local Odoo source directory from [odoo].path: %s", local_odoo_dir)
         layout = replace(layout, odoo_dir=local_odoo_dir)
 
-    docker_requested = target == "docker"
+    return layout
 
+
+def _prepare_virtualenv(layout: Layout, cfg: ProjectConfig, options: SetupOptions) -> Optional[Path]:
     # Only explicit venv provisioning flags may create or recreate ROOT/venv.
     # Selecting the venv target alone only generates its configs and scripts.
-    venv_dir = layout.root / "venv"
-    venv_python = venv_dir / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+    venv_dir = layout.venv_dir
     venv_py: Optional[Path] = None
 
-    if create_venv:
-        venv_dir = layout.root / "venv"
-
+    if options.create_venv:
         if venv_dir.exists():
             _logger.info("Recreating venv: removing %s", venv_dir)
             _rmtree(venv_dir)
 
         # Wheelhouse handling: either reuse, or rebuild from scratch.
-        if reuse_wheelhouse:
+        if options.reuse_wheelhouse:
             if not layout.wheelhouse_dir.exists() or not layout.wheelhouse_dir.is_dir():
                 raise Exception(f"--create-venv-from-wheelhouse set but wheelhouse dir not found: {layout.wheelhouse_dir}")
         else:
@@ -4304,27 +4294,27 @@ def _sync_project_impl(
         require_venv(
             layout=layout,
             python_version=cfg.virtualenv.python_version,
-            reuse_wheelhouse=reuse_wheelhouse,
+            reuse_wheelhouse=options.reuse_wheelhouse,
             managed_python=cfg.virtualenv.managed_python,
         )
-        venv_py = venv_dir / ("Scripts/python.exe" if sys.platform.startswith("win") else "bin/python")
+        venv_py = _venv_executable(venv_dir, "python")
         if not venv_py.exists():
             raise Exception(f"venv python not found at expected path: {venv_py}")
 
-        if reuse_wheelhouse and (sync_odoo or sync_addons):
+        if options.reuse_wheelhouse and (options.sync_odoo or options.sync_addons):
             _logger.warning(
                 "--create-venv-from-wheelhouse is set together with repo sync targets; "
                 "dependency lock/wheelhouse rebuild will be skipped. "
                 "If requirements changed, re-run without --create-venv-from-wheelhouse."
             )
     else:
-        if sync_odoo or sync_addons:
+        if options.sync_odoo or options.sync_addons:
             _logger.info(
                 "Repo sync selected, but venv/wheelhouse provisioning is disabled; "
                 "skipping venv/wheelhouse. Use --create-venv to enable."
             )
         else:
-            if docker_requested:
+            if options.target == "docker":
                 _logger.info(
                     "No repository sync target selected; Docker artifacts will use already available addon sources."
                 )
@@ -4333,17 +4323,23 @@ def _sync_project_impl(
                     "No sync target selected; regenerating workspace configuration only (skipping venv/repo operations)."
                 )
 
-    if target == "venv":
-        layout.configs_dir.mkdir(parents=True, exist_ok=True)
-        layout.backups_dir.mkdir(parents=True, exist_ok=True)
-        if not no_data_dir:
-            layout.data_dir.mkdir(parents=True, exist_ok=True)
-    layout.addons_root.mkdir(parents=True, exist_ok=True)
+    return venv_py
 
-    # Sync repositories first, collect all requirements, then compile + install once.
+
+def _sync_git_source(dest: Path, spec: Union[OdooSpec, AddonSpec]) -> None:
+    if spec.commit or spec.shallow:
+        ensure_repo(spec.repo, dest, branch=spec.branch, depth=1, single_branch=True, fetch_all=False)
+        if spec.commit:
+            checkout_commit(dest, spec.commit, branch=spec.branch, fetch_all=False, depth=1)
+        else:
+            checkout_branch(dest, spec.branch, fetch_all=False, depth=1, already_fetched=True)
+    else:
+        ensure_repo(spec.repo, dest, branch=spec.branch, depth=None, single_branch=False, fetch_all=True)
+        checkout_branch(dest, spec.branch, fetch_all=True, depth=None)
+
+
+def _sync_odoo_source(layout: Layout, cfg: ProjectConfig, sync_odoo: bool, venv_py: Optional[Path]) -> list[Path]:
     req_files: list[Path] = []
-    addon_req_files: list[Path] = []
-
     if sync_odoo:
         odoo_dest = _validate_local_odoo_path(layout, cfg.odoo)
 
@@ -4352,49 +4348,14 @@ def _sync_project_impl(
                 "Using local Odoo path for [odoo]: %s (skipping git sync)",
                 odoo_dest,
             )
-        elif cfg.odoo.commit:
-            _logger.info(
-                "Syncing Odoo repo at commit %s (branch=%s) using shallow fetch with incremental deepen fallback.",
-                cfg.odoo.commit,
-                cfg.odoo.branch,
-            )
-            ensure_repo(
-                cfg.odoo.repo,
-                odoo_dest,
-                branch=cfg.odoo.branch,
-                depth=1,
-                single_branch=True,
-                fetch_all=False,
-            )
-            checkout_commit(
-                odoo_dest,
-                cfg.odoo.commit,
-                branch=cfg.odoo.branch,
-                fetch_all=False,
-                depth=1,
-            )
-        elif cfg.odoo.shallow:
-            # Shallow + single branch (default; disable with [odoo] shallow=false).
-            ensure_repo(
-                cfg.odoo.repo,
-                odoo_dest,
-                branch=cfg.odoo.branch,
-                depth=1,
-                single_branch=True,
-                fetch_all=False,
-            )
-            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=False, depth=1, already_fetched=True)
         else:
-            # Full clone/fetch.
-            ensure_repo(
-                cfg.odoo.repo,
-                odoo_dest,
-                branch=cfg.odoo.branch,
-                depth=None,
-                single_branch=False,
-                fetch_all=True,
-            )
-            checkout_branch(odoo_dest, cfg.odoo.branch, fetch_all=True, depth=None)
+            if cfg.odoo.commit:
+                _logger.info(
+                    "Syncing Odoo repo at commit %s (branch=%s) using shallow fetch with incremental deepen fallback.",
+                    cfg.odoo.commit,
+                    cfg.odoo.branch,
+                )
+            _sync_git_source(odoo_dest, cfg.odoo)
 
         odoo_req = odoo_dest / "requirements.txt"
         if not odoo_req.exists():
@@ -4408,6 +4369,18 @@ def _sync_project_impl(
             if odoo_req.exists():
                 req_files.append(odoo_req)
 
+    return req_files
+
+
+def _sync_addon_sources(
+        layout: Layout,
+        cfg: ProjectConfig,
+        sync_addons: bool,
+        venv_py: Optional[Path],
+        docker_requested: bool,
+) -> tuple[list[Path], list[Path]]:
+    req_files: list[Path] = []
+    addon_req_files: list[Path] = []
     if sync_addons:
         if not cfg.addons:
             _logger.info("No [addons.*] sections configured; skipping addons sync.")
@@ -4420,50 +4393,15 @@ def _sync_project_impl(
                     addon_name,
                     dest,
                 )
-            elif spec.commit:
-                _logger.info(
-                    "Syncing addon [%s] at commit %s (branch=%s) using shallow fetch with incremental deepen fallback.",
-                    addon_name,
-                    spec.commit,
-                    spec.branch,
-                )
-                ensure_repo(
-                    spec.repo,
-                    dest,
-                    branch=spec.branch,
-                    depth=1,
-                    single_branch=True,
-                    fetch_all=False,
-                )
-                checkout_commit(
-                    dest,
-                    spec.commit,
-                    branch=spec.branch,
-                    fetch_all=False,
-                    depth=1,
-                )
-            elif spec.shallow:
-                # Shallow + single branch (default; disable with [addons.<name>] shallow=false).
-                ensure_repo(
-                    spec.repo,
-                    dest,
-                    branch=spec.branch,
-                    depth=1,
-                    single_branch=True,
-                    fetch_all=False,
-                )
-                checkout_branch(dest, spec.branch, fetch_all=False, depth=1, already_fetched=True)
             else:
-                # Full clone/fetch.
-                ensure_repo(
-                    spec.repo,
-                    dest,
-                    branch=spec.branch,
-                    depth=None,
-                    single_branch=False,
-                    fetch_all=True,
-                )
-                checkout_branch(dest, spec.branch, fetch_all=True, depth=None)
+                if spec.commit:
+                    _logger.info(
+                        "Syncing addon [%s] at commit %s (branch=%s) using shallow fetch with incremental deepen fallback.",
+                        addon_name,
+                        spec.commit,
+                        spec.branch,
+                    )
+                _sync_git_source(dest, spec)
 
             addon_req = dest / "requirements.txt"
             if addon_req.exists():
@@ -4480,6 +4418,16 @@ def _sync_project_impl(
                         req_files.append(addon_req)
                     addon_req_files.append(addon_req)
 
+    return req_files, addon_req_files
+
+
+def _provision_dependencies(
+        layout: Layout,
+        cfg: ProjectConfig,
+        options: SetupOptions,
+        venv_py: Optional[Path],
+        req_files: list[Path],
+) -> None:
     # Compile and install a single lock file from all synced repos + base requirements.
     # In --create-venv-from-wheelhouse mode we skip compilation + wheel build and only install offline from existing lock/wheels.
     if venv_py is not None:
@@ -4497,7 +4445,7 @@ def _sync_project_impl(
         constraints_path = layout.wheelhouse_dir / "constraints.txt"
         build_constraints_path = layout.wheelhouse_dir / "build-constraints.txt"
 
-        if reuse_wheelhouse:
+        if options.reuse_wheelhouse:
             # Reuse existing wheelhouse (offline-only mode)
             if not layout.wheelhouse_dir.exists() or not layout.wheelhouse_dir.is_dir():
                 raise Exception(f"Wheelhouse directory not found: {layout.wheelhouse_dir}")
@@ -4528,16 +4476,7 @@ def _sync_project_impl(
                 requirements_path=lock_path,
             )
         else:
-            # Write dependency and build constraints to files.
-            if cfg.virtualenv.constraints:
-                _write_constraints(
-                    constraints_path,
-                    cfg.virtualenv.constraints,
-                    cfg.virtualenv.explicit_requirements,
-                )
-            if cfg.virtualenv.build_constraints:
-                build_constraints_path.write_text(
-                    "\n".join(cfg.virtualenv.build_constraints).rstrip("\n") + "\n", encoding="utf-8")
+            _write_dependency_constraints(cfg.virtualenv, constraints_path, build_constraints_path)
 
             # We need Odoo requirements to produce a correct lock.
             odoo_req = layout.odoo_dir / "requirements.txt"
@@ -4566,10 +4505,10 @@ def _sync_project_impl(
                 requirements_path=lock_path,
                 wheelhouse_dir=layout.wheelhouse_dir,
                 build_constraints_path=build_constraints_path,
-                clear_pip_wheel_cache=clear_pip_wheel_cache,
+                clear_pip_wheel_cache=options.clear_pip_wheel_cache,
             )
 
-            if create_venv:
+            if options.create_venv:
                 pip_install_requirements_file(
                     venv_python=venv_py,
                     workspace_root=layout.root,
@@ -4577,7 +4516,7 @@ def _sync_project_impl(
                     requirements_path=lock_path,
                 )
 
-        if create_venv:
+        if options.create_venv:
             # Install Odoo itself in editable mode (so local source changes are reflected).
             _logger.info("Installing Odoo in editable mode: %s", layout.odoo_dir)
             cmd = [
@@ -4594,10 +4533,20 @@ def _sync_project_impl(
                 err_msg="Failed to install Odoo in editable mode.",
             )
 
+
+def _generate_docker_artifacts(
+        layout: Layout,
+        cfg: ProjectConfig,
+        options: SetupOptions,
+        addon_req_files: list[Path],
+        ini_path: Path,
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     local_docker_artifacts: Optional[dict[str, Any]] = None
     deploy_docker_artifacts: Optional[dict[str, Any]] = None
 
-    if target == "docker":
+    if options.target == "docker":
         _logger.info("Generating local-development Docker artifacts.")
         effective_ini = _ini_for_effective_file(_read_ini(
             ini_path,
@@ -4615,7 +4564,7 @@ def _sync_project_impl(
     else:
         _logger.info("Skipping Docker artifacts (target=venv).")
 
-    if create_docker_deploy_requested:
+    if options.create_docker_deploy_requested:
         _logger.info("Generating Docker deploy build context.")
         requirements_source_dir = (
             local_docker_artifacts.get("requirements_dir")
@@ -4629,8 +4578,12 @@ def _sync_project_impl(
             requirements_source_dir=requirements_source_dir,
         )
 
+    return local_docker_artifacts, deploy_docker_artifacts
+
+
+def _generate_native_artifacts(layout: Layout, cfg: ProjectConfig, options: SetupOptions) -> None:
     # Generate config (unless disabled).
-    if target == "venv" and not no_configs:
+    if options.target == "venv" and not options.no_configs:
         addon_paths: list[Path] = [
             _validate_local_addon_path(layout, addon_name, spec)
             for addon_name, spec in cfg.addons.items()
@@ -4638,30 +4591,31 @@ def _sync_project_impl(
         conf_text = render_odoo_conf(cfg.config, layout, addon_paths)
         layout.conf_path.write_text(conf_text, encoding="utf-8")
     else:
-        _logger.info("Skipping native config generation (target=%s, --no-configs=%s).", target, no_configs)
+        _logger.info("Skipping native config generation (target=%s, --no-configs=%s).", options.target, options.no_configs)
 
     # Remove obsolete generated helpers when upgrading an existing native workspace.
-    if target == "venv":
-        for script_name in (*_BACKUP_RESTORE_SCRIPT_NAMES, "neutralize-db", "run", "shell", "update", "test", "instance"):
+    if options.target == "venv":
+        for script_name in (*_BACKUP_RESTORE_COMMANDS, "neutralize-db", "run", "shell", "update", "test", "instance"):
             for ext in ("sh", "bat"):
                 (layout.root / "odoo-scripts" / f"{script_name}.{ext}").unlink(missing_ok=True)
 
-    bundle_created: Optional[Path] = None
-    if bundle_output is not None:
-        bundle_created = create_workspace_bundle(
-            layout=layout,
-            cfg=cfg,
-            ini_path=ini_path,
-            output_path=bundle_output,
-            vars_overrides=vars_overrides,
-            ini_overrides=ini_overrides,
-            allow_dirty=allow_dirty_bundle,
-        )
 
+def _log_setup_summary(
+        layout: Layout,
+        cfg: ProjectConfig,
+        options: SetupOptions,
+        venv_py: Optional[Path],
+        bundle_created: Optional[Path],
+        local_docker_artifacts: Optional[dict[str, Any]],
+        deploy_docker_artifacts: Optional[dict[str, Any]],
+        ini_path: Path,
+        source_ini_layers: Optional[list[str]],
+        project_ini_status: Optional[str],
+) -> None:
     synced: list[str] = []
-    if sync_odoo:
+    if options.sync_odoo:
         synced.append("odoo")
-    if sync_addons:
+    if options.sync_addons:
         synced.append("addons")
 
     _logger.info("OK")
@@ -4672,11 +4626,11 @@ def _sync_project_impl(
         synced_label = "none"
 
     generated: list[str] = []
-    if target == "venv" and not no_configs:
+    if options.target == "venv" and not options.no_configs:
         generated.append("configs")
-    if target == "docker":
+    if options.target == "docker":
         generated.append("docker/local + compose")
-    if create_docker_deploy_requested:
+    if options.create_docker_deploy_requested:
         generated.append("docker/deploy")
     if generated:
         synced_label = f"{synced_label} (generated: {', '.join(generated)})"
@@ -4687,21 +4641,21 @@ def _sync_project_impl(
     _logger.info(f"  ROOT:               {layout.root}")
     _logger.info(f"  Odoo:               {layout.odoo_dir}")
     _logger.info(f"  Addons:             {layout.addons_root}")
-    if target == "venv":
+    if options.target == "venv":
         _logger.info(f"  Backups:            {layout.backups_dir}")
-        if no_data_dir:
+        if options.no_data_dir:
             _logger.info("  Data:               SKIPPED (--no-data-dir)")
         else:
             _logger.info(f"  Data:               {layout.data_dir}")
     else:
         _logger.info("  Native Data/Backups: SKIPPED (target=docker)")
-    if target == "docker":
+    if options.target == "docker":
         _logger.info("  Native Config:      SKIPPED (target=docker)")
-    elif no_configs:
+    elif options.no_configs:
         _logger.info(f"  Config:             SKIPPED (--no-configs) [{layout.conf_path}]")
     else:
         _logger.info(f"  Config:             {layout.conf_path}")
-    if target == "venv" and (venv_py is not None or venv_python.is_file()):
+    if options.target == "venv" and (venv_py is not None or _venv_executable(layout.venv_dir).is_file()):
         _logger.info(f"  Venv:               {layout.root / 'venv'}")
         lock_path = layout.wheelhouse_dir / "all-requirements.lock.txt"
         if lock_path.exists():
@@ -4731,7 +4685,7 @@ def _sync_project_impl(
         docker_requirements_input = _docker_requirements_input_path(layout.docker_local_dir)
         if docker_requirements_input.exists():
             _logger.info(f"  Docker Requirements: {docker_requirements_input}")
-    elif target == "venv":
+    elif options.target == "venv":
         _logger.info(f"  Docker Local:       SKIPPED (target=venv) [{layout.docker_local_dir}]")
 
     if deploy_docker_artifacts is not None:
@@ -4760,6 +4714,84 @@ def _sync_project_impl(
             _logger.info("  - layer #%s: %s", layer_idx+1, source_ini_layer)
 
 
+def _sync_project_impl(
+        ini_path: Path,
+        options: SetupOptions,
+        root_override: Optional[Path] = None,
+        vars_overrides: Optional[dict[str, str]] = None,
+        ini_overrides: Optional[dict[str, dict[str, str]]] = None,
+        source_ini_layers: Optional[list[str]] = None,
+        project_ini_status: Optional[str] = None,
+        preserved_db_name: Optional[str] = None,
+) -> None:
+    if options.target not in ("docker", "venv"):
+        raise ValueError(f"Unsupported target: {options.target!r}")
+    if options.target == "docker" and (options.create_venv or options.reuse_wheelhouse or options.bundle_output is not None):
+        raise ValueError("venv provisioning and workspace bundles require odoo-compose venv")
+    if options.target == "venv" and options.create_docker_deploy_requested:
+        raise ValueError("--create-docker-deploy requires odoo-compose docker")
+
+    root = (root_override or ini_path.parent).resolve()
+    if root.exists() and not root.is_dir():
+        raise Exception(f"ROOT exists but is not a directory: {root}")
+    layout = Layout.from_root(root)
+
+    cfg = load_project_config(
+        ini_path,
+        vars_overrides=vars_overrides,
+        ini_overrides=ini_overrides,
+    )
+
+    layout = _prepare_setup_layout(layout, cfg, ini_path, options, vars_overrides,
+                                   ini_overrides, preserved_db_name)
+    venv_py = _prepare_virtualenv(layout, cfg, options)
+
+    if options.target == "venv":
+        layout.configs_dir.mkdir(parents=True, exist_ok=True)
+        layout.backups_dir.mkdir(parents=True, exist_ok=True)
+        if not options.no_data_dir:
+            layout.data_dir.mkdir(parents=True, exist_ok=True)
+    layout.addons_root.mkdir(parents=True, exist_ok=True)
+
+    req_files = _sync_odoo_source(layout, cfg, options.sync_odoo, venv_py)
+    addon_files, addon_req_files = _sync_addon_sources(
+        layout, cfg, options.sync_addons, venv_py, options.target == "docker",
+    )
+    req_files.extend(addon_files)
+    _provision_dependencies(layout, cfg, options, venv_py, req_files)
+    local_docker_artifacts, deploy_docker_artifacts = _generate_docker_artifacts(
+        layout, cfg, options, addon_req_files, ini_path, vars_overrides, ini_overrides,
+    )
+    _generate_native_artifacts(layout, cfg, options)
+
+    bundle_created: Optional[Path] = None
+    if options.bundle_output is not None:
+        bundle_created = create_workspace_bundle(
+            layout=layout,
+            cfg=cfg,
+            ini_path=ini_path,
+            output_path=options.bundle_output,
+            vars_overrides=vars_overrides,
+            ini_overrides=ini_overrides,
+            allow_dirty=options.allow_dirty_bundle,
+        )
+
+    _log_setup_summary(layout, cfg, options, venv_py, bundle_created,
+                       local_docker_artifacts, deploy_docker_artifacts, ini_path,
+                       source_ini_layers, project_ini_status)
+
+
+def _update_provisioning_details(
+        record: dict[str, Any],
+        cfg: ProjectConfig,
+        source_ini_path: Path,
+        resolved_ini_path: Path,
+) -> None:
+    details = _collect_provisioning_details(cfg, source_ini_path, resolved_ini_path)
+    record["config"] = details["config"]
+    record["artifacts"].update(details["artifacts"])
+
+
 def sync_project(
         ini_path: Path,
         sync_odoo: bool,
@@ -4774,8 +4806,8 @@ def sync_project(
         create_docker_deploy_requested: bool = False,
         bundle_output: Optional[Path] = None,
         allow_dirty_bundle: bool = False,
-        vars_overrides: Optional[Dict[str, str]] = None,
-        ini_overrides: Optional[Dict[str, Dict[str, str]]] = None,
+        vars_overrides: Optional[dict[str, str]] = None,
+        ini_overrides: Optional[dict[str, dict[str, str]]] = None,
         no_provisioning_log: bool = False,
         cli_argv: Optional[list[str]] = None,
         source_ini_layers: Optional[list[str]] = None,
@@ -4783,6 +4815,19 @@ def sync_project(
         preserved_db_name: Optional[str] = None,
         source_snapshot_ready: bool = False,
 ) -> None:
+    options = SetupOptions(
+        sync_odoo=sync_odoo,
+        sync_addons=sync_addons,
+        reuse_wheelhouse=reuse_wheelhouse,
+        create_venv=create_venv,
+        clear_pip_wheel_cache=clear_pip_wheel_cache,
+        no_configs=no_configs,
+        no_data_dir=no_data_dir,
+        target=target,
+        create_docker_deploy_requested=create_docker_deploy_requested,
+        bundle_output=bundle_output,
+        allow_dirty_bundle=allow_dirty_bundle,
+    )
     root = (root_override or ini_path.parent).resolve()
     layout = Layout.from_root(root)
     _refresh_last_ini_snapshots(
@@ -4793,18 +4838,8 @@ def sync_project(
     if no_provisioning_log:
         _sync_project_impl(
             ini_path=ini_path,
-            sync_odoo=sync_odoo,
-            sync_addons=sync_addons,
+            options=options,
             root_override=root_override,
-            reuse_wheelhouse=reuse_wheelhouse,
-            create_venv=create_venv,
-            clear_pip_wheel_cache=clear_pip_wheel_cache,
-            no_configs=no_configs,
-            no_data_dir=no_data_dir,
-            target=target,
-            create_docker_deploy_requested=create_docker_deploy_requested,
-            bundle_output=bundle_output,
-            allow_dirty_bundle=allow_dirty_bundle,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             source_ini_layers=source_ini_layers,
@@ -4873,7 +4908,7 @@ def sync_project(
     _write_provisioning_record(layout, run_id, record)
 
     copied_source_ini_path = _copy_source_ini_for_manifest(
-        layout, run_id, layout.root / ".odt-env" / "last-source-project.ini",
+        layout, run_id, layout.state_dir / "last-source-project.ini",
     )
     if copied_source_ini_path is not None:
         source_ini_path = copied_source_ini_path
@@ -4886,31 +4921,15 @@ def sync_project(
         ini_overrides=ini_overrides,
     )
     if resolved_ini is not None:
-        resolved_ini_path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_ini_path.write_text(resolved_ini, encoding="utf-8")
-        if not sys.platform.startswith("win"):
-            try:
-                resolved_ini_path.chmod(0o600)
-            except OSError:
-                pass
+        _write_text_file(resolved_ini_path, resolved_ini, private=True)
         record["artifacts"]["resolved_ini"] = str(resolved_ini_path)
         _write_provisioning_record(layout, run_id, record)
 
     try:
         _sync_project_impl(
             ini_path=ini_path,
-            sync_odoo=sync_odoo,
-            sync_addons=sync_addons,
+            options=options,
             root_override=root_override,
-            reuse_wheelhouse=reuse_wheelhouse,
-            create_venv=create_venv,
-            clear_pip_wheel_cache=clear_pip_wheel_cache,
-            no_configs=no_configs,
-            no_data_dir=no_data_dir,
-            target=target,
-            create_docker_deploy_requested=create_docker_deploy_requested,
-            bundle_output=bundle_output,
-            allow_dirty_bundle=allow_dirty_bundle,
             vars_overrides=vars_overrides,
             ini_overrides=ini_overrides,
             source_ini_layers=effective_source_ini_layers,
@@ -4932,9 +4951,7 @@ def sync_project(
                 log_resolved=False,
                 log_overrides=False,
             )
-            details = _collect_provisioning_details(cfg, source_ini_path, resolved_ini_path)
-            record["config"] = details["config"]
-            record["artifacts"].update(details["artifacts"])
+            _update_provisioning_details(record, cfg, source_ini_path, resolved_ini_path)
         except Exception:
             pass
         _write_provisioning_record(layout, run_id, record)
@@ -4957,9 +4974,7 @@ def sync_project(
         log_resolved=False,
         log_overrides=False,
     )
-    details = _collect_provisioning_details(cfg, source_ini_path, resolved_ini_path)
-    record["config"] = details["config"]
-    record["artifacts"].update(details["artifacts"])
+    _update_provisioning_details(record, cfg, source_ini_path, resolved_ini_path)
     record["status"] = "success"
     record["finished_at"] = _utc_now_iso()
     _write_provisioning_record(layout, run_id, record)
@@ -4967,7 +4982,7 @@ def sync_project(
 
 
 # -----------------------------
-# CLI
+# Project INI sources and CLI input preparation
 # -----------------------------
 
 def _match_git_ini_prefix(raw_value: str) -> Optional[str]:
@@ -5188,19 +5203,6 @@ def _parse_url_ini_source(raw_ini: str) -> Optional[UrlIniSource]:
     return UrlIniSource(url=raw_value, original_url=raw_value)
 
 
-def _safe_url_ini_filename(source_url: str) -> str:
-    """Return a safe local filename for a downloaded URL INI."""
-    parsed = urlparse(source_url)
-    raw_name = PurePosixPath(unquote(parsed.path)).name.strip()
-    if not raw_name or raw_name in {".", ".."}:
-        return "odoo-project.ini"
-
-    # Keep the URL basename but strip path separators that could appear after
-    # decoding percent-encoded input.
-    safe_name = raw_name.replace("/", "_").replace("\\", "_")
-    return safe_name or "odoo-project.ini"
-
-
 def _copy_url_ini_to_root(
         source: UrlIniSource,
         root: Path,
@@ -5287,7 +5289,10 @@ def _resolve_local_ini_path(parser: argparse.ArgumentParser, raw_ini: str) -> Pa
     return ini_path
 
 
-def _parse_remote_ini_sources(parser: argparse.ArgumentParser, raw_ini: str) -> tuple[Optional[GitIniSource], Optional[UrlIniSource]]:
+def _parse_remote_ini_sources(
+        parser: argparse.ArgumentParser,
+        raw_ini: str,
+) -> tuple[Optional[GitIniSource], Optional[UrlIniSource]]:
     """Parse a CLI INI value as a Git or URL source, returning (git, url)."""
     try:
         git_ini_source = _parse_git_ini_source(raw_ini)
@@ -5498,8 +5503,8 @@ def _prepare_included_project_ini(
         parser: argparse.ArgumentParser,
         raw_sources: list[str],
         root: Path,
-        vars_overrides: Optional[Dict[str, str]],
-        ini_overrides: Optional[Dict[str, Dict[str, str]]],
+        vars_overrides: Optional[dict[str, str]],
+        ini_overrides: Optional[dict[str, dict[str, str]]],
 ) -> Path:
     """Materialize and merge positional INI + -i/--include layers into ROOT/odoo-project.ini."""
     with tempfile.TemporaryDirectory(prefix="odt-env-ini-layers-") as tmp_dir:
@@ -5533,7 +5538,12 @@ def _prepare_included_project_ini(
         return output_path
 
 
-def build_parser(prog: str = "odoo-compose", target: Optional[str] = None, *, setup_command: bool = False) -> argparse.ArgumentParser:
+def build_parser(
+        prog: str = "odoo-compose",
+        target: Optional[str] = None,
+        *,
+        setup_command: bool = False,
+) -> argparse.ArgumentParser:
     """Build the top-level command list or the full workspace setup parser."""
     if not setup_command:
         if target is None:
@@ -6006,7 +6016,7 @@ def _run_neutralize_cli(target: str, args: list[str], prog: str) -> int:
                                     "--entrypoint", "odoo", "odoo", "neutralize",
                                     "-c", "/etc/odoo/odoo.conf", "-d", db_name]
             else:
-                executable = root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                executable = _venv_executable(root / "venv", "python")
                 layout = Layout.from_root(root)
                 odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
                 conf = layout.conf_path
@@ -6140,16 +6150,14 @@ def _workspace_restic_command(target: str, root: Path, args: list[str]) -> list[
     return cmd + ["--entrypoint", "restic", "odoo", *args]
 
 
-def _workspace_filestore_path(target: str, root: Path, cfg: ProjectConfig, db_name: str) -> Any:
+def _workspace_filestore_path(target: str, root: Path, cfg: ProjectConfig, db_name: str) -> Union[str, Path]:
     if target == "docker":
         return f"/var/lib/odoo/filestore/{db_name}"
     layout = Layout.from_root(root)
-    raw_dir = str(cfg.config.get("data_dir") or "").strip()
-    if raw_dir:
-        specified_dir = Path(raw_dir).expanduser()
-        layout = replace(layout, data_dir=(specified_dir if specified_dir.is_absolute()
-                                           else root / specified_dir).resolve())
-    return layout.data_dir / "filestore" / db_name
+    data_dir = _resolve_workspace_path(
+        layout, str(cfg.config.get("data_dir") or ""), layout.data_dir, fallback_on_error=False,
+    )
+    return data_dir / "filestore" / db_name
 
 
 def _workspace_tar_command(target: str, arguments: list[str]) -> list[str]:
@@ -6170,6 +6178,10 @@ def _workspace_temp_backup(output: Path, command: list[str], root: Path, env: Op
     finally:
         tmp_path.unlink(missing_ok=True)
 
+
+# -----------------------------
+# Database and filestore backup / restore
+# -----------------------------
 
 def _build_backup_restore_parser(action: str, prog: str) -> argparse.ArgumentParser:
     descriptions = {
@@ -6202,6 +6214,188 @@ def _build_backup_restore_parser(action: str, prog: str) -> argparse.ArgumentPar
     return parser
 
 
+def _prepare_native_filestore(path: str) -> None:
+    if Path(path).exists():
+        if Path(path).is_dir() and not Path(path).is_symlink():
+            shutil.rmtree(path)
+        else:
+            Path(path).unlink()
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def _backup_workspace_data(
+        target: str,
+        root: Path,
+        db_name: str,
+        env: Optional[dict[str, str]],
+        opts: argparse.Namespace,
+        action: str,
+        stamp: str,
+        filestore: Union[str, Path],
+) -> int:
+    ext = ".dump" if action == "backup-db" else "_filestore.tar.gz"
+    output = Path(opts.output).expanduser() if opts.output else root / "odoo-backups" / f"{db_name}_{stamp}{ext}"
+    if not output.is_absolute():
+        output = root / output
+    output = output.absolute()
+    if action == "backup-db":
+        if target == "docker":
+            command = _workspace_docker_command() + ["compose", "exec", "-T", "db", "pg_dump",
+                "--format=custom", "--no-owner", "--no-acl", "-U", "odoo", db_name]
+        else:
+            command = [_workspace_postgres_command("pg_dump"), "--format=custom", "--no-owner", "--no-acl", db_name]
+    else:
+        command = _workspace_tar_command(target, ["-C", str(filestore), "-czf", "-", "."])
+    _logger.info("Backing up %s to %s", action, output)
+    _workspace_temp_backup(output, command, root, env)
+    _logger.info("Backup created: %s", output)
+    return 0
+
+
+def _restore_database(
+        target: str,
+        root: Path,
+        db_name: str,
+        env: Optional[dict[str, str]],
+        opts: argparse.Namespace,
+        source: Path,
+) -> int:
+    exists = _workspace_db_exists(target, root, env, db_name)
+    if exists and not opts.force:
+        raise _WorkspaceOperationError(f"target database '{db_name}' already exists. Use --force to replace it.")
+    if target == "venv" and not opts.move:
+        click = _venv_executable(root / "venv", "click-odoo")
+        conf = root / "odoo-configs/odoo-server.conf"
+        if not click.is_file() or not conf.is_file():
+            raise _WorkspaceOperationError("--copy requires venv click-odoo and Odoo config")
+    _logger.info("Restoring database %s from %s", db_name, source)
+    if exists:
+        drop = _workspace_db_command(target, "dropdb", "--force", "--maintenance-db=postgres", db_name)
+        _workspace_command(drop, root, env=env)
+    _workspace_command(_workspace_db_command(target, "createdb", "--maintenance-db=postgres", db_name), root, env=env)
+    cmd = _workspace_db_command(target, "pg_restore", "--verbose", "--exit-on-error", "--no-owner", "--no-acl", "-d", db_name)
+    with source.open("rb") as stream:
+        _workspace_command(cmd, root, env=env, stdin=stream)
+    if not opts.move:
+        identity = 'env["ir.config_parameter"].init(force=True)\n'.encode("utf-8")
+        if target == "docker":
+            cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+                "--entrypoint", "click-odoo", "odoo", "-c", "/etc/odoo/odoo.conf",
+                "-d", db_name, "--log-level=error"]
+        else:
+            cmd = [str(click), "-c", str(conf), "-d", db_name, "--log-level=error"]
+        try:
+            result = subprocess.run(cmd, cwd=root, env=env, input=identity, check=False)
+        except OSError as exc:
+            raise _WorkspaceOperationError("could not run database identity reset") from exc
+        if result.returncode:
+            raise _WorkspaceOperationError("database identity reset failed")
+        reset_sql = ("DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code';\n"
+            "UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo';\n"
+            "UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';\n").encode("utf-8")
+        if target == "docker":
+            sql_cmd = _workspace_docker_command() + ["compose", "exec", "-T", "db", "psql", "-v", "ON_ERROR_STOP=1", "-U", "odoo", "-d", db_name]
+        else:
+            sql_cmd = [_workspace_postgres_command("psql"), "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name]
+        result = subprocess.run(sql_cmd, cwd=root, env=env, input=reset_sql, check=False)
+        if result.returncode:
+            raise _WorkspaceOperationError("database identity SQL reset failed")
+    _logger.info("Database restore completed: %s", db_name)
+    return 0
+
+
+def _check_filestore_restore(
+        target: str,
+        root: Path,
+        db_name: str,
+        path: str,
+        force: bool,
+        *,
+        user_args: tuple[str, ...] = (),
+) -> None:
+    if target == "docker":
+        exists_cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", *user_args,
+            "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo",
+            "-c", 'if [ -d "/var/lib/odoo/filestore/${DB_NAME}" ]; then echo exists; else echo missing; fi']
+        exists = _workspace_command(exists_cmd, root, capture=True).strip() == b"exists"
+    else:
+        exists = Path(path).exists()
+    if exists and not force:
+        raise _WorkspaceOperationError(f"target filestore for database '{db_name}' already exists. Use --force to replace it.")
+
+
+def _restore_filestore(
+        target: str,
+        root: Path,
+        db_name: str,
+        env: Optional[dict[str, str]],
+        opts: argparse.Namespace,
+        source: Path,
+        filestore: Union[str, Path],
+) -> int:
+    path = str(filestore)
+    _check_filestore_restore(target, root, db_name, path, opts.force)
+    _logger.info("Restoring filestore for %s from %s", db_name, source)
+    if target == "docker":
+        cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
+            "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
+            'set -eu; target="/var/lib/odoo/filestore/${DB_NAME}"; rm -rf "${target}"; mkdir -p "${target}"; tar -xzf - -C "${target}"']
+        with source.open("rb") as stream:
+            _workspace_command(cmd, root, stdin=stream)
+    else:
+        _prepare_native_filestore(path)
+        with source.open("rb") as stream:
+            _workspace_command(["tar", "-xzf", "-", "-C", path], root, stdin=stream, env=env)
+    _logger.info("Filestore restore completed: %s", db_name)
+    return 0
+
+
+def _run_restic_operation(
+        target: str,
+        root: Path,
+        cfg: ProjectConfig,
+        db_name: str,
+        opts: argparse.Namespace,
+        action: str,
+        filestore: Union[str, Path],
+        parser: argparse.ArgumentParser,
+) -> int:
+    host = os.environ.get("RESTIC_HOST") or socket.getfqdn()
+    if action == "restic":
+        if not opts.restic_args:
+            parser.error("RESTIC_COMMAND is required")
+        command = _workspace_restic_command(target, root, opts.restic_args)
+    elif action == "backup-filestore-restic":
+        extra_tags = (["--tag", f"backup-id:{os.environ['RESTIC_BACKUP_ID']}"]
+                      if os.environ.get("RESTIC_BACKUP_ID") else [])
+        command = _workspace_restic_command(target, root, ["backup", "--host", host,
+            "--tag", "odoo", "--tag", "filestore", "--tag", f"db:{db_name}",
+            *extra_tags, *opts.restic_args, str(filestore)])
+    else:
+        # Respect the source database name from the original backup.
+        source_db = os.environ.get("RESTIC_SOURCE_DB_NAME", db_name)
+        if not _valid_db_name(source_db):
+            raise _WorkspaceOperationError("invalid RESTIC_SOURCE_DB_NAME")
+        source_filestore = _workspace_filestore_path(target, root, cfg, source_db)
+        path = str(filestore)
+        _check_filestore_restore(target, root, db_name, path, opts.force, user_args=("--user", "0:0"))
+        _logger.info("Restoring filestore for %s from Restic snapshot %s", db_name, opts.snapshot)
+        if target == "docker":
+            cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
+                "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
+                'set -eu; rm -rf "/var/lib/odoo/filestore/${DB_NAME}"; mkdir -p "/var/lib/odoo/filestore/${DB_NAME}"']
+            _workspace_command(cmd, root)
+        else:
+            _prepare_native_filestore(path)
+        restic_args = ["restore", f"{opts.snapshot}:{source_filestore}", "--target", path]
+        if opts.snapshot == "latest":
+            restic_args += ["--host", host, "--path", str(source_filestore)]
+        command = _workspace_restic_command(target, root, restic_args)
+    _workspace_command(command, root, env=os.environ.copy())
+    _logger.info("Restic operation completed")
+    return 0
+
+
 def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str) -> int:
     """Execute backup/restore tasks directly from the installed CLI (no generated scripts)."""
     parser = _build_backup_restore_parser(action, prog)
@@ -6225,23 +6419,7 @@ def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str
         filestore = _workspace_filestore_path(target, root, cfg, db_name)
 
         if action in ("backup-db", "backup-filestore"):
-            ext = ".dump" if action == "backup-db" else "_filestore.tar.gz"
-            output = Path(opts.output).expanduser() if opts.output else root / "odoo-backups" / f"{db_name}_{stamp}{ext}"
-            if not output.is_absolute():
-                output = root / output
-            output = output.absolute()
-            if action == "backup-db":
-                if target == "docker":
-                    command = _workspace_docker_command() + ["compose", "exec", "-T", "db", "pg_dump",
-                        "--format=custom", "--no-owner", "--no-acl", "-U", "odoo", db_name]
-                else:
-                    command = [_workspace_postgres_command("pg_dump"), "--format=custom", "--no-owner", "--no-acl", db_name]
-            else:
-                command = _workspace_tar_command(target, ["-C", str(filestore), "-czf", "-", "."])
-            _logger.info("Backing up %s to %s", action, output)
-            _workspace_temp_backup(output, command, root, env)
-            _logger.info("Backup created: %s", output)
-            return 0
+            return _backup_workspace_data(target, root, db_name, env, opts, action, stamp, filestore)
 
         if action in ("restore-db", "restore-filestore"):
             source = Path(opts.source).expanduser()
@@ -6251,126 +6429,11 @@ def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str
                 raise _WorkspaceOperationError(f"backup not found: {source}")
             source = source.resolve()
             if action == "restore-db":
-                exists = _workspace_db_exists(target, root, env, db_name)
-                if exists and not opts.force:
-                    raise _WorkspaceOperationError(f"target database '{db_name}' already exists. Use --force to replace it.")
-                if target == "venv" and not opts.move:
-                    click = root / "venv" / ("Scripts/click-odoo.exe" if os.name == "nt" else "bin/click-odoo")
-                    conf = root / "odoo-configs/odoo-server.conf"
-                    if not click.is_file() or not conf.is_file():
-                        raise _WorkspaceOperationError("--copy requires venv click-odoo and Odoo config")
-                _logger.info("Restoring database %s from %s", db_name, source)
-                if exists:
-                    drop = _workspace_db_command(target, "dropdb", "--force", "--maintenance-db=postgres", db_name)
-                    _workspace_command(drop, root, env=env)
-                _workspace_command(_workspace_db_command(target, "createdb", "--maintenance-db=postgres", db_name), root, env=env)
-                cmd = _workspace_db_command(target, "pg_restore", "--verbose", "--exit-on-error", "--no-owner", "--no-acl", "-d", db_name)
-                with source.open("rb") as stream:
-                    _workspace_command(cmd, root, env=env, stdin=stream)
-                if not opts.move:
-                    identity = 'env["ir.config_parameter"].init(force=True)\n'.encode("utf-8")
-                    if target == "docker":
-                        cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
-                            "--entrypoint", "click-odoo", "odoo", "-c", "/etc/odoo/odoo.conf",
-                            "-d", db_name, "--log-level=error"]
-                    else:
-                        cmd = [str(click), "-c", str(conf), "-d", db_name, "--log-level=error"]
-                    try:
-                        result = subprocess.run(cmd, cwd=root, env=env, input=identity, check=False)
-                    except OSError as exc:
-                        raise _WorkspaceOperationError("could not run database identity reset") from exc
-                    if result.returncode:
-                        raise _WorkspaceOperationError("database identity reset failed")
-                    reset_sql = ("DELETE FROM ir_config_parameter WHERE key = 'database.enterprise_code';\n"
-                        "UPDATE ir_config_parameter SET value = 'copy' WHERE key = 'database.expiration_reason' AND value != 'demo';\n"
-                        "UPDATE ir_config_parameter SET value = CURRENT_DATE + INTERVAL '2 month' WHERE key = 'database.expiration_date';\n").encode("utf-8")
-                    if target == "docker":
-                        sql_cmd = _workspace_docker_command() + ["compose", "exec", "-T", "db", "psql", "-v", "ON_ERROR_STOP=1", "-U", "odoo", "-d", db_name]
-                    else:
-                        sql_cmd = [_workspace_postgres_command("psql"), "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name]
-                    result = subprocess.run(sql_cmd, cwd=root, env=env, input=reset_sql, check=False)
-                    if result.returncode:
-                        raise _WorkspaceOperationError("database identity SQL reset failed")
-                _logger.info("Database restore completed: %s", db_name)
-                return 0
-
-            path = str(filestore)
-            if target == "docker":
-                exists_cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
-                    "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo",
-                    "-c", 'if [ -d "/var/lib/odoo/filestore/${DB_NAME}" ]; then echo exists; else echo missing; fi']
-                exists = _workspace_command(exists_cmd, root, capture=True).strip() == b"exists"
-            else:
-                exists = Path(path).exists()
-            if exists and not opts.force:
-                raise _WorkspaceOperationError(f"target filestore for database '{db_name}' already exists. Use --force to replace it.")
-            _logger.info("Restoring filestore for %s from %s", db_name, source)
-            if target == "docker":
-                cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T",
-                    "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
-                    'set -eu; target="/var/lib/odoo/filestore/${DB_NAME}"; rm -rf "${target}"; mkdir -p "${target}"; tar -xzf - -C "${target}"']
-                with source.open("rb") as stream:
-                    _workspace_command(cmd, root, stdin=stream)
-            else:
-                if Path(path).exists():
-                    if Path(path).is_dir() and not Path(path).is_symlink():
-                        shutil.rmtree(path)
-                    else:
-                        Path(path).unlink()
-                Path(path).mkdir(parents=True, exist_ok=True)
-                with source.open("rb") as stream:
-                    _workspace_command(["tar", "-xzf", "-", "-C", path], root, stdin=stream, env=env)
-            _logger.info("Filestore restore completed: %s", db_name)
-            return 0
+                return _restore_database(target, root, db_name, env, opts, source)
+            return _restore_filestore(target, root, db_name, env, opts, source, filestore)
 
         if action in ("backup-filestore-restic", "restore-filestore-restic", "restic"):
-            host = os.environ.get("RESTIC_HOST") or socket.getfqdn()
-            if action == "restic":
-                if not opts.restic_args:
-                    parser.error("RESTIC_COMMAND is required")
-                command = _workspace_restic_command(target, root, opts.restic_args)
-            elif action == "backup-filestore-restic":
-                extra_tags = (["--tag", f"backup-id:{os.environ['RESTIC_BACKUP_ID']}"]
-                              if os.environ.get("RESTIC_BACKUP_ID") else [])
-                command = _workspace_restic_command(target, root, ["backup", "--host", host,
-                    "--tag", "odoo", "--tag", "filestore", "--tag", f"db:{db_name}",
-                    *extra_tags, *opts.restic_args, str(filestore)])
-            else:
-                # Respect the source database name from the original backup.
-                source_db = os.environ.get("RESTIC_SOURCE_DB_NAME", db_name)
-                if len(source_db) > 63 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", source_db):
-                    raise _WorkspaceOperationError("invalid RESTIC_SOURCE_DB_NAME")
-                source_filestore = _workspace_filestore_path(target, root, cfg, source_db)
-                path = str(filestore)
-                if target == "docker":
-                    exists_cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
-                        "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo",
-                        "-c", 'if [ -d "/var/lib/odoo/filestore/${DB_NAME}" ]; then echo exists; else echo missing; fi']
-                    exists = _workspace_command(exists_cmd, root, capture=True).strip() == b"exists"
-                else:
-                    exists = Path(path).exists()
-                if exists and not opts.force:
-                    raise _WorkspaceOperationError(f"target filestore for database '{db_name}' already exists. Use --force to replace it.")
-                _logger.info("Restoring filestore for %s from Restic snapshot %s", db_name, opts.snapshot)
-                if target == "docker":
-                    cmd = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps", "-T", "--user", "0:0",
-                        "-e", f"DB_NAME={db_name}", "--entrypoint", "sh", "odoo", "-c",
-                        'set -eu; rm -rf "/var/lib/odoo/filestore/${DB_NAME}"; mkdir -p "/var/lib/odoo/filestore/${DB_NAME}"']
-                    _workspace_command(cmd, root)
-                else:
-                    if Path(path).exists():
-                        if Path(path).is_dir() and not Path(path).is_symlink():
-                            shutil.rmtree(path)
-                        else:
-                            Path(path).unlink()
-                    Path(path).mkdir(parents=True, exist_ok=True)
-                restic_args = ["restore", f"{opts.snapshot}:{source_filestore}", "--target", path]
-                if opts.snapshot == "latest":
-                    restic_args += ["--host", host, "--path", str(source_filestore)]
-                command = _workspace_restic_command(target, root, restic_args)
-            _workspace_command(command, root, env=os.environ.copy())
-            _logger.info("Restic operation completed")
-            return 0
+            return _run_restic_operation(target, root, cfg, db_name, opts, action, filestore, parser)
         parser.error("unsupported command")
     except (_WorkspaceOperationError, OSError, ValueError, configparser.Error) as exc:
         if isinstance(exc, _WorkspaceOperationError):
@@ -6382,6 +6445,10 @@ def _run_backup_restore_cli(target: str, action: str, args: list[str], prog: str
         _logger.error("Could not complete %s", action)
         return 1
 
+
+# -----------------------------
+# Odoo runtime commands
+# -----------------------------
 
 def _build_odoo_parser(action: str, prog: str) -> argparse.ArgumentParser:
     descriptions = {
@@ -6403,6 +6470,64 @@ def _build_odoo_parser(action: str, prog: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _build_docker_odoo_command(
+        action: str,
+        cfg: ProjectConfig,
+        opts: argparse.Namespace,
+        passthrough: list[str],
+) -> list[str]:
+    db_name = _docker_default_db_name(cfg)
+    docker = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps"]
+    conf = "/etc/odoo/odoo.conf"
+    if action == "run":
+        command = docker + ["odoo", "--", "-c", conf, "-d", db_name, *passthrough]
+    elif action == "shell":
+        command = docker + ["--entrypoint", "odoo", "odoo", "shell", "-c", conf, "-d", db_name, *passthrough]
+    elif action == "test":
+        command = docker + ["-T", "odoo", "--", "-c", conf, "-d", db_name,
+                            "--test-enable", "--stop-after-init", *passthrough]
+    else:
+        command = docker + ["-T", "--entrypoint", "click-odoo-update", "odoo",
+                            "-c", conf, "-d", db_name, "--log-level", "debug"]
+        if opts.all:
+            command.append("--update-all")
+        command.extend(passthrough)
+    return command
+
+
+def _build_native_odoo_command(
+        action: str,
+        root: Path,
+        cfg: ProjectConfig,
+        opts: argparse.Namespace,
+        passthrough: list[str],
+) -> list[str]:
+    layout = Layout.from_root(root)
+    conf = layout.conf_path
+    venv = root / "venv"
+    if not venv.is_dir() or not conf.is_file():
+        raise _WorkspaceOperationError("native virtualenv or Odoo config does not exist")
+    if action == "update":
+        executable = _venv_executable(venv, "click-odoo-update")
+        command = [str(executable), "-c", str(conf), "--log-level", "debug"]
+        if opts.all:
+            command.append("--update-all")
+        command.extend(passthrough)
+    else:
+        python = _venv_executable(venv, "python")
+        odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
+        if not python.is_file() or not odoo_bin.is_file():
+            raise _WorkspaceOperationError("native Odoo Python or odoo-bin not found")
+        command = [str(python), str(odoo_bin)]
+        if action == "shell":
+            command.append("shell")
+        command += ["-c", str(conf)]
+        if action == "test":
+            command += ["--test-enable", "--stop-after-init"]
+        command.extend(passthrough)
+    return command
+
+
 def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
     """Run an Odoo operation directly, preserving its terminal and exit status."""
     parser = _build_odoo_parser(action, prog)
@@ -6418,46 +6543,9 @@ def _run_odoo_cli(target: str, action: str, args: list[str], prog: str) -> int:
     try:
         cfg = load_project_config(ini, log_resolved=False, log_overrides=False)
         if target == "docker":
-            db_name = _docker_default_db_name(cfg)
-            docker = _workspace_docker_command() + ["compose", "run", "--rm", "--no-deps"]
-            conf = "/etc/odoo/odoo.conf"
-            if action == "run":
-                command = docker + ["odoo", "--", "-c", conf, "-d", db_name, *passthrough]
-            elif action == "shell":
-                command = docker + ["--entrypoint", "odoo", "odoo", "shell", "-c", conf, "-d", db_name, *passthrough]
-            elif action == "test":
-                command = docker + ["-T", "odoo", "--", "-c", conf, "-d", db_name,
-                                    "--test-enable", "--stop-after-init", *passthrough]
-            else:
-                command = docker + ["-T", "--entrypoint", "click-odoo-update", "odoo",
-                                    "-c", conf, "-d", db_name, "--log-level", "debug"]
-                if opts.all:
-                    command.append("--update-all")
-                command.extend(passthrough)
+            command = _build_docker_odoo_command(action, cfg, opts, passthrough)
         else:
-            layout = Layout.from_root(root)
-            conf = layout.conf_path
-            venv = root / "venv"
-            if not venv.is_dir() or not conf.is_file():
-                raise _WorkspaceOperationError("native virtualenv or Odoo config does not exist")
-            if action == "update":
-                executable = venv / ("Scripts/click-odoo-update.exe" if os.name == "nt" else "bin/click-odoo-update")
-                command = [str(executable), "-c", str(conf), "--log-level", "debug"]
-                if opts.all:
-                    command.append("--update-all")
-                command.extend(passthrough)
-            else:
-                python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-                odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
-                if not python.is_file() or not odoo_bin.is_file():
-                    raise _WorkspaceOperationError("native Odoo Python or odoo-bin not found")
-                command = [str(python), str(odoo_bin)]
-                if action == "shell":
-                    command.append("shell")
-                command += ["-c", str(conf)]
-                if action == "test":
-                    command += ["--test-enable", "--stop-after-init"]
-                command.extend(passthrough)
+            command = _build_native_odoo_command(action, root, cfg, opts, passthrough)
         # Inherit stdin/stdout/stderr (interactive shells, Ctrl+C and CI output).
         return subprocess.run(command, cwd=root, check=False).returncode
     except (OSError, ValueError, configparser.Error, _WorkspaceOperationError) as exc:
@@ -6647,7 +6735,7 @@ def _native_stop_process(state: dict[str, Any]) -> None:
 
 def _native_start_process(root: Path, cfg: ProjectConfig, conf: Path) -> dict[str, Any]:
     layout = Layout.from_root(root)
-    python = root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    python = _venv_executable(root / "venv", "python")
     odoo_bin = _resolve_odoo_path(layout, cfg.odoo) / "odoo-bin"
     if not python.is_file() or not odoo_bin.is_file():
         raise _WorkspaceOperationError("native Odoo Python or odoo-bin not found; run setup first")
@@ -6678,6 +6766,95 @@ def _native_start_process(root: Path, cfg: ProjectConfig, conf: Path) -> dict[st
     return state
 
 
+def _run_docker_lifecycle(action: str, root: Path, ini: Path, opts: argparse.Namespace) -> int:
+    compose = _workspace_docker_command() + ["compose"]
+    if action == "up":
+        conf = _docker_odoo_conf_path(Layout.from_root(root).docker_local_dir)
+        runtime_path = root / ".odt-env" / "docker-odoo-runtime.json"
+        try:
+            previous = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if not isinstance(previous, dict):
+                previous = {}
+        except (OSError, ValueError):
+            previous = {}
+        # Provision existing sources only; never clone repos, install packages or create a new project.
+        sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
+                     target="docker", no_provisioning_log=True)
+        new_hash = _sha256_file(conf)
+        preexisting = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                     text=True, capture_output=True, check=False)
+        if preexisting.returncode:
+            raise _WorkspaceOperationError("could not query Docker Compose Odoo container")
+        up = compose + ["up", "-d", "--wait"]
+        if opts.build:
+            up.append("--build")
+        _workspace_command(up, root)
+        current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                 text=True, capture_output=True, check=False)
+        if current.returncode or not current.stdout.strip():
+            raise _WorkspaceOperationError("could not find running Docker Compose Odoo container")
+        container_id = current.stdout.strip()
+        if (preexisting.stdout.strip() == container_id and
+                (opts.recreate or previous.get("config_sha256") != new_hash or
+                 previous.get("container_id") != container_id)):
+            # A bind-mounted odoo.conf change is invisible to Compose config hashing.
+            # Recreate only Odoo; do not restart PostgreSQL or delete its data.
+            _workspace_command(compose + ["up", "-d", "--wait", "--no-deps",
+                                          "--force-recreate", "odoo"], root)
+            current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
+                                     text=True, capture_output=True, check=False)
+            if current.returncode or not current.stdout.strip():
+                raise _WorkspaceOperationError("could not query recreated Odoo container")
+            container_id = current.stdout.strip()
+        _write_json_atomic(runtime_path, {"container_id": container_id, "config_sha256": new_hash})
+        return 0
+    if action == "down":
+        _workspace_command(compose + ["down"], root)
+        (root / ".odt-env" / "docker-odoo-runtime.json").unlink(missing_ok=True)
+        return 0
+    _workspace_command(compose + ["ps", "-a"], root)
+    return 0
+
+
+def _run_native_lifecycle(action: str, root: Path, ini: Path) -> int:
+    state_path, _, log_path = _native_runtime_paths(root)
+    if action == "status":
+        state = _native_read_process(root)
+        if state and _native_process_running(state):
+            print(f"Odoo: running (PID {state['pid']})\nLogs: {log_path}")
+        else:
+            print("Odoo: stopped" + (" (stale process state)" if state else ""))
+        return 0
+    with _native_runtime_lock(root):
+        state = _native_read_process(root)
+        running = bool(state and _native_process_running(state))
+        if action == "down":
+            if running:
+                _native_stop_process(state)
+                print("Odoo: stopped")
+            else:
+                print("Odoo: already stopped")
+            state_path.unlink(missing_ok=True)
+            return 0
+        conf = Layout.from_root(root).conf_path
+        # Native up requires a provisioned environment. Never recreate the venv.
+        if not (_venv_executable(root / "venv", "python")).is_file():
+            raise _WorkspaceOperationError("native virtualenv not found; run setup --create-venv first")
+        sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
+                     target="venv", no_provisioning_log=True)
+        if running and state.get("config_sha256") == _sha256_file(conf):
+            print(f"Odoo: already running (PID {state['pid']})")
+            return 0
+        cfg = load_project_config(ini, log_resolved=False, log_overrides=False)
+        if running:
+            _native_stop_process(state)
+            state_path.unlink(missing_ok=True)
+        elif state:
+            state_path.unlink(missing_ok=True)  # never signal a reused PID
+        _native_start_process(root, cfg, conf)
+        return 0
+
+
 def _run_lifecycle_cli(target: str, action: str, args: list[str], prog: str) -> int:
     parser = _build_lifecycle_parser(action, prog, target)
     opts = parser.parse_args(args)
@@ -6689,90 +6866,8 @@ def _run_lifecycle_cli(target: str, action: str, args: list[str], prog: str) -> 
         parser.error(f"workspace project file not found: {ini}; run setup first")
     try:
         if target == "docker":
-            compose = _workspace_docker_command() + ["compose"]
-            if action == "up":
-                conf = _docker_odoo_conf_path(Layout.from_root(root).docker_local_dir)
-                runtime_path = root / ".odt-env" / "docker-odoo-runtime.json"
-                try:
-                    previous = json.loads(runtime_path.read_text(encoding="utf-8"))
-                    if not isinstance(previous, dict):
-                        previous = {}
-                except (OSError, ValueError):
-                    previous = {}
-                # Provision existing sources only; never clone repos, install packages or create a new project.
-                sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
-                             target="docker", no_provisioning_log=True)
-                new_hash = _sha256_file(conf)
-                preexisting = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
-                                             text=True, capture_output=True, check=False)
-                if preexisting.returncode:
-                    raise _WorkspaceOperationError("could not query Docker Compose Odoo container")
-                up = compose + ["up", "-d", "--wait"]
-                if opts.build:
-                    up.append("--build")
-                _workspace_command(up, root)
-                current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
-                                         text=True, capture_output=True, check=False)
-                if current.returncode or not current.stdout.strip():
-                    raise _WorkspaceOperationError("could not find running Docker Compose Odoo container")
-                container_id = current.stdout.strip()
-                if (preexisting.stdout.strip() == container_id and
-                        (opts.recreate or previous.get("config_sha256") != new_hash or
-                         previous.get("container_id") != container_id)):
-                    # A bind-mounted odoo.conf change is invisible to Compose config hashing.
-                    # Recreate only Odoo; do not restart PostgreSQL or delete its data.
-                    _workspace_command(compose + ["up", "-d", "--wait", "--no-deps",
-                                                  "--force-recreate", "odoo"], root)
-                    current = subprocess.run(compose + ["ps", "-q", "odoo"], cwd=root,
-                                             text=True, capture_output=True, check=False)
-                    if current.returncode or not current.stdout.strip():
-                        raise _WorkspaceOperationError("could not query recreated Odoo container")
-                    container_id = current.stdout.strip()
-                _write_json_atomic(runtime_path, {"container_id": container_id, "config_sha256": new_hash})
-                return 0
-            if action == "down":
-                _workspace_command(compose + ["down"], root)
-                (root / ".odt-env" / "docker-odoo-runtime.json").unlink(missing_ok=True)
-                return 0
-            _workspace_command(compose + ["ps", "-a"], root)
-            return 0
-
-        state_path, _, log_path = _native_runtime_paths(root)
-        if action == "status":
-            state = _native_read_process(root)
-            if state and _native_process_running(state):
-                print(f"Odoo: running (PID {state['pid']})\nLogs: {log_path}")
-            else:
-                print("Odoo: stopped" + (" (stale process state)" if state else ""))
-            return 0
-        with _native_runtime_lock(root):
-            state = _native_read_process(root)
-            running = bool(state and _native_process_running(state))
-            if action == "down":
-                if running:
-                    _native_stop_process(state)
-                    print("Odoo: stopped")
-                else:
-                    print("Odoo: already stopped")
-                state_path.unlink(missing_ok=True)
-                return 0
-            conf = Layout.from_root(root).conf_path
-            # Native up requires a provisioned environment. Never recreate the venv.
-            if not (root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")).is_file():
-                raise _WorkspaceOperationError("native virtualenv not found; run setup --create-venv first")
-            sync_project(ini, sync_odoo=False, sync_addons=False, root_override=root,
-                         target="venv", no_provisioning_log=True)
-            if running and state.get("config_sha256") == _sha256_file(conf):
-                print(f"Odoo: already running (PID {state['pid']})")
-                return 0
-            cfg = load_project_config(ini, log_resolved=False, log_overrides=False)
-            if running:
-                _native_stop_process(state)
-                state_path.unlink(missing_ok=True)
-            elif state:
-                state_path.unlink(missing_ok=True)  # never signal a reused PID
-            _native_start_process(root, cfg, conf)
-            return 0
+            return _run_docker_lifecycle(action, root, ini, opts)
+        return _run_native_lifecycle(action, root, ini)
     except (OSError, ValueError, configparser.Error, _WorkspaceOperationError) as exc:
         _logger.error("Could not %s workspace: %s", action, exc)
         return 1
@@ -7114,217 +7209,29 @@ def _run_completion_cli(args: list[str]) -> int:
             "": build_parser(workflow_prog, target),
             "setup": build_parser(f"{workflow_prog} setup", target, setup_command=True),
             **{name: _build_lifecycle_parser(name, workflow_prog, target)
-               for name in ("up", "down", "status")},
+               for name in _LIFECYCLE_COMMANDS},
             **{name: _build_odoo_parser(name, workflow_prog)
-               for name in ("run", "shell", "update", "test")},
+               for name in _ODOO_COMMANDS},
             "neutralize": _build_neutralize_parser(workflow_prog),
             **{name: _build_backup_restore_parser(name, workflow_prog)
-               for name in _BACKUP_RESTORE_SCRIPT_NAMES},
+               for name in _BACKUP_RESTORE_COMMANDS},
         }
     print(_generate_completion(opts.shell, prog, _CLI_COMMANDS,
                                collect('docker'), collect('venv')), end="")
     return 0
 
 
-def main() -> None:
-    """Dispatch workspace commands only after an explicit workflow selection."""
-    argv = sys.argv[1:]
-    if not argv or argv[0] not in ("docker", "venv"):
-        parser = build_parser()
-        if not argv:
-            parser.print_help()
-            return
-        if argv[0] in ("--help", "-h", "--version"):
-            parser.parse_args(argv)
-            return
-        if argv[0] == "completion":
-            raise SystemExit(_run_completion_cli(argv[1:]))
-        if argv[0] in _CLI_COMMANDS_NAMES:
-            parser.error(
-                "Missing workflow: use 'odoo-compose docker " + argv[0] +
-                "' or 'odoo-compose venv " + argv[0] + "'."
-            )
-        parser.error("Expected workflow 'docker' or 'venv' before the command.")
+# -----------------------------
+# Setup CLI and main entry point
+# -----------------------------
 
-    target = argv[0]
-    prog = f"odoo-compose {target}"
-    original_argv = sys.argv[:]
-    sys.argv.pop(1)
-
-    # Standard logging to stdout only.
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stdout,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    # --help, --version and completion should remain clean and side-effect free.
-    if (sys.argv[1:2] and sys.argv[1] in _CLI_COMMANDS_NAMES
-            and not any(flag in sys.argv[2:] for flag in ("--help", "-h", "--version"))):
-        _logger.info("Workflow: %s (explicit)", target)
-    if sys.argv[1:2] and sys.argv[1] in ("up", "down", "status"):
-        raise SystemExit(_run_lifecycle_cli(target, sys.argv[1], sys.argv[2:], prog))
-    if sys.argv[1:2] and sys.argv[1] in ("run", "shell", "update", "test"):
-        raise SystemExit(_run_odoo_cli(target, sys.argv[1], sys.argv[2:], prog))
-    if sys.argv[1:2] == ["neutralize"]:
-        raise SystemExit(_run_neutralize_cli(target, sys.argv[2:], prog))
-    if sys.argv[1:2] and sys.argv[1] in _BACKUP_RESTORE_SCRIPT_NAMES:
-        raise SystemExit(_run_backup_restore_cli(target, sys.argv[1], sys.argv[2:], prog))
-    # All workspace provisioning is explicitly dispatched through `setup`.
-    # Plain invocations only print CLI help, and never touch the workspace.
-    if sys.argv[1:2] != ["setup"]:
-        parser = build_parser(prog=prog, target=target)
-        if len(sys.argv) == 1:
-            parser.print_help()
-            return
-        parser.parse_args(sys.argv[1:])
-        parser.print_help()
-        return
-
-    parser = build_parser(prog=f"{prog} setup", target=target, setup_command=True)
-    args = parser.parse_args(sys.argv[2:])
-
-    # `setup ROOT` creates or reuses ROOT/odoo-project.ini, while an INI file,
-    # Git-backed INI, or URL remains an explicit project definition source.
-    source = (args.source or "").strip()
-    setup_root_raw = ""
-    args.ini = None
-    if source:
-        candidate = Path(source).expanduser()
-        if (source.startswith("git+") or "://" in source or
-                (candidate.is_file() or (not candidate.is_dir() and candidate.suffix.lower() == ".ini"))):
-            args.ini = source
-        else:
-            setup_root_raw = source
-
-    if setup_root_raw and args.root:
-        parser.error("workspace ROOT was specified both as setup ROOT and --root; use only one of them.")
-    if setup_root_raw:
-        args.root = setup_root_raw
-
-    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
-        parser.error("--create-from-bundle cannot be used together with --show-last-run.")
-    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
-        parser.error("--create-bundle cannot be used together with --show-last-run.")
-
-    if bool(getattr(args, 'show_last_run', False)):
-        root = _root_for_show_last_run(parser, args)
-        try:
-            _show_last_run(root)
-        except Exception as e:
-            print(f"{parser.prog}: error: {e}", file=sys.stderr)
-            raise SystemExit(1)
-        return
-
-    clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
-    create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
-    reuse_wheelhouse = create_venv_from_wheelhouse
-    create_venv = bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse
-    no_configs = bool(getattr(args, 'no_configs', False))
-    no_data_dir = bool(getattr(args, 'no_data_dir', False))
-    create_docker_deploy_requested = bool(getattr(args, 'create_docker_deploy', False))
-    no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
-    create_bundle_raw = getattr(args, 'create_bundle', None)
-    create_from_bundle_raw = getattr(args, 'create_from_bundle', None)
-    allow_dirty_bundle = bool(getattr(args, 'allow_dirty_bundle', False))
-
-    if allow_dirty_bundle and create_bundle_raw is None:
-        parser.error("--allow-dirty-bundle requires --create-bundle.")
-
-    try:
-        vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
-        ini_overrides = _parse_cli_ini_overrides(getattr(args, 'ini_overrides', []) or [])
-    except Exception as e:
-        parser.error(str(e))
-
-    if create_from_bundle_raw:
-        non_config_sections = sorted(section for section in ini_overrides if section != "config")
-        if non_config_sections:
-            parser.error(
-                "--create-from-bundle only allows --set overrides in [config]; "
-                "unsupported sections: " + ", ".join(non_config_sections)
-            )
-
-    if vars_overrides:
-        _logger.info('CLI [vars] overrides enabled for keys: %s', ', '.join(sorted(vars_overrides)))
-    if ini_overrides:
-        override_targets = [f"{section}:{key}" for section, options in ini_overrides.items() for key in options]
-        _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
-
-    if create_from_bundle_raw:
-        conflicting_options: list[str] = []
-        if (args.ini or "").strip():
-            conflicting_options.append("INI")
-        if getattr(args, 'include_inis', None):
-            conflicting_options.append("--include")
-        if args.sync or args.all or args.odoo or args.addons:
-            conflicting_options.append("--sync*")
-        if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
-            conflicting_options.append("--create-venv*")
-        if clear_pip_wheel_cache:
-            conflicting_options.append("--clear-pip-wheel-cache")
-        if create_docker_deploy_requested:
-            conflicting_options.append("--create-docker-deploy")
-        if create_bundle_raw is not None:
-            conflicting_options.append("--create-bundle")
-        if allow_dirty_bundle:
-            conflicting_options.append("--allow-dirty-bundle")
-        if conflicting_options:
-            parser.error(
-                "--create-from-bundle cannot be combined with: "
-                + ", ".join(conflicting_options)
-            )
-
-        if args.root:
-            bundle_root = _validate_root_override(parser, args.root)
-        else:
-            try:
-                bundle_root = Path.cwd().resolve()
-            except Exception:
-                bundle_root = Path.cwd().absolute()
-
-        bundle_path = Path(create_from_bundle_raw).expanduser()
-        if not bundle_path.is_absolute():
-            bundle_path = Path.cwd() / bundle_path
-
-        try:
-            ini_path, _bundle_manifest = extract_workspace_bundle(bundle_path, bundle_root)
-            if vars_overrides or ini_overrides:
-                _save_workspace_ini_overrides(
-                    ini_path, ini_path, vars_overrides, ini_overrides,
-                )
-            sync_project(
-                ini_path,
-                sync_odoo=False,
-                sync_addons=False,
-                root_override=bundle_root,
-                reuse_wheelhouse=True,
-                create_venv=True,
-                clear_pip_wheel_cache=False,
-                no_configs=no_configs,
-                no_data_dir=no_data_dir,
-                # Bundle import is the offline deployment path. Local-development
-                # Docker artifacts intentionally require online dependency resolution
-                # and can be generated later by a normal odoo-compose docker run.
-                target="venv",
-                create_docker_deploy_requested=False,
-                bundle_output=None,
-                allow_dirty_bundle=False,
-                vars_overrides=vars_overrides,
-                ini_overrides=ini_overrides,
-                no_provisioning_log=no_provisioning_log,
-                cli_argv=original_argv,
-                source_ini_layers=[_path_for_report(bundle_path)],
-                project_ini_status=(
-                    f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from workspace bundle "
-                    f"{_path_for_report(bundle_path)}"
-                ),
-                source_snapshot_ready=bool(vars_overrides or ini_overrides),
-            )
-        except Exception as e:
-            _logger.error('%s', e)
-            raise SystemExit(1)
-        return
-
+def _prepare_setup_source(
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        target: str,
+        vars_overrides: dict[str, str],
+        ini_overrides: dict[str, dict[str, str]],
+) -> tuple[Path, Optional[Path], list[str], Optional[str], Optional[str], bool]:
     root_override: Optional[Path] = None
     include_inis = [item for item in (getattr(args, 'include_inis', []) or []) if (item or "").strip()]
     has_positional_ini = bool((args.ini or "").strip())
@@ -7527,6 +7434,16 @@ def main() -> None:
                     f"explicit local INI source was used; no existing ROOT/{_DEFAULT_PROJECT_INI_NAME}"
                 )
 
+    return ini_path, root_override, source_ini_layers, project_ini_status, preserved_db_name, source_snapshot_ready
+
+
+def _select_sync_targets(
+        args: argparse.Namespace,
+        target: str,
+        ini_path: Path,
+        vars_overrides: dict[str, str],
+        ini_overrides: dict[str, dict[str, str]],
+) -> tuple[bool, bool]:
     if args.sync:
         # Select only the Git sources required by the effective workspace.
         # Use the merged/resolved INI so --include, --set and -e affect selection.
@@ -7556,6 +7473,162 @@ def main() -> None:
     else:
         # No sync target selected -> regenerate workspace artifacts without syncing repositories.
         sync_odoo, sync_addons = False, False
+
+    return sync_odoo, sync_addons
+
+
+def _run_setup_cli(target: str, argv: list[str], prog: str, original_argv: list[str]) -> None:
+    parser = build_parser(prog=f"{prog} setup", target=target, setup_command=True)
+    args = parser.parse_args(argv)
+
+    # `setup ROOT` creates or reuses ROOT/odoo-project.ini, while an INI file,
+    # Git-backed INI, or URL remains an explicit project definition source.
+    source = (args.source or "").strip()
+    setup_root_raw = ""
+    args.ini = None
+    if source:
+        candidate = Path(source).expanduser()
+        if (source.startswith("git+") or "://" in source or
+                (candidate.is_file() or (not candidate.is_dir() and candidate.suffix.lower() == ".ini"))):
+            args.ini = source
+        else:
+            setup_root_raw = source
+
+    if setup_root_raw and args.root:
+        parser.error("workspace ROOT was specified both as setup ROOT and --root; use only one of them.")
+    if setup_root_raw:
+        args.root = setup_root_raw
+
+    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_from_bundle', None):
+        parser.error("--create-from-bundle cannot be used together with --show-last-run.")
+    if bool(getattr(args, 'show_last_run', False)) and getattr(args, 'create_bundle', None) is not None:
+        parser.error("--create-bundle cannot be used together with --show-last-run.")
+
+    if bool(getattr(args, 'show_last_run', False)):
+        root = _root_for_show_last_run(parser, args)
+        try:
+            _show_last_run(root)
+        except Exception as e:
+            print(f"{parser.prog}: error: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        return
+
+    clear_pip_wheel_cache = bool(getattr(args, 'clear_pip_wheel_cache', False))
+    create_venv_from_wheelhouse = bool(getattr(args, 'create_venv_from_wheelhouse', False))
+    reuse_wheelhouse = create_venv_from_wheelhouse
+    create_venv = bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse
+    no_configs = bool(getattr(args, 'no_configs', False))
+    no_data_dir = bool(getattr(args, 'no_data_dir', False))
+    create_docker_deploy_requested = bool(getattr(args, 'create_docker_deploy', False))
+    no_provisioning_log = bool(getattr(args, 'no_provisioning_log', False))
+    create_bundle_raw = getattr(args, 'create_bundle', None)
+    create_from_bundle_raw = getattr(args, 'create_from_bundle', None)
+    allow_dirty_bundle = bool(getattr(args, 'allow_dirty_bundle', False))
+
+    if allow_dirty_bundle and create_bundle_raw is None:
+        parser.error("--allow-dirty-bundle requires --create-bundle.")
+
+    try:
+        vars_overrides = _parse_cli_vars(getattr(args, 'extra_vars', []) or [])
+        ini_overrides = _parse_cli_ini_overrides(getattr(args, 'ini_overrides', []) or [])
+    except Exception as e:
+        parser.error(str(e))
+
+    if create_from_bundle_raw:
+        non_config_sections = sorted(section for section in ini_overrides if section != "config")
+        if non_config_sections:
+            parser.error(
+                "--create-from-bundle only allows --set overrides in [config]; "
+                "unsupported sections: " + ", ".join(non_config_sections)
+            )
+
+    if vars_overrides:
+        _logger.info('CLI [vars] overrides enabled for keys: %s', ', '.join(sorted(vars_overrides)))
+    if ini_overrides:
+        override_targets = [f"{section}:{key}" for section, options in ini_overrides.items() for key in options]
+        _logger.info('CLI INI overrides enabled for keys: %s', ', '.join(sorted(override_targets)))
+
+    if create_from_bundle_raw:
+        conflicting_options: list[str] = []
+        if (args.ini or "").strip():
+            conflicting_options.append("INI")
+        if getattr(args, 'include_inis', None):
+            conflicting_options.append("--include")
+        if args.sync or args.all or args.odoo or args.addons:
+            conflicting_options.append("--sync*")
+        if bool(getattr(args, 'create_venv', False)) or create_venv_from_wheelhouse:
+            conflicting_options.append("--create-venv*")
+        if clear_pip_wheel_cache:
+            conflicting_options.append("--clear-pip-wheel-cache")
+        if create_docker_deploy_requested:
+            conflicting_options.append("--create-docker-deploy")
+        if create_bundle_raw is not None:
+            conflicting_options.append("--create-bundle")
+        if allow_dirty_bundle:
+            conflicting_options.append("--allow-dirty-bundle")
+        if conflicting_options:
+            parser.error(
+                "--create-from-bundle cannot be combined with: "
+                + ", ".join(conflicting_options)
+            )
+
+        if args.root:
+            bundle_root = _validate_root_override(parser, args.root)
+        else:
+            try:
+                bundle_root = Path.cwd().resolve()
+            except Exception:
+                bundle_root = Path.cwd().absolute()
+
+        bundle_path = Path(create_from_bundle_raw).expanduser()
+        if not bundle_path.is_absolute():
+            bundle_path = Path.cwd() / bundle_path
+
+        try:
+            ini_path, _bundle_manifest = extract_workspace_bundle(bundle_path, bundle_root)
+            if vars_overrides or ini_overrides:
+                _save_workspace_ini_overrides(
+                    ini_path, ini_path, vars_overrides, ini_overrides,
+                )
+            sync_project(
+                ini_path,
+                sync_odoo=False,
+                sync_addons=False,
+                root_override=bundle_root,
+                reuse_wheelhouse=True,
+                create_venv=True,
+                clear_pip_wheel_cache=False,
+                no_configs=no_configs,
+                no_data_dir=no_data_dir,
+                # Bundle import is the offline deployment path. Local-development
+                # Docker artifacts intentionally require online dependency resolution
+                # and can be generated later by a normal odoo-compose docker run.
+                target="venv",
+                create_docker_deploy_requested=False,
+                bundle_output=None,
+                allow_dirty_bundle=False,
+                vars_overrides=vars_overrides,
+                ini_overrides=ini_overrides,
+                no_provisioning_log=no_provisioning_log,
+                cli_argv=original_argv,
+                source_ini_layers=[_path_for_report(bundle_path)],
+                project_ini_status=(
+                    f"created ROOT/{_DEFAULT_PROJECT_INI_NAME} from workspace bundle "
+                    f"{_path_for_report(bundle_path)}"
+                ),
+                source_snapshot_ready=bool(vars_overrides or ini_overrides),
+            )
+        except Exception as e:
+            _logger.error('%s', e)
+            raise SystemExit(1)
+        return
+
+    (ini_path, root_override, source_ini_layers, project_ini_status,
+     preserved_db_name, source_snapshot_ready) = _prepare_setup_source(
+        parser, args, target, vars_overrides, ini_overrides,
+    )
+
+    sync_odoo, sync_addons = _select_sync_targets(args, target, ini_path, vars_overrides, ini_overrides)
 
     workspace_root = (root_override or ini_path.parent).resolve()
     bundle_output = (
@@ -7591,6 +7664,63 @@ def main() -> None:
     except Exception as e:
         _logger.error(f'{e}')
         raise SystemExit(1)
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    """Dispatch workspace commands only after an explicit workflow selection."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] not in ("docker", "venv"):
+        parser = build_parser()
+        if not argv:
+            parser.print_help()
+            return
+        if argv[0] in ("--help", "-h", "--version"):
+            parser.parse_args(argv)
+            return
+        if argv[0] == "completion":
+            raise SystemExit(_run_completion_cli(argv[1:]))
+        if argv[0] in _CLI_COMMANDS_NAMES:
+            parser.error(
+                "Missing workflow: use 'odoo-compose docker " + argv[0] +
+                "' or 'odoo-compose venv " + argv[0] + "'."
+            )
+        parser.error("Expected workflow 'docker' or 'venv' before the command.")
+
+    target = argv[0]
+    prog = f"odoo-compose {target}"
+    original_argv = [sys.argv[0], *argv]
+    argv = argv[1:]
+
+    # Standard logging to stdout only.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    # --help, --version and completion should remain clean and side-effect free.
+    if (argv[:1] and argv[0] in _CLI_COMMANDS_NAMES
+            and not any(flag in argv[1:] for flag in ("--help", "-h", "--version"))):
+        _logger.info("Workflow: %s (explicit)", target)
+    if argv[:1] and argv[0] in _LIFECYCLE_COMMANDS:
+        raise SystemExit(_run_lifecycle_cli(target, argv[0], argv[1:], prog))
+    if argv[:1] and argv[0] in _ODOO_COMMANDS:
+        raise SystemExit(_run_odoo_cli(target, argv[0], argv[1:], prog))
+    if argv[:1] == ["neutralize"]:
+        raise SystemExit(_run_neutralize_cli(target, argv[1:], prog))
+    if argv[:1] and argv[0] in _BACKUP_RESTORE_COMMANDS:
+        raise SystemExit(_run_backup_restore_cli(target, argv[0], argv[1:], prog))
+    # All workspace provisioning is explicitly dispatched through `setup`.
+    # Plain invocations only print CLI help, and never touch the workspace.
+    if argv[:1] != ["setup"]:
+        parser = build_parser(prog=prog, target=target)
+        if not argv:
+            parser.print_help()
+            return
+        parser.parse_args(argv)
+        parser.print_help()
+        return
+
+    _run_setup_cli(target, argv[1:], prog, original_argv)
 
 
 if __name__ == "__main__":
