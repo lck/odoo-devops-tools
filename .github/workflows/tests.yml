@@ -31,7 +31,7 @@ jobs:
         run: docker info && docker compose version
       - name: Prepare Windows PostgreSQL
         if: runner.os == 'Windows'
-        uses: ikalnytskyi/action-setup-postgres@v8
+        uses: ikalnytskyi/action-setup-postgres@v9
         with:
           username: odoo
           password: odoo
